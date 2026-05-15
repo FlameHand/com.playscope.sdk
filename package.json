@@ -4,21 +4,22 @@
   "displayName": "PlayScope SDK",
   "description": "Event pipeline, local storage, and upload for PlayScope session recording.",
   "unity": "2021.3",
-  "unityRelease": "0f1",
-  "documentationUrl": "",
-  "changelogUrl": "",
-  "licensesUrl": "",
   "dependencies": {
     "com.cysharp.unitask": "2.3.3"
   },
   "keywords": [
     "playscope",
     "analytics",
-    "session"
+    "session",
+    "diagnostics"
   ],
   "author": {
     "name": "PlayScope",
     "email": "",
+    "url": ""
+  },
+  "repository": {
+    "type": "git",
     "url": ""
   }
 }
