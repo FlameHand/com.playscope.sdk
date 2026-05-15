@@ -15,7 +15,10 @@ namespace PlayScopeSdk
         /// Subsequent calls are a warning + no-op — the first call wins.
         /// </summary>
         /// <param name="context">Configuration including API key and optional settings.</param>
-        public static void Initialize(PlayScopeContext context) { }
+        public static void Initialize(PlayScopeContext context)
+        {
+            Internal.PlayScopeRuntime.Initialize(context);
+        }
 
         /// <summary>
         /// Associates the current session with a user identity.
