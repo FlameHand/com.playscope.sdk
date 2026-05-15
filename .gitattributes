@@ -1,0 +1,45 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Unity YAML
+*.meta text eol=lf merge=unityyamlmerge diff=unity
+*.unity text eol=lf merge=unityyamlmerge diff=unity
+*.asset text eol=lf merge=unityyamlmerge diff=unity
+*.prefab text eol=lf merge=unityyamlmerge diff=unity
+*.anim text eol=lf merge=unityyamlmerge diff=unity
+*.controller text eol=lf merge=unityyamlmerge diff=unity
+*.overrideController text eol=lf merge=unityyamlmerge diff=unity
+*.physicMaterial text eol=lf merge=unityyamlmerge diff=unity
+*.physicsMaterial2D text eol=lf merge=unityyamlmerge diff=unity
+*.playable text eol=lf merge=unityyamlmerge diff=unity
+*.mask text eol=lf merge=unityyamlmerge diff=unity
+*.brush text eol=lf merge=unityyamlmerge diff=unity
+*.flare text eol=lf merge=unityyamlmerge diff=unity
+*.fontsettings text eol=lf merge=unityyamlmerge diff=unity
+*.giparams text eol=lf merge=unityyamlmerge diff=unity
+*.renderTexture text eol=lf merge=unityyamlmerge diff=unity
+*.spriteatlas text eol=lf merge=unityyamlmerge diff=unity
+*.terrainlayer text eol=lf merge=unityyamlmerge diff=unity
+*.mixer text eol=lf merge=unityyamlmerge diff=unity
+*.shadergraph text eol=lf merge=unityyamlmerge diff=unity
+*.shadersubgraph text eol=lf merge=unityyamlmerge diff=unity
+
+# C#
+*.cs text eol=lf diff=csharp
+*.asmdef text eol=lf
+*.asmref text eol=lf
+
+# Binary
+*.dll binary
+*.exe binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.psd binary
+*.pdf binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.fbx binary
+*.obj binary
