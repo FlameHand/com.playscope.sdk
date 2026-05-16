@@ -33,14 +33,20 @@ namespace PlayScopeSdk
         /// Second call is a warning + ignored — use <see cref="UpdateState"/> for incremental changes.
         /// </summary>
         /// <param name="state">Full state dictionary (e.g. level, currency, inventory).</param>
-        public static void SetInitialState(IReadOnlyDictionary<string, object> state) { }
+        public static void SetInitialState(IReadOnlyDictionary<string, object> state)
+        {
+            state = Internal.SensitiveKeyFilter.FilterState(state);
+        }
 
         /// <summary>
         /// Applies a partial patch to the current game state.
         /// Only the provided keys are updated; unmentioned keys remain unchanged.
         /// </summary>
         /// <param name="patch">Dictionary of keys to update in the current state.</param>
-        public static void UpdateState(IReadOnlyDictionary<string, object> patch) { }
+        public static void UpdateState(IReadOnlyDictionary<string, object> patch)
+        {
+            patch = Internal.SensitiveKeyFilter.FilterState(patch);
+        }
 
         /// <summary>
         /// Records a screen/scene navigation event.
@@ -67,7 +73,10 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional attributes to attach at start time.</param>
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartOperation(OperationType type, string operationName, IReadOnlyDictionary<string, object> metadata = null)
-            => string.Empty;
+        {
+            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
+            return string.Empty;
+        }
 
         /// <summary>
         /// Completes a previously started operation and records its outcome.
@@ -76,7 +85,10 @@ namespace PlayScopeSdk
         /// <param name="operationId">ID returned by the corresponding <see cref="StartOperation"/> call.</param>
         /// <param name="status">Final outcome of the operation.</param>
         /// <param name="metadata">Optional attributes to attach at completion time.</param>
-        public static void CompleteOperation(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void CompleteOperation(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
+        {
+            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
+        }
 
         // ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -167,7 +179,10 @@ namespace PlayScopeSdk
         /// <param name="level">Severity level of the log entry.</param>
         /// <param name="message">Log message text.</param>
         /// <param name="metadata">Optional structured attributes for this log entry.</param>
-        public static void TrackLog(LogLevel level, string message, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void TrackLog(LogLevel level, string message, IReadOnlyDictionary<string, object> metadata = null)
+        {
+            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
+        }
 
         /// <summary>
         /// Tracks a caught exception with optional structured metadata.
@@ -175,6 +190,9 @@ namespace PlayScopeSdk
         /// </summary>
         /// <param name="exception">The exception to record.</param>
         /// <param name="metadata">Optional contextual attributes (e.g. context, user_action).</param>
-        public static void TrackException(System.Exception exception, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void TrackException(System.Exception exception, IReadOnlyDictionary<string, object> metadata = null)
+        {
+            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
+        }
     }
 }

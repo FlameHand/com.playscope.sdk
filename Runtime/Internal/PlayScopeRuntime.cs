@@ -24,6 +24,9 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
+            // Reset sensitive-key filter warnings for the new session
+            SensitiveKeyFilter.ResetWarnings();
+
             // Step 1: Validate ApiKey
             if (string.IsNullOrWhiteSpace(context?.ApiKey))
             {
