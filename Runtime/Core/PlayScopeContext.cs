@@ -30,9 +30,9 @@ namespace PlayScopeSdk
         public IReadOnlyDictionary<string, object> Metadata { get; set; }
 
         /// <summary>
-        /// Base URL for the PlayScope ingest API. Defaults to "https://api.playscope.io".
+        /// Base URL for the PlayScope ingest API. Defaults to "https://api.playscope.dev".
         /// Override only for on-premise or staging deployments.
         /// </summary>
-        public string UploadEndpoint { get; set; } = "https://api.playscope.io";
+        public string UploadEndpoint { get; set; } = "https://api.playscope.dev";
     }
 }

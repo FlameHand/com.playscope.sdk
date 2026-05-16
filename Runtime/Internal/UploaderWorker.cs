@@ -169,7 +169,7 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            var endpoint = (_context.UploadEndpoint?.TrimEnd('/') ?? "https://api.playscope.io") + "/v1/ingest";
+            var endpoint = (_context.UploadEndpoint?.TrimEnd('/') ?? "https://api.playscope.dev") + "/v1/ingest";
 
             state.Attempts++;
             state.LastAttemptAt = DateTime.UtcNow;
