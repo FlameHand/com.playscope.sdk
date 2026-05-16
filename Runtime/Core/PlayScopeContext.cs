@@ -28,5 +28,11 @@ namespace PlayScopeSdk
         /// Optional session-start metadata (app_version, build_number, environment, platform, etc.).
         /// </summary>
         public IReadOnlyDictionary<string, object> Metadata { get; set; }
+
+        /// <summary>
+        /// Base URL for the PlayScope ingest API. Defaults to "https://api.playscope.io".
+        /// Override only for on-premise or staging deployments.
+        /// </summary>
+        public string UploadEndpoint { get; set; } = "https://api.playscope.io";
     }
 }

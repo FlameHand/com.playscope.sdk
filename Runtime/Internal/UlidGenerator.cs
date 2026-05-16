@@ -16,7 +16,8 @@ namespace PlayScopeSdk.Internal
             Span<char> result = stackalloc char[26];
             // encode timestamp (10 chars)
             for (int i = 9; i >= 0; i--) { result[i] = Chars[now & 31]; now >>= 5; }
-            // encode random (16 chars)
+            // encode random (16 chars); & 31 uses the low 5 bits of each byte — 80 bits total,
+            // which is exactly the ULID spec's random component requirement.
             for (int i = 10; i < 26; i++) result[i] = Chars[rand[i - 10] & 31];
             return "evt_" + new string(result);
         }

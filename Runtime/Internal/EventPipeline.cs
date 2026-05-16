@@ -100,6 +100,19 @@ namespace PlayScopeSdk.Internal
             if (v is int or long or float or double or decimal) return Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
             if (v is IReadOnlyDictionary<string, object> d) return DictToJson(d);
             if (v is Dictionary<string, object> dd) return DictToJson(dd);
+            if (v is System.Collections.IList list)
+            {
+                var sb2 = new StringBuilder("[");
+                bool firstItem = true;
+                foreach (var item in list)
+                {
+                    if (!firstItem) sb2.Append(',');
+                    sb2.Append(ValueToJson(item));
+                    firstItem = false;
+                }
+                sb2.Append(']');
+                return sb2.ToString();
+            }
             return "\"" + v.ToString()?.Replace("\"", "\\\"") + "\"";
         }
     }

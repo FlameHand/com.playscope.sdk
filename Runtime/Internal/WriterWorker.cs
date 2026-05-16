@@ -24,6 +24,12 @@ namespace PlayScopeSdk.Internal
         private const double FlushIntervalSeconds = 2.0;
         private const long BatchSplitBytes = 1_048_576; // 1 MB
 
+        /// <summary>
+        /// Optional callback invoked whenever a chunk is finalized due to a critical record.
+        /// Used by PlayScopeRuntime to trigger an instant upload cycle.
+        /// </summary>
+        internal Action? OnCriticalChunkFinalized;
+
         internal WriterWorker(EventQueue queue, UploadQueue uploadQueue, SessionInfo session)
         {
             _queue = queue;
@@ -43,11 +49,14 @@ namespace PlayScopeSdk.Internal
             _cts?.Cancel();
         }
 
-        // Called from OnApplicationPause or shutdown — drain + flush synchronously
+        // Called from OnApplicationPause or shutdown — drain, flush, and finalize the chunk so
+        // the data is renamed out of chunk_current.jsonl and queued for upload before the OS
+        // can kill a backgrounded app.
         internal void FlushImmediate()
         {
             _queue.DrainAll(_buffer);
             if (_buffer.Count > 0) FlushBuffer();
+            FinalizeChunk();
         }
 
         // Called from shutdown sequence: drain, flush, finalize
@@ -56,6 +65,7 @@ namespace PlayScopeSdk.Internal
             _queue.DrainAll(_buffer);
             FlushBuffer();
             FinalizeChunk();
+            StorageQuotaManager.EnforceQuota();
         }
 
         private async UniTask RunAsync(CancellationToken ct)
@@ -80,7 +90,12 @@ namespace PlayScopeSdk.Internal
                 if (sizeTriggered || timeTriggered || hasCritical)
                 {
                     FlushBuffer();
-                    if (hasCritical) FinalizeChunk();
+                    if (hasCritical)
+                    {
+                        FinalizeChunk();
+                        StorageQuotaManager.EnforceQuota();
+                        OnCriticalChunkFinalized?.Invoke();
+                    }
                 }
             }
         }
@@ -88,6 +103,21 @@ namespace PlayScopeSdk.Internal
         private void FlushBuffer()
         {
             if (_buffer.Count == 0) return;
+
+            // Hard-cap check: trim lowest-priority records before writing to disk
+            if (StorageQuotaManager.IsHardCapExceeded())
+            {
+                var (kept, dropped) = StorageQuotaManager.TrimBuffer(_buffer);
+                // TrimBuffer mutates the list in-place and returns the same reference;
+                // re-assign for clarity in case implementation changes.
+                _buffer.Clear();
+                _buffer.AddRange(kept);
+                if (dropped > 0)
+                    Debug.LogWarning($"[PlayScope] Hard storage cap exceeded — trimmed {dropped} buffered record(s) before flush.");
+            }
+
+            if (_buffer.Count == 0) return;
+
             var sb = new StringBuilder();
             foreach (var r in _buffer)
             {
@@ -108,8 +138,12 @@ namespace PlayScopeSdk.Internal
                 Debug.LogWarning("[PlayScope] Failed to write chunk: " + ex.Message);
             }
 
-            // Batch splitting: >1MB → finalize
-            if (_currentChunkSize >= BatchSplitBytes) FinalizeChunk();
+            // Batch splitting: >1MB → finalize, then enforce storage quota
+            if (_currentChunkSize >= BatchSplitBytes)
+            {
+                FinalizeChunk();
+                StorageQuotaManager.EnforceQuota();
+            }
         }
 
         private void FinalizeChunk()
@@ -161,8 +195,8 @@ namespace PlayScopeSdk.Internal
             Append(sb, "event_id", r.EventId);
             sb.Append(",\"sequence_num\":").Append(r.SequenceNum);
             Append(sb, "timestamp", r.Timestamp);
-            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", r.ScreenName!);
-            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", r.ActionName!);
+            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", EscapeString(r.ScreenName!));
+            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", EscapeString(r.ActionName!));
             if (!string.IsNullOrEmpty(r.OperationId)) Append(sb, "operation_id", r.OperationId!);
             if (!string.IsNullOrEmpty(r.OperationType)) Append(sb, "operation_type", r.OperationType!);
             if (!string.IsNullOrEmpty(r.MetadataJson)) sb.Append(",\"metadata\":").Append(r.MetadataJson);
@@ -181,8 +215,8 @@ namespace PlayScopeSdk.Internal
             Append(sb, "level", r.Level ?? "info");
             Append(sb, "message", EscapeString(r.Message ?? ""));
             if (!string.IsNullOrEmpty(r.StackTrace)) Append(sb, "stack_trace", EscapeString(r.StackTrace!));
-            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", r.ScreenName!);
-            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", r.ActionName!);
+            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", EscapeString(r.ScreenName!));
+            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", EscapeString(r.ActionName!));
             if (!string.IsNullOrEmpty(r.MetadataJson)) sb.Append(",\"metadata\":").Append(r.MetadataJson);
             sb.Append('}');
             return sb.ToString();

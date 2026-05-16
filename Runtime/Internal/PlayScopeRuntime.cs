@@ -6,6 +6,8 @@ namespace PlayScopeSdk.Internal
 {
     internal static class PlayScopeRuntime
     {
+        internal const string SdkVersion = "0.1.0";
+
         private static volatile bool _initialized;
         private static volatile bool _disabled;
 
@@ -20,6 +22,7 @@ namespace PlayScopeSdk.Internal
         internal static UploadQueue? UploadQueue { get; private set; }
         private static WriterWorker? _writer;
         private static HeartbeatWorker? _heartbeat;
+        internal static UploaderWorker? _uploader;
 
         // Called by PlayScope.Initialize()
         internal static void Initialize(PlayScopeContext context)
@@ -47,17 +50,14 @@ namespace PlayScopeSdk.Internal
             // Step 3: Load or create device identity
             Device = DeviceIdentity.LoadOrCreate();
 
-            // Step 4: Check for previous session lock (recovery — PSDK-12 will implement full recovery)
-            if (SessionFiles.HasPreviousSessionLock())
-            {
-                var prevSessionId = SessionFiles.TryReadSessionId();
-                var lastHb = SessionFiles.TryReadLastHeartbeat();
-                Debug.Log($"[PlayScope] Previous session lock detected (id={prevSessionId}, last_hb={lastHb:o}). Recovery will run in PSDK-12.");
-                // TODO(PSDK-12): run full session recovery here
-            }
+            // Step 4: Recover any stale session from a previous crash (PSDK-12)
+            // UploadQueue is created here so recovery can enqueue chunks immediately;
+            // the uploader worker is started after the new session is fully initialised.
+            UploadQueue = new UploadQueue();
+            SessionRecovery.RecoverIfNeeded(UploadQueue);
 
             // Step 5: Start new session
-            CurrentSession = SessionInfo.Generate();
+            CurrentSession = SessionInfo.Generate(SdkVersion);
             SessionFiles.WriteNewSession(CurrentSession, Device.SdkUserId);
 
             _initialized = true;
@@ -65,31 +65,40 @@ namespace PlayScopeSdk.Internal
             // PSDK-10: start event queue + writer worker
             SequenceCounter.Reset();
             Queue = new EventQueue();
-            UploadQueue = new UploadQueue();
+            // Note: UploadQueue was already created in Step 4 (SessionRecovery)
             Pipeline = new EventPipeline(Queue);
             _writer = new WriterWorker(Queue, UploadQueue, CurrentSession);
+            _uploader = new UploaderWorker(context, CurrentSession, UploadQueue);
+            // When the writer finalizes a chunk due to a critical event, wake the uploader immediately
+            _writer.OnCriticalChunkFinalized = () => _uploader?.TriggerInstantUpload();
             _writer.Start();
+
+            _uploader.Start();
 
             _heartbeat = new HeartbeatWorker();
             _heartbeat.Start();
 
             // Enqueue session_start event
+            var env = "production";
+            if (context.Metadata != null &&
+                context.Metadata.TryGetValue("environment", out var envVal) &&
+                envVal is string envStr && !string.IsNullOrEmpty(envStr))
+                env = envStr;
+
             var sessionMeta = new System.Collections.Generic.Dictionary<string, object>
             {
                 ["app_version"] = UnityEngine.Application.version,
                 ["build_number"] = UnityEngine.Application.buildGUID,
-                ["environment"] = "production",
+                ["environment"] = env,
                 ["platform"] = GetPlatformString(),
                 ["device_model"] = UnityEngine.SystemInfo.deviceModel,
                 ["os_version"] = UnityEngine.SystemInfo.operatingSystem,
-                ["sdk_version"] = "0.1.0"
+                ["sdk_version"] = SdkVersion
             };
             Pipeline!.EnqueueEvent("session_start",
                 metadataJson: EventPipeline.DictToJson(sessionMeta));
 
             Debug.Log($"[PlayScope] Initialized. session_id={CurrentSession.SessionId}, sdk_user_id={Device.SdkUserId}");
-
-            // TODO(PSDK-11): start uploader worker loop
         }
 
         // Called by PlayScopeMonoBehaviour on application quit
@@ -99,12 +108,19 @@ namespace PlayScopeSdk.Internal
             _heartbeat?.Stop();
             _heartbeat = null;
 
-            // Enqueue session_end
+            // Enqueue session_end (critical — triggers instant upload)
             Pipeline?.EnqueueEvent("session_end",
                 metadataJson: "{\"end_status\":\"normal\"}");
 
             _writer?.DrainAndFinalize();
             _writer?.Stop();
+
+            // After writer finalizes the session_end chunk it lands in UploadQueue —
+            // signal the uploader to flush immediately before we stop it.
+            _uploader?.TriggerInstantUpload();
+            _uploader?.Stop();
+            _uploader = null;
+
             SessionFiles.DeleteSessionLock();
             _initialized = false;
             Debug.Log("[PlayScope] Shutdown complete.");

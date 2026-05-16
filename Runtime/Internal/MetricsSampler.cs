@@ -52,7 +52,7 @@ namespace PlayScopeSdk.Internal
             _memTimer += dt;
             if (_memTimer >= MemInterval)
             {
-                var heapMB = Profiler.GetMonoUsedSizeLong() / 1048576.0;
+                var heapMB = GC.GetTotalMemory(false) / 1048576.0;
                 var reservedMB = Profiler.GetTotalReservedMemoryLong() / 1048576.0;
                 _pipeline.EnqueueMetric("memory_heap", heapMB);
                 _pipeline.EnqueueMetric("memory_unity_reserved", reservedMB);

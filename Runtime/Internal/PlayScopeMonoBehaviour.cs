@@ -15,6 +15,8 @@ namespace PlayScopeSdk.Internal
         {
             if (PlayScopeRuntime.Pipeline != null && _sampler == null)
                 _sampler = new MetricsSampler(PlayScopeRuntime.Pipeline);
+            if (PlayScopeRuntime.Pipeline == null)
+                _sampler = null;
             _sampler?.Tick();
         }
 
@@ -32,10 +34,13 @@ namespace PlayScopeSdk.Internal
         private void OnApplicationQuit()
         {
             PlayScopeRuntime.Shutdown();
+            _sampler = null;
         }
 
         private void OnFocusChanged(bool hasFocus)
         {
+            if (!hasFocus)
+                PlayScopeRuntime.FlushOnPause();
             PlayScopeRuntime.Pipeline?.EnqueueEvent("lifecycle",
                 metadataJson: hasFocus
                     ? "{\"transition\":\"foreground\"}"

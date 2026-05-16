@@ -10,7 +10,7 @@ namespace PlayScopeSdk.Core.Session
         public string SdkVersion { get; }
         public int SchemaVersion { get; }
 
-        internal SessionInfo(string sessionId, DateTime startedAt, string sdkVersion = "0.1.0", int schemaVersion = 1)
+        internal SessionInfo(string sessionId, DateTime startedAt, string sdkVersion, int schemaVersion = 1)
         {
             SessionId = sessionId;
             // short id = first 5 chars of UUID without dashes
@@ -20,9 +20,9 @@ namespace PlayScopeSdk.Core.Session
             SchemaVersion = schemaVersion;
         }
 
-        internal static SessionInfo Generate()
+        internal static SessionInfo Generate(string sdkVersion)
         {
-            return new SessionInfo(Guid.NewGuid().ToString(), DateTime.UtcNow);
+            return new SessionInfo(Guid.NewGuid().ToString(), DateTime.UtcNow, sdkVersion);
         }
     }
 }

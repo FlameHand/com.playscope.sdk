@@ -1,0 +1,75 @@
+name: Release SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (semver, e.g. 0.2.0)'
+        required: true
+        type: string
+
+jobs:
+  release:
+    name: Bump, tag & publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate semver format
+        run: |
+          if ! echo "${{ inputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version must be in semver format (e.g. 0.2.0), got: ${{ inputs.version }}"
+            exit 1
+          fi
+
+      - name: Check tag does not already exist
+        run: |
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ inputs.version }} already exists"
+            exit 1
+          fi
+
+      - name: Bump version in package.json
+        run: |
+          jq --arg v "${{ inputs.version }}" '.version = $v' package.json > package.json.tmp
+          mv package.json.tmp package.json
+
+      - name: Bump SdkVersion constant in PlayScopeRuntime.cs
+        run: |
+          sed -i \
+            's/internal const string SdkVersion = "[^"]*";/internal const string SdkVersion = "${{ inputs.version }}";/' \
+            Runtime/Internal/PlayScopeRuntime.cs
+
+      - name: Verify both files changed
+        run: |
+          git diff --exit-code -- package.json Runtime/Internal/PlayScopeRuntime.cs && {
+            echo "::error::Version bump produced no changes — did you already release this version?"
+            exit 1
+          } || true
+
+      - name: Commit version bump
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json Runtime/Internal/PlayScopeRuntime.cs
+          git commit -m "chore: release v${{ inputs.version }}"
+
+      - name: Tag and push
+        run: |
+          git tag "v${{ inputs.version }}"
+          git push origin HEAD
+          git push origin "v${{ inputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ inputs.version }}"
+          name: "v${{ inputs.version }}"
+          generate_release_notes: true
+          make_latest: true

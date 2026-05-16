@@ -31,7 +31,6 @@ namespace PlayScopeSdk
         {
             if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
             metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            var metaJson = metadata != null ? EventPipeline.DictToJson(metadata) : null;
             // Include userId in a merged metadata object
             var userMeta = new Dictionary<string, object> { ["user_id"] = customUserId ?? "" };
             if (metadata != null)
