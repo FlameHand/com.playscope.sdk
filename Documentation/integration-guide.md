@@ -12,11 +12,13 @@ Add to `Packages/manifest.json`:
 
 Or use **Window → Package Manager → ＋ → Add package from git URL**.
 
-## 2. Get Your API Key
+## 2. Get Your SDK Key
 
 1. Log in to [playscope.dev](https://playscope.dev)
-2. Open your project → **Settings → API Keys**
-3. Copy the live key (`ps_live_...`)
+2. Open **Settings → Projects**
+3. Copy the SDK key for your project (`ps_live_...`) — each project has one key generated automatically
+
+> To invalidate a compromised key, click **Rotate** next to the project. Update all clients before the old key stops working.
 
 ## 3. Initialize the SDK
 
