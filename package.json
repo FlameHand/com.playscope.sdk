@@ -5,7 +5,7 @@
   "description": "Event pipeline, local storage, and upload for PlayScope session recording.",
   "unity": "2021.3",
   "dependencies": {
-    "com.cysharp.unitask": "2.3.3"
+    "com.cysharp.unitask": "https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask"
   },
   "keywords": [
     "playscope",
@@ -14,9 +14,9 @@
     "diagnostics"
   ],
   "author": {
-    "name": "PlayScope",
-    "email": "",
-    "url": ""
+    "name": "PlayScope SDK",
+    "email": "ceo@flamehands.com",
+    "url": "playscope.dev"
   },
   "repository": {
     "type": "git",

@@ -19,6 +19,7 @@ namespace PlayScopeSdk.Internal
         internal static EventPipeline? Pipeline { get; private set; }
         internal static UploadQueue? UploadQueue { get; private set; }
         private static WriterWorker? _writer;
+        private static HeartbeatWorker? _heartbeat;
 
         // Called by PlayScope.Initialize()
         internal static void Initialize(PlayScopeContext context)
@@ -69,22 +70,57 @@ namespace PlayScopeSdk.Internal
             _writer = new WriterWorker(Queue, UploadQueue, CurrentSession);
             _writer.Start();
 
+            _heartbeat = new HeartbeatWorker();
+            _heartbeat.Start();
+
+            // Enqueue session_start event
+            var sessionMeta = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["app_version"] = UnityEngine.Application.version,
+                ["build_number"] = UnityEngine.Application.buildGUID,
+                ["environment"] = "production",
+                ["platform"] = GetPlatformString(),
+                ["device_model"] = UnityEngine.SystemInfo.deviceModel,
+                ["os_version"] = UnityEngine.SystemInfo.operatingSystem,
+                ["sdk_version"] = "0.1.0"
+            };
+            Pipeline!.EnqueueEvent("session_start",
+                metadataJson: EventPipeline.DictToJson(sessionMeta));
+
             Debug.Log($"[PlayScope] Initialized. session_id={CurrentSession.SessionId}, sdk_user_id={Device.SdkUserId}");
 
             // TODO(PSDK-11): start uploader worker loop
-            // TODO(PSDK-13): start metrics sampler + heartbeat
         }
 
         // Called by PlayScopeMonoBehaviour on application quit
         internal static void Shutdown()
         {
             if (!_initialized || _disabled) return;
-            // TODO(PSDK-13): stop metrics sampler and heartbeat
+            _heartbeat?.Stop();
+            _heartbeat = null;
+
+            // Enqueue session_end
+            Pipeline?.EnqueueEvent("session_end",
+                metadataJson: "{\"end_status\":\"normal\"}");
+
             _writer?.DrainAndFinalize();
             _writer?.Stop();
             SessionFiles.DeleteSessionLock();
             _initialized = false;
             Debug.Log("[PlayScope] Shutdown complete.");
+        }
+
+        private static string GetPlatformString()
+        {
+#if UNITY_IOS
+            return "ios";
+#elif UNITY_ANDROID
+            return "android";
+#elif UNITY_EDITOR
+            return "editor";
+#else
+            return "standalone";
+#endif
         }
 
         // Called from OnApplicationPause
