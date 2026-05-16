@@ -15,6 +15,11 @@ namespace PlayScopeSdk.Internal
         internal static DeviceIdentity Device { get; private set; }
         internal static SessionInfo CurrentSession { get; private set; }
 
+        internal static EventQueue? Queue { get; private set; }
+        internal static EventPipeline? Pipeline { get; private set; }
+        internal static UploadQueue? UploadQueue { get; private set; }
+        private static WriterWorker? _writer;
+
         // Called by PlayScope.Initialize()
         internal static void Initialize(PlayScopeContext context)
         {
@@ -56,9 +61,16 @@ namespace PlayScopeSdk.Internal
 
             _initialized = true;
 
+            // PSDK-10: start event queue + writer worker
+            SequenceCounter.Reset();
+            Queue = new EventQueue();
+            UploadQueue = new UploadQueue();
+            Pipeline = new EventPipeline(Queue);
+            _writer = new WriterWorker(Queue, UploadQueue, CurrentSession);
+            _writer.Start();
+
             Debug.Log($"[PlayScope] Initialized. session_id={CurrentSession.SessionId}, sdk_user_id={Device.SdkUserId}");
 
-            // TODO(PSDK-10): start writer worker loop
             // TODO(PSDK-11): start uploader worker loop
             // TODO(PSDK-13): start metrics sampler + heartbeat
         }
@@ -67,10 +79,15 @@ namespace PlayScopeSdk.Internal
         internal static void Shutdown()
         {
             if (!_initialized || _disabled) return;
-            // TODO(PSDK-10): flush event queue, write session_end
             // TODO(PSDK-13): stop metrics sampler and heartbeat
+            _writer?.DrainAndFinalize();
+            _writer?.Stop();
             SessionFiles.DeleteSessionLock();
+            _initialized = false;
             Debug.Log("[PlayScope] Shutdown complete.");
         }
+
+        // Called from OnApplicationPause
+        internal static void FlushOnPause() => _writer?.FlushImmediate();
     }
 }

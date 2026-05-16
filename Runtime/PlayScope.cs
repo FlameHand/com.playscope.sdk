@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using PlayScopeSdk.Internal;
 
 namespace PlayScopeSdk
 {
@@ -17,7 +18,7 @@ namespace PlayScopeSdk
         /// <param name="context">Configuration including API key and optional settings.</param>
         public static void Initialize(PlayScopeContext context)
         {
-            Internal.PlayScopeRuntime.Initialize(context);
+            PlayScopeRuntime.Initialize(context);
         }
 
         /// <summary>
@@ -26,7 +27,17 @@ namespace PlayScopeSdk
         /// </summary>
         /// <param name="customUserId">Your application-side user identifier.</param>
         /// <param name="metadata">Optional key-value attributes to attach to the user (e.g. plan, region).</param>
-        public static void SetUserData(string customUserId, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void SetUserData(string customUserId, IReadOnlyDictionary<string, object> metadata = null)
+        {
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+            var metaJson = metadata != null ? EventPipeline.DictToJson(metadata) : null;
+            // Include userId in a merged metadata object
+            var userMeta = new Dictionary<string, object> { ["user_id"] = customUserId ?? "" };
+            if (metadata != null)
+                foreach (var kv in metadata) userMeta[kv.Key] = kv.Value;
+            PlayScopeRuntime.Pipeline?.EnqueueEvent("user_data_update", metadataJson: EventPipeline.DictToJson(userMeta));
+        }
 
         /// <summary>
         /// Sets the full initial game state snapshot for the session.
@@ -35,7 +46,9 @@ namespace PlayScopeSdk
         /// <param name="state">Full state dictionary (e.g. level, currency, inventory).</param>
         public static void SetInitialState(IReadOnlyDictionary<string, object> state)
         {
-            state = Internal.SensitiveKeyFilter.FilterState(state);
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            state = SensitiveKeyFilter.FilterState(state);
+            PlayScopeRuntime.Pipeline?.EnqueueEvent("state_initial", statePatchJson: EventPipeline.DictToJson(state));
         }
 
         /// <summary>
@@ -45,7 +58,9 @@ namespace PlayScopeSdk
         /// <param name="patch">Dictionary of keys to update in the current state.</param>
         public static void UpdateState(IReadOnlyDictionary<string, object> patch)
         {
-            patch = Internal.SensitiveKeyFilter.FilterState(patch);
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            patch = SensitiveKeyFilter.FilterState(patch);
+            PlayScopeRuntime.Pipeline?.EnqueueEvent("state_patch", statePatchJson: EventPipeline.DictToJson(patch));
         }
 
         /// <summary>
@@ -54,14 +69,28 @@ namespace PlayScopeSdk
         /// </summary>
         /// <param name="screenName">Logical name of the screen (e.g. "MainMenu", "GameplayHUD").</param>
         /// <param name="metadata">Optional additional attributes for this screen transition.</param>
-        public static void SetScreen(string screenName, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void SetScreen(string screenName, IReadOnlyDictionary<string, object> metadata = null)
+        {
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+            PlayScopeRuntime.Pipeline?.SetScreen(screenName ?? "");
+            PlayScopeRuntime.Pipeline?.EnqueueEvent("screen", metadataJson: metaJson);
+        }
 
         /// <summary>
         /// Records a discrete player action event (button press, item use, etc.).
         /// </summary>
         /// <param name="actionName">Logical name of the action (e.g. "TapPlayButton", "UseHealthPotion").</param>
         /// <param name="metadata">Optional key-value attributes for this action.</param>
-        public static void TrackAction(string actionName, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void TrackAction(string actionName, IReadOnlyDictionary<string, object> metadata = null)
+        {
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+            PlayScopeRuntime.Pipeline?.SetAction(actionName ?? "");
+            PlayScopeRuntime.Pipeline?.EnqueueEvent("action", metadataJson: metaJson);
+        }
 
         /// <summary>
         /// Starts a timed operation of the given type.
@@ -74,8 +103,16 @@ namespace PlayScopeSdk
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartOperation(OperationType type, string operationName, IReadOnlyDictionary<string, object> metadata = null)
         {
-            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
-            return string.Empty;
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return string.Empty;
+            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+            var session = PlayScopeRuntime.CurrentSession;
+            var operationId = $"{session?.SessionShortId}-{SequenceCounter.Next()}";
+            // Merge operation_name into metadata
+            var merged = new Dictionary<string, object> { ["operation_name"] = operationName ?? "" };
+            if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
+            PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_start", operationId: operationId,
+                operationType: type.ToString(), metadataJson: EventPipeline.DictToJson(merged));
+            return operationId;
         }
 
         /// <summary>
@@ -87,7 +124,14 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional attributes to attach at completion time.</param>
         public static void CompleteOperation(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
         {
-            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            if (string.IsNullOrEmpty(operationId)) return;
+            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+            // Merge status into metadata
+            var merged = new Dictionary<string, object> { ["status"] = status.ToString() };
+            if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
+            PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_end", operationId: operationId,
+                metadataJson: EventPipeline.DictToJson(merged));
         }
 
         // ── HTTP helpers ──────────────────────────────────────────────────────────
@@ -100,7 +144,7 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional request-time attributes.</param>
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartHTTP(string name, IReadOnlyDictionary<string, object> metadata = null)
-            => string.Empty;
+            => StartOperation(OperationType.HTTP, name, metadata);
 
         /// <summary>
         /// Completes an HTTP operation started with <see cref="StartHTTP"/>.
@@ -108,7 +152,8 @@ namespace PlayScopeSdk
         /// <param name="operationId">ID returned by <see cref="StartHTTP"/>.</param>
         /// <param name="status">Final outcome of the request.</param>
         /// <param name="metadata">Optional response-time attributes (e.g. status_code).</param>
-        public static void EndHTTP(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void EndHTTP(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
+            => CompleteOperation(operationId, status, metadata);
 
         // ── ResourceLoad helpers ──────────────────────────────────────────────────
 
@@ -120,7 +165,7 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional load-time attributes.</param>
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartResourceLoad(string name, IReadOnlyDictionary<string, object> metadata = null)
-            => string.Empty;
+            => StartOperation(OperationType.ResourceLoad, name, metadata);
 
         /// <summary>
         /// Completes a resource-load operation started with <see cref="StartResourceLoad"/>.
@@ -128,7 +173,8 @@ namespace PlayScopeSdk
         /// <param name="operationId">ID returned by <see cref="StartResourceLoad"/>.</param>
         /// <param name="status">Final outcome of the load.</param>
         /// <param name="metadata">Optional completion-time attributes.</param>
-        public static void EndResourceLoad(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void EndResourceLoad(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
+            => CompleteOperation(operationId, status, metadata);
 
         // ── SceneLoad helpers ─────────────────────────────────────────────────────
 
@@ -140,7 +186,7 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional load-time attributes.</param>
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartSceneLoad(string sceneName, IReadOnlyDictionary<string, object> metadata = null)
-            => string.Empty;
+            => StartOperation(OperationType.SceneLoad, sceneName, metadata);
 
         /// <summary>
         /// Completes a scene-load operation started with <see cref="StartSceneLoad"/>.
@@ -148,7 +194,8 @@ namespace PlayScopeSdk
         /// <param name="operationId">ID returned by <see cref="StartSceneLoad"/>.</param>
         /// <param name="status">Final outcome of the load.</param>
         /// <param name="metadata">Optional completion-time attributes.</param>
-        public static void EndSceneLoad(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void EndSceneLoad(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
+            => CompleteOperation(operationId, status, metadata);
 
         // ── Purchase helpers ──────────────────────────────────────────────────────
 
@@ -160,7 +207,7 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional purchase-initiation attributes (e.g. store, currency).</param>
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartPurchase(string productId, IReadOnlyDictionary<string, object> metadata = null)
-            => string.Empty;
+            => StartOperation(OperationType.Purchase, productId, metadata);
 
         /// <summary>
         /// Completes a purchase operation started with <see cref="StartPurchase"/>.
@@ -168,7 +215,8 @@ namespace PlayScopeSdk
         /// <param name="operationId">ID returned by <see cref="StartPurchase"/>.</param>
         /// <param name="status">Final outcome of the purchase (Success, Failure, Cancelled, etc.).</param>
         /// <param name="metadata">Optional completion-time attributes (e.g. transaction_id, price).</param>
-        public static void EndPurchase(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null) { }
+        public static void EndPurchase(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
+            => CompleteOperation(operationId, status, metadata);
 
         // ── Logging ───────────────────────────────────────────────────────────────
 
@@ -181,7 +229,10 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional structured attributes for this log entry.</param>
         public static void TrackLog(LogLevel level, string message, IReadOnlyDictionary<string, object> metadata = null)
         {
-            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+            PlayScopeRuntime.Pipeline?.EnqueueLog(level.ToString().ToLower(), message ?? "", metadataJson: metaJson);
         }
 
         /// <summary>
@@ -192,7 +243,11 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional contextual attributes (e.g. context, user_action).</param>
         public static void TrackException(System.Exception exception, IReadOnlyDictionary<string, object> metadata = null)
         {
-            metadata = Internal.SensitiveKeyFilter.FilterMetadata(metadata);
+            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+            if (exception == null) return;
+            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+            PlayScopeRuntime.Pipeline?.EnqueueLog("exception", exception.Message, exception.StackTrace, metadataJson: metaJson);
         }
     }
 }

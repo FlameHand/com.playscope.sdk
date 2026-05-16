@@ -27,6 +27,9 @@ namespace PlayScopeSdk.Storage
         internal static string Chunks =>
             System.IO.Path.Combine(CurrentSession, "chunks");
 
+        internal static string CurrentChunkPath =>
+            System.IO.Path.Combine(Chunks, "chunk_current.jsonl");
+
         internal static string UploadQueue =>
             System.IO.Path.Combine(CurrentSession, "upload_queue");
 

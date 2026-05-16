@@ -11,6 +11,7 @@ namespace PlayScopeSdk.Internal
 
         private void OnApplicationPause(bool isPaused)
         {
+            if (isPaused) PlayScopeRuntime.FlushOnPause();
             // TODO(PSDK-13): record lifecycle event (BackgroundStart / Foreground)
             // PlayScopeRuntime.RecordLifecycle(isPaused ? LifecycleTransition.BackgroundStart : LifecycleTransition.Foreground);
         }
