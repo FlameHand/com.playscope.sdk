@@ -1,8 +1,8 @@
 {
-  "name": "PlayScope.Editor",
-  "rootNamespace": "PlayScope.Editor",
+  "name": "PlayScopeSdk.Editor",
+  "rootNamespace": "PlayScopeSdk.Editor",
   "references": [
-    "PlayScope.Runtime"
+    "PlayScopeSdk"
   ],
   "includePlatforms": [
     "Editor"

@@ -1,15 +1,12 @@
 {
-  "name": "PlayScope.Tests.Editor",
-  "rootNamespace": "PlayScope.Tests.Editor",
+  "name": "PlayScopeSdk.Tests.Runtime",
+  "rootNamespace": "PlayScopeSdk.Tests",
   "references": [
-    "PlayScope.Runtime",
-    "PlayScope.Editor",
+    "PlayScopeSdk",
     "UnityEngine.TestRunner",
     "UnityEditor.TestRunner"
   ],
-  "includePlatforms": [
-    "Editor"
-  ],
+  "includePlatforms": [],
   "excludePlatforms": [],
   "allowUnsafeCode": false,
   "overrideReferences": true,

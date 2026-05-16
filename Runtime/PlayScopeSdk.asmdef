@@ -1,6 +1,6 @@
 {
-  "name": "PlayScope.Runtime",
-  "rootNamespace": "PlayScope",
+  "name": "PlayScopeSdk",
+  "rootNamespace": "PlayScopeSdk",
   "references": [
     "UniTask"
   ],
