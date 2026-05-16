@@ -359,7 +359,11 @@ namespace PlayScopeSdk.Internal
             if (File.Exists(chunkPath))
             {
                 var dest = Path.Combine(deadLetterDir, Path.GetFileName(chunkPath));
-                try { File.Move(chunkPath, dest); }
+                try
+                {
+                    if (File.Exists(dest)) File.Delete(dest);
+                    File.Move(chunkPath, dest);
+                }
                 catch (Exception ex) { Debug.LogWarning("[PlayScope] Could not move chunk to dead letter: " + ex.Message); }
             }
             TryDeleteFile(stateFilePath);
