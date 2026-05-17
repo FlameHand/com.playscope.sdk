@@ -1,17 +1,21 @@
 name: Release SDK
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (semver, e.g. 0.2.0)'
-        required: true
+        description: 'Version to release (semver, e.g. 0.2.0). Leave empty to auto-increment patch.'
+        required: false
         type: string
 
 jobs:
   release:
     name: Bump, tag & publish
     runs-on: ubuntu-latest
+    # Skip commits made by this workflow itself to prevent infinite loops
+    if: ${{ github.actor != 'github-actions[bot]' }}
     permissions:
       contents: write
 
@@ -21,55 +25,62 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate semver format
+      - name: Determine version
+        id: version
         run: |
-          if ! echo "${{ inputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::version must be in semver format (e.g. 0.2.0), got: ${{ inputs.version }}"
-            exit 1
+          if [ -n "${{ inputs.version }}" ]; then
+            NEW_VERSION="${{ inputs.version }}"
+            # Validate semver format
+            if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::version must be semver (e.g. 0.2.0), got: $NEW_VERSION"
+              exit 1
+            fi
+          else
+            CURRENT=$(jq -r '.version' package.json)
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
           fi
+          echo "new=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$NEW_VERSION"
 
       - name: Check tag does not already exist
         run: |
-          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::Tag v${{ inputs.version }} already exists"
+          if git rev-parse "v${{ steps.version.outputs.new }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.version.outputs.new }} already exists"
             exit 1
           fi
 
       - name: Bump version in package.json
         run: |
-          jq --arg v "${{ inputs.version }}" '.version = $v' package.json > package.json.tmp
+          jq --arg v "${{ steps.version.outputs.new }}" '.version = $v' package.json > package.json.tmp
           mv package.json.tmp package.json
 
       - name: Bump SdkVersion constant in PlayScopeRuntime.cs
         run: |
           sed -i \
-            's/internal const string SdkVersion = "[^"]*";/internal const string SdkVersion = "${{ inputs.version }}";/' \
+            's/internal const string SdkVersion = "[^"]*";/internal const string SdkVersion = "${{ steps.version.outputs.new }}";/' \
             Runtime/Internal/PlayScopeRuntime.cs
-
-      - name: Verify both files changed
-        run: |
-          git diff --exit-code -- package.json Runtime/Internal/PlayScopeRuntime.cs && {
-            echo "::error::Version bump produced no changes — did you already release this version?"
-            exit 1
-          } || true
 
       - name: Commit version bump
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add package.json Runtime/Internal/PlayScopeRuntime.cs
-          git commit -m "chore: release v${{ inputs.version }}"
+          git diff --cached --quiet && echo "Nothing to commit" || \
+            git commit -m "chore: release v${{ steps.version.outputs.new }}"
 
       - name: Tag and push
         run: |
-          git tag "v${{ inputs.version }}"
+          git tag "v${{ steps.version.outputs.new }}"
           git push origin HEAD
-          git push origin "v${{ inputs.version }}"
+          git push origin "v${{ steps.version.outputs.new }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v${{ inputs.version }}"
-          name: "v${{ inputs.version }}"
+          tag_name: "v${{ steps.version.outputs.new }}"
+          name: "v${{ steps.version.outputs.new }}"
           generate_release_notes: true
           make_latest: true
