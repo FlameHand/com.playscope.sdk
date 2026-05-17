@@ -35,11 +35,18 @@ namespace PlayScopeSdk.Internal
                 // Step 3a: read session_id from stale session.json
                 var sessionId = ReadStaleSesionId();
 
-                // Step 3b-e: move chunks, write synthetic event if needed
-                ProcessStaleLockSession(sessionId, uploadQueue);
+                // Determine the folder name we'll use to store the recovered session. We must
+                // pass this same name as the excludeSessionId below so the just-recovered
+                // folder is not re-enqueued by the subsequent scan (issue #11).
+                var recoveredFolder = !string.IsNullOrEmpty(sessionId)
+                    ? sessionId
+                    : $"recovered_{DateTime.UtcNow:yyyyMMddHHmmss}";
 
-                // Step 4: pick up any other old completed sessions
-                EnqueueCompletedSessions(uploadQueue, excludeSessionId: sessionId);
+                // Step 3b-e: move chunks, write synthetic event if needed
+                ProcessStaleLockSession(sessionId, recoveredFolder, uploadQueue);
+
+                // Step 4: pick up any other old completed sessions (excluding the one we just enqueued)
+                EnqueueCompletedSessions(uploadQueue, excludeSessionId: recoveredFolder);
             }
             catch (Exception ex)
             {
@@ -79,13 +86,11 @@ namespace PlayScopeSdk.Internal
         /// - Otherwise → abnormal end; append synthetic session_abnormal_end line.
         /// Then moves all chunks to completed_sessions/{sessionId}/ and enqueues them.
         /// </summary>
-        private static void ProcessStaleLockSession(string sessionId, UploadQueue queue)
+        private static void ProcessStaleLockSession(string sessionId, string folderName, UploadQueue queue)
         {
             var chunksDir = PlayScopeDirectory.Chunks;
             var currentChunk = PlayScopeDirectory.CurrentChunkPath;
 
-            // Use a placeholder folder name when session_id could not be read
-            var folderName = !string.IsNullOrEmpty(sessionId) ? sessionId : $"recovered_{DateTime.UtcNow:yyyyMMddHHmmss}";
             var destDir = Path.Combine(PlayScopeDirectory.CompletedSessions, folderName);
 
             try

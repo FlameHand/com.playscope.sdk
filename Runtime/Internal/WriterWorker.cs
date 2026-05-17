@@ -16,10 +16,16 @@ namespace PlayScopeSdk.Internal
         private readonly UploadQueue _uploadQueue;
         private readonly SessionInfo _session;
         private readonly List<EventRecord> _buffer = new(64);
+        private readonly object _bufferLock = new object();
         private CancellationTokenSource? _cts;
         private DateTime _lastFlush = DateTime.UtcNow;
         private int _chunkCounter = 0;
         private long _currentChunkSize = 0;
+
+        // Long-lived stream over chunk_current.jsonl (issue #15).
+        private FileStream? _currentStream;
+        private StreamWriter? _currentWriter;
+
         private const int FlushRecordThreshold = 32;
         private const double FlushIntervalSeconds = 2.0;
         private const long BatchSplitBytes = 1_048_576; // 1 MB
@@ -54,16 +60,22 @@ namespace PlayScopeSdk.Internal
         // can kill a backgrounded app.
         internal void FlushImmediate()
         {
-            _queue.DrainAll(_buffer);
-            if (_buffer.Count > 0) FlushBuffer();
+            lock (_bufferLock)
+            {
+                _queue.DrainAll(_buffer);
+                if (_buffer.Count > 0) FlushBufferLocked();
+            }
             FinalizeChunk();
         }
 
         // Called from shutdown sequence: drain, flush, finalize
         internal void DrainAndFinalize()
         {
-            _queue.DrainAll(_buffer);
-            FlushBuffer();
+            lock (_bufferLock)
+            {
+                _queue.DrainAll(_buffer);
+                FlushBufferLocked();
+            }
             FinalizeChunk();
             StorageQuotaManager.EnforceQuota();
         }
@@ -78,29 +90,40 @@ namespace PlayScopeSdk.Internal
                 }
                 catch (OperationCanceledException) { break; }
 
-                // Drain all available
-                while (_queue.TryDequeue(out var record)) _buffer.Add(record);
-
                 bool hasCritical = false;
-                foreach (var r in _buffer) if (r.IsCritical) { hasCritical = true; break; }
+                bool shouldFlush = false;
 
-                bool timeTriggered = (DateTime.UtcNow - _lastFlush).TotalSeconds >= FlushIntervalSeconds;
-                bool sizeTriggered = _buffer.Count >= FlushRecordThreshold;
-
-                if (sizeTriggered || timeTriggered || hasCritical)
+                lock (_bufferLock)
                 {
-                    FlushBuffer();
-                    if (hasCritical)
+                    // Drain all available
+                    while (_queue.TryDequeue(out var record)) _buffer.Add(record);
+
+                    foreach (var r in _buffer) if (r.IsCritical) { hasCritical = true; break; }
+
+                    bool timeTriggered = (DateTime.UtcNow - _lastFlush).TotalSeconds >= FlushIntervalSeconds;
+                    bool sizeTriggered = _buffer.Count >= FlushRecordThreshold;
+
+                    if (sizeTriggered || timeTriggered || hasCritical)
                     {
-                        FinalizeChunk();
-                        StorageQuotaManager.EnforceQuota();
-                        OnCriticalChunkFinalized?.Invoke();
+                        FlushBufferLocked();
+                        shouldFlush = true;
                     }
+                }
+
+                if (shouldFlush && hasCritical)
+                {
+                    FinalizeChunk();
+                    StorageQuotaManager.EnforceQuota();
+                    OnCriticalChunkFinalized?.Invoke();
                 }
             }
         }
 
-        private void FlushBuffer()
+        // Caller must hold _bufferLock. Serializes buffered records to a single string,
+        // releases the buffer contents, then performs file I/O. We keep the I/O inside the
+        // lock here because _currentWriter is shared mutable state too (open/close on
+        // FinalizeChunk happens from the same lock-aware paths).
+        private void FlushBufferLocked()
         {
             if (_buffer.Count == 0) return;
 
@@ -113,43 +136,74 @@ namespace PlayScopeSdk.Internal
                 _buffer.Clear();
                 _buffer.AddRange(kept);
                 if (dropped > 0)
-                    Debug.LogWarning($"[PlayScope] Hard storage cap exceeded — trimmed {dropped} buffered record(s) before flush.");
+                    PlayScopeLog.Warning($"Hard storage cap exceeded — trimmed {dropped} buffered record(s) before flush.");
             }
 
             if (_buffer.Count == 0) return;
 
             var sb = new StringBuilder();
+            long bytesWritten = 0;
             foreach (var r in _buffer)
             {
                 var line = SerializeRecord(r);
                 sb.Append(line).Append('\n');
-                _currentChunkSize += Encoding.UTF8.GetByteCount(line) + 1;
+                bytesWritten += Encoding.UTF8.GetByteCount(line) + 1;
             }
             _buffer.Clear();
             _lastFlush = DateTime.UtcNow;
 
             try
             {
-                var chunkPath = PlayScopeDirectory.CurrentChunkPath;
-                File.AppendAllText(chunkPath, sb.ToString(), new UTF8Encoding(false));
+                if (_currentWriter == null) EnsureCurrentChunk();
+                _currentWriter?.Write(sb.ToString());
+                _currentWriter?.Flush();
+                _currentChunkSize += bytesWritten;
+                StorageQuotaManager.NotifyBytesAppended(bytesWritten);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[PlayScope] Failed to write chunk: " + ex.Message);
+                PlayScopeLog.Warning("Failed to write chunk", ex);
             }
 
             // Batch splitting: >1MB → finalize, then enforce storage quota
             if (_currentChunkSize >= BatchSplitBytes)
             {
-                FinalizeChunk();
+                FinalizeChunkInternal();
                 StorageQuotaManager.EnforceQuota();
             }
         }
 
         private void FinalizeChunk()
         {
+            lock (_bufferLock)
+            {
+                FinalizeChunkInternal();
+            }
+        }
+
+        private void FinalizeChunkInternal()
+        {
             var currentPath = PlayScopeDirectory.CurrentChunkPath;
-            if (!File.Exists(currentPath)) return;
+            // Dispose writer FIRST so File.Move can rename without sharing-violation.
+            CloseCurrentWriter();
+            if (!File.Exists(currentPath))
+            {
+                EnsureCurrentChunk();
+                _currentChunkSize = 0;
+                return;
+            }
+            // Skip empty chunks — nothing to upload, would create empty batches.
+            try
+            {
+                if (new FileInfo(currentPath).Length == 0)
+                {
+                    EnsureCurrentChunk();
+                    _currentChunkSize = 0;
+                    return;
+                }
+            }
+            catch { /* fall through */ }
+
             _chunkCounter++;
             var finalName = Path.Combine(PlayScopeDirectory.Chunks,
                 $"chunk_{_session.SessionShortId}_{_chunkCounter:D6}.jsonl");
@@ -157,10 +211,11 @@ namespace PlayScopeSdk.Internal
             {
                 File.Move(currentPath, finalName);
                 _uploadQueue.Enqueue(finalName);
+                StorageQuotaManager.NotifyChunkFinalized(finalName);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[PlayScope] Failed to finalize chunk: " + ex.Message);
+                PlayScopeLog.Warning("Failed to finalize chunk", ex);
             }
             EnsureCurrentChunk();
             _currentChunkSize = 0;
@@ -169,11 +224,29 @@ namespace PlayScopeSdk.Internal
         private void EnsureCurrentChunk()
         {
             var path = PlayScopeDirectory.CurrentChunkPath;
-            if (!File.Exists(path))
+            try
             {
-                try { File.WriteAllText(path, "", new UTF8Encoding(false)); }
-                catch (Exception ex) { Debug.LogWarning("[PlayScope] Could not create chunk: " + ex.Message); }
+                // Open in append mode; create if missing. FileShare.Read keeps reader compat.
+                _currentStream ??= new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read, 4096);
+                if (_currentWriter == null)
+                {
+                    _currentWriter = new StreamWriter(_currentStream, new UTF8Encoding(false));
+                    _currentWriter.AutoFlush = false;
+                }
             }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Could not open current chunk", ex);
+            }
+        }
+
+        private void CloseCurrentWriter()
+        {
+            try { _currentWriter?.Flush(); } catch { /* ok */ }
+            try { _currentWriter?.Dispose(); } catch { /* ok */ }
+            try { _currentStream?.Dispose(); } catch { /* ok */ }
+            _currentWriter = null;
+            _currentStream = null;
         }
 
         private static string SerializeRecord(EventRecord r)

@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Threading;
 using PlayScopeSdk.Internal;
 
 namespace PlayScopeSdk
@@ -10,6 +12,9 @@ namespace PlayScopeSdk
     /// </summary>
     public static class PlayScope
     {
+        // One-time warning flag for CompleteOperation in disabled state.
+        private static int _disabledCompleteWarned;
+
         /// <summary>
         /// Initializes the SDK with the provided configuration.
         /// Must be called once before using any other SDK methods.
@@ -18,7 +23,15 @@ namespace PlayScopeSdk
         /// <param name="context">Configuration including API key and optional settings.</param>
         public static void Initialize(PlayScopeContext context)
         {
-            PlayScopeRuntime.Initialize(context);
+            try
+            {
+                PlayScopeRuntime.Initialize(context);
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Initialize failed — SDK disabled", ex);
+                PlayScopeRuntime.ForceDisable();
+            }
         }
 
         /// <summary>
@@ -29,13 +42,17 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional key-value attributes to attach to the user (e.g. plan, region).</param>
         public static void SetUserData(string customUserId, IReadOnlyDictionary<string, object> metadata = null)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            // Include userId in a merged metadata object
-            var userMeta = new Dictionary<string, object> { ["user_id"] = customUserId ?? "" };
-            if (metadata != null)
-                foreach (var kv in metadata) userMeta[kv.Key] = kv.Value;
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("user_data_update", metadataJson: EventPipeline.DictToJson(userMeta));
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                // Include userId in a merged metadata object
+                var userMeta = new Dictionary<string, object> { ["user_id"] = customUserId ?? "" };
+                if (metadata != null)
+                    foreach (var kv in metadata) userMeta[kv.Key] = kv.Value;
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("user_data_update", metadataJson: EventPipeline.DictToJson(userMeta));
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("SetUserData failed", ex); }
         }
 
         /// <summary>
@@ -45,9 +62,18 @@ namespace PlayScopeSdk
         /// <param name="state">Full state dictionary (e.g. level, currency, inventory).</param>
         public static void SetInitialState(IReadOnlyDictionary<string, object> state)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            state = SensitiveKeyFilter.FilterState(state);
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("state_initial", statePatchJson: EventPipeline.DictToJson(state));
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                if (!PlayScopeRuntime.TryMarkInitialStateSet())
+                {
+                    PlayScopeLog.Warning("SetInitialState called more than once — ignored. Use UpdateState for incremental changes.");
+                    return;
+                }
+                state = SensitiveKeyFilter.FilterState(state);
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("state_initial", statePatchJson: EventPipeline.DictToJson(state));
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("SetInitialState failed", ex); }
         }
 
         /// <summary>
@@ -57,9 +83,13 @@ namespace PlayScopeSdk
         /// <param name="patch">Dictionary of keys to update in the current state.</param>
         public static void UpdateState(IReadOnlyDictionary<string, object> patch)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            patch = SensitiveKeyFilter.FilterState(patch);
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("state_patch", statePatchJson: EventPipeline.DictToJson(patch));
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                patch = SensitiveKeyFilter.FilterState(patch);
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("state_patch", statePatchJson: EventPipeline.DictToJson(patch));
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("UpdateState failed", ex); }
         }
 
         /// <summary>
@@ -70,11 +100,15 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional additional attributes for this screen transition.</param>
         public static void SetScreen(string screenName, IReadOnlyDictionary<string, object> metadata = null)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
-            PlayScopeRuntime.Pipeline?.SetScreen(screenName ?? "");
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("screen", metadataJson: metaJson);
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+                PlayScopeRuntime.Pipeline?.SetScreen(screenName ?? "");
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("screen", metadataJson: metaJson);
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("SetScreen failed", ex); }
         }
 
         /// <summary>
@@ -84,11 +118,15 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional key-value attributes for this action.</param>
         public static void TrackAction(string actionName, IReadOnlyDictionary<string, object> metadata = null)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
-            PlayScopeRuntime.Pipeline?.SetAction(actionName ?? "");
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("action", metadataJson: metaJson);
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+                PlayScopeRuntime.Pipeline?.SetAction(actionName ?? "");
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("action", metadataJson: metaJson);
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("TrackAction failed", ex); }
         }
 
         /// <summary>
@@ -102,16 +140,24 @@ namespace PlayScopeSdk
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartOperation(OperationType type, string operationName, IReadOnlyDictionary<string, object> metadata = null)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return string.Empty;
-            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            var session = PlayScopeRuntime.CurrentSession;
-            var operationId = $"{session?.SessionShortId}-{SequenceCounter.Next()}";
-            // Merge operation_name into metadata
-            var merged = new Dictionary<string, object> { ["operation_name"] = operationName ?? "" };
-            if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_start", operationId: operationId,
-                operationType: type.ToString(), metadataJson: EventPipeline.DictToJson(merged));
-            return operationId;
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return string.Empty;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                var session = PlayScopeRuntime.CurrentSession;
+                var operationId = $"{session?.SessionShortId}-{SequenceCounter.Next()}";
+                // Merge operation_name into metadata
+                var merged = new Dictionary<string, object> { ["operation_name"] = operationName ?? "" };
+                if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_start", operationId: operationId,
+                    operationType: type.ToString(), metadataJson: EventPipeline.DictToJson(merged));
+                return operationId;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("StartOperation failed", ex);
+                return string.Empty;
+            }
         }
 
         /// <summary>
@@ -123,14 +169,26 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional attributes to attach at completion time.</param>
         public static void CompleteOperation(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            if (string.IsNullOrEmpty(operationId)) return;
-            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            // Merge status into metadata
-            var merged = new Dictionary<string, object> { ["status"] = status.ToString() };
-            if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_end", operationId: operationId,
-                metadataJson: EventPipeline.DictToJson(merged));
+            try
+            {
+                if (PlayScopeRuntime.IsDisabled || !PlayScopeRuntime.IsInitialized)
+                {
+                    if (string.IsNullOrEmpty(operationId) &&
+                        Interlocked.CompareExchange(ref _disabledCompleteWarned, 1, 0) == 0)
+                    {
+                        PlayScopeLog.Warning("CompleteOperation called in disabled state — ignored.");
+                    }
+                    return;
+                }
+                if (string.IsNullOrEmpty(operationId)) return;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                // Merge status into metadata
+                var merged = new Dictionary<string, object> { ["status"] = status.ToString() };
+                if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_end", operationId: operationId,
+                    metadataJson: EventPipeline.DictToJson(merged));
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("CompleteOperation failed", ex); }
         }
 
         // ── HTTP helpers ──────────────────────────────────────────────────────────
@@ -228,10 +286,14 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional structured attributes for this log entry.</param>
         public static void TrackLog(LogLevel level, string message, IReadOnlyDictionary<string, object> metadata = null)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
-            PlayScopeRuntime.Pipeline?.EnqueueLog(level.ToString().ToLower(), message ?? "", metadataJson: metaJson);
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+                PlayScopeRuntime.Pipeline?.EnqueueLog(level.ToString().ToLower(), message ?? "", metadataJson: metaJson);
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("TrackLog failed", ex); }
         }
 
         /// <summary>
@@ -242,11 +304,15 @@ namespace PlayScopeSdk
         /// <param name="metadata">Optional contextual attributes (e.g. context, user_action).</param>
         public static void TrackException(System.Exception exception, IReadOnlyDictionary<string, object> metadata = null)
         {
-            if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
-            if (exception == null) return;
-            metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-            var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
-            PlayScopeRuntime.Pipeline?.EnqueueLog("exception", exception.Message, exception.StackTrace, metadataJson: metaJson);
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                if (exception == null) return;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                var metaJson = metadata != null && metadata.Count > 0 ? EventPipeline.DictToJson(metadata) : null;
+                PlayScopeRuntime.Pipeline?.EnqueueLog("exception", exception.Message, exception.StackTrace, metadataJson: metaJson);
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("TrackException failed", ex); }
         }
     }
 }

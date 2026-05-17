@@ -10,6 +10,15 @@ namespace PlayScopeSdk.Internal
     /// </summary>
     internal sealed class EventPipeline
     {
+        // Per-record size limits (spec):
+        //   metadata    ≤ 4 KB
+        //   state_patch ≤ 8 KB, ≤ 64 keys
+        //   log message ≤ 2048 chars (truncated)
+        //   stack trace ≤ 8192 chars (truncated)
+        internal const int MaxMetadataBytes = 4096;
+        internal const int MaxStatePatchBytes = 8192;
+        internal const int MaxStatePatchKeys = 64;
+
         private readonly EventQueue _queue;
         private string _currentScreen = "";
         private string _currentAction = "";
@@ -22,6 +31,34 @@ namespace PlayScopeSdk.Internal
         internal void EnqueueEvent(string eventType, string? operationId = null, string? operationType = null,
             string? metadataJson = null, string? statePatchJson = null)
         {
+            // Enforce metadata size cap (spec: 4 KB). Oversized metadata = drop the entire event.
+            if (!string.IsNullOrEmpty(metadataJson) &&
+                Encoding.UTF8.GetByteCount(metadataJson) > MaxMetadataBytes)
+            {
+                PlayScopeLog.Warning($"event dropped: metadata exceeds 4 KB (event_type={eventType}).");
+                return;
+            }
+
+            // Enforce state_patch size + key-count cap (spec: 8 KB, 64 keys). On violation we
+            // drop the state_patch but still emit the event so the rest of the signal is intact.
+            if (!string.IsNullOrEmpty(statePatchJson))
+            {
+                int patchBytes = Encoding.UTF8.GetByteCount(statePatchJson);
+                int keyCount = CountTopLevelJsonKeys(statePatchJson);
+                if (patchBytes > MaxStatePatchBytes)
+                {
+                    PlayScopeLog.Warning(
+                        $"state_patch dropped: exceeds 8 KB ({patchBytes} bytes, event_type={eventType}). Event emitted without patch.");
+                    statePatchJson = null;
+                }
+                else if (keyCount > MaxStatePatchKeys)
+                {
+                    PlayScopeLog.Warning(
+                        $"state_patch dropped: exceeds 64 keys ({keyCount}, event_type={eventType}). Event emitted without patch.");
+                    statePatchJson = null;
+                }
+            }
+
             var r = new EventRecord
             {
                 RecordType = RecordType.Event,
@@ -38,6 +75,53 @@ namespace PlayScopeSdk.Internal
                 IsCritical = CriticalRecords.IsCritical(eventType)
             };
             _queue.Enqueue(r);
+        }
+
+        /// <summary>
+        /// Counts top-level JSON keys in a flat object literal. Naïve scanner — only counts
+        /// quoted keys followed by ':' at brace-depth 1. Good enough for the size guard: it
+        /// will not over-count nested object keys.
+        /// </summary>
+        internal static int CountTopLevelJsonKeys(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return 0;
+            int depth = 0;
+            int keys = 0;
+            bool inString = false;
+            bool keyJustClosed = false;
+            for (int i = 0; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (inString)
+                {
+                    if (c == '\\' && i + 1 < json.Length) { i++; continue; }
+                    if (c == '"')
+                    {
+                        inString = false;
+                        // peek next non-whitespace
+                        if (depth == 1) keyJustClosed = true;
+                    }
+                    continue;
+                }
+                switch (c)
+                {
+                    case '"': inString = true; break;
+                    case '{': depth++; break;
+                    case '}': depth--; keyJustClosed = false; break;
+                    case '[': depth++; break;
+                    case ']': depth--; break;
+                    case ':':
+                        if (depth == 1 && keyJustClosed) { keys++; keyJustClosed = false; }
+                        break;
+                    case ',':
+                        keyJustClosed = false;
+                        break;
+                    default:
+                        if (!char.IsWhiteSpace(c)) keyJustClosed = false;
+                        break;
+                }
+            }
+            return keys;
         }
 
         internal void EnqueueLog(string level, string message, string? stackTrace = null, string? metadataJson = null)

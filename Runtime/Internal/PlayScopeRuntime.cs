@@ -1,3 +1,5 @@
+using System;
+using System.Threading;
 using UnityEngine;
 using PlayScopeSdk.Core.Session;
 using PlayScopeSdk.Storage;
@@ -10,6 +12,7 @@ namespace PlayScopeSdk.Internal
 
         private static volatile bool _initialized;
         private static volatile bool _disabled;
+        private static int _initialStateSet; // 0/1 — Interlocked
 
         internal static bool IsInitialized => _initialized;
         internal static bool IsDisabled => _disabled;
@@ -23,42 +26,101 @@ namespace PlayScopeSdk.Internal
         private static WriterWorker? _writer;
         private static HeartbeatWorker? _heartbeat;
         internal static UploaderWorker? _uploader;
+        private static GameObject? _driverGo;
+        private static bool _quittingSubscribed;
+        private static bool _logCaptureSubscribed;
+        private static LogLevel _autoCaptureMinLevel;
+
+        /// <summary>
+        /// Called by PlayScope.Initialize if Initialize itself threw — moves SDK to a
+        /// permanently disabled state so subsequent API calls are silent no-ops.
+        /// </summary>
+        internal static void ForceDisable()
+        {
+            _disabled = true;
+            // Do NOT set _initialized — IsInitialized stays false so API guards return early.
+        }
+
+        /// <summary>
+        /// Atomically marks the initial-state event as having been sent.
+        /// Returns true the first time; false on every subsequent call.
+        /// </summary>
+        internal static bool TryMarkInitialStateSet()
+        {
+            return Interlocked.CompareExchange(ref _initialStateSet, 1, 0) == 0;
+        }
 
         // Called by PlayScope.Initialize()
         internal static void Initialize(PlayScopeContext context)
         {
-            if (_initialized)
+            if (_initialized || _disabled)
             {
-                Debug.LogWarning("[PlayScope] Initialize called more than once — ignored.");
+                PlayScopeLog.Warning("Initialize called more than once — ignored.");
                 return;
             }
 
             // Reset sensitive-key filter warnings for the new session
             SensitiveKeyFilter.ResetWarnings();
+            _initialStateSet = 0;
 
             // Step 1: Validate ApiKey
             if (string.IsNullOrWhiteSpace(context?.ApiKey))
             {
-                Debug.LogWarning("[PlayScope] ApiKey is null or empty — SDK disabled.");
+                PlayScopeLog.Warning("ApiKey is null or empty — SDK disabled.");
                 _disabled = true;
                 return;
             }
 
-            // Step 2: Ensure directories exist
-            PlayScopeDirectory.EnsureRootDirectories();
+            // Step 2: Ensure directories exist (wrap disk-write sections — never throw to caller)
+            try
+            {
+                PlayScopeDirectory.EnsureRootDirectories();
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Could not create SDK directories — SDK disabled", ex);
+                _disabled = true;
+                return;
+            }
 
             // Step 3: Load or create device identity
-            Device = DeviceIdentity.LoadOrCreate();
+            try
+            {
+                Device = DeviceIdentity.LoadOrCreate();
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("DeviceIdentity load/create failed — SDK disabled", ex);
+                _disabled = true;
+                return;
+            }
 
             // Step 4: Recover any stale session from a previous crash (PSDK-12)
             // UploadQueue is created here so recovery can enqueue chunks immediately;
             // the uploader worker is started after the new session is fully initialised.
             UploadQueue = new UploadQueue();
-            SessionRecovery.RecoverIfNeeded(UploadQueue);
+            try
+            {
+                SessionRecovery.RecoverIfNeeded(UploadQueue);
+            }
+            catch (Exception ex)
+            {
+                // Recovery already swallows its own exceptions, but be defensive.
+                PlayScopeLog.Warning("SessionRecovery failed", ex);
+            }
 
             // Step 5: Start new session
-            CurrentSession = SessionInfo.Generate(SdkVersion);
-            SessionFiles.WriteNewSession(CurrentSession, Device.SdkUserId);
+            try
+            {
+                CurrentSession = SessionInfo.Generate(SdkVersion);
+                SessionFiles.WriteNewSession(CurrentSession, Device.SdkUserId);
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Could not write new session files — SDK disabled", ex);
+                _disabled = true;
+                return;
+            }
 
             _initialized = true;
 
@@ -77,6 +139,31 @@ namespace PlayScopeSdk.Internal
 
             _heartbeat = new HeartbeatWorker();
             _heartbeat.Start();
+
+            // Optional: subscribe to Unity log stream
+            if (context.AutoCaptureUnityLogs)
+            {
+                try
+                {
+                    _autoCaptureMinLevel = context.AutoCaptureMinLevel;
+                    Application.logMessageReceivedThreaded += OnUnityLogReceived;
+                    _logCaptureSubscribed = true;
+                }
+                catch (Exception ex)
+                {
+                    PlayScopeLog.Warning("Failed to subscribe to Unity log stream", ex);
+                }
+            }
+
+            // Wire MonoBehaviour driver + Application.quitting (main thread / play mode only).
+            try
+            {
+                EnsureDriver();
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Failed to install PlayScopeMonoBehaviour driver", ex);
+            }
 
             // Enqueue session_start event
             var env = "production";
@@ -98,13 +185,29 @@ namespace PlayScopeSdk.Internal
             Pipeline!.EnqueueEvent("session_start",
                 metadataJson: EventPipeline.DictToJson(sessionMeta));
 
-            Debug.Log($"[PlayScope] Initialized. session_id={CurrentSession.SessionId}, sdk_user_id={Device.SdkUserId}");
+            PlayScopeLog.Info($"Initialized. session_id={CurrentSession.SessionId}, sdk_user_id={Device.SdkUserId}");
         }
 
-        // Called by PlayScopeMonoBehaviour on application quit
+        // Called by PlayScopeMonoBehaviour on application quit / Application.quitting
         internal static void Shutdown()
         {
             if (!_initialized || _disabled) return;
+
+            // Unsubscribe Unity log capture (idempotent guard)
+            if (_logCaptureSubscribed)
+            {
+                try { Application.logMessageReceivedThreaded -= OnUnityLogReceived; }
+                catch { /* best-effort */ }
+                _logCaptureSubscribed = false;
+            }
+
+            if (_quittingSubscribed)
+            {
+                try { Application.quitting -= OnApplicationQuittingHandler; }
+                catch { /* best-effort */ }
+                _quittingSubscribed = false;
+            }
+
             _heartbeat?.Stop();
             _heartbeat = null;
 
@@ -121,9 +224,9 @@ namespace PlayScopeSdk.Internal
             _uploader?.Stop();
             _uploader = null;
 
-            SessionFiles.DeleteSessionLock();
+            try { SessionFiles.DeleteSessionLock(); } catch { /* best-effort */ }
             _initialized = false;
-            Debug.Log("[PlayScope] Shutdown complete.");
+            PlayScopeLog.Info("Shutdown complete.");
         }
 
         private static string GetPlatformString()
@@ -141,5 +244,97 @@ namespace PlayScopeSdk.Internal
 
         // Called from OnApplicationPause
         internal static void FlushOnPause() => _writer?.FlushImmediate();
+
+        /// <summary>
+        /// Records a lifecycle transition. Called from MonoBehaviour pause/focus callbacks.
+        /// </summary>
+        internal static void RecordLifecycle(LifecycleTransition t)
+        {
+            if (!_initialized || _disabled) return;
+            var name = t == LifecycleTransition.BackgroundStart ? "background_start" : "foreground";
+            Pipeline?.EnqueueEvent("lifecycle", metadataJson: "{\"transition\":\"" + name + "\"}");
+        }
+
+        // ── MonoBehaviour driver ──────────────────────────────────────────────────
+
+        private static void EnsureDriver()
+        {
+            // Only create a real driver when we're running inside Unity play mode.
+            // In Edit-mode tests or batch tooling, skip GameObject creation — Shutdown
+            // can still be invoked manually if the test wants it.
+            if (!Application.isPlaying)
+            {
+                // Subscribe to Application.quitting so Editor batch runs still finalize cleanly.
+                if (!_quittingSubscribed)
+                {
+                    try
+                    {
+                        Application.quitting += OnApplicationQuittingHandler;
+                        _quittingSubscribed = true;
+                    }
+                    catch { /* not all platforms support this — best-effort */ }
+                }
+                return;
+            }
+
+            if (_driverGo != null) return;
+            _driverGo = new GameObject("PlayScopeSdk");
+            _driverGo.hideFlags = HideFlags.HideAndDontSave;
+            UnityEngine.Object.DontDestroyOnLoad(_driverGo);
+            _driverGo.AddComponent<PlayScopeMonoBehaviour>();
+
+            if (!_quittingSubscribed)
+            {
+                Application.quitting += OnApplicationQuittingHandler;
+                _quittingSubscribed = true;
+            }
+        }
+
+        private static void OnApplicationQuittingHandler()
+        {
+            // OnApplicationQuit on the MB also calls Shutdown; Shutdown is idempotent via _initialized check.
+            Shutdown();
+        }
+
+        // ── AutoCaptureUnityLogs handler ──────────────────────────────────────────
+
+        private static void OnUnityLogReceived(string condition, string stackTrace, LogType type)
+        {
+            try
+            {
+                // Recursion guard: skip our own [PlayScope] logs.
+                if (!string.IsNullOrEmpty(condition) && condition.StartsWith("[PlayScope]", StringComparison.Ordinal))
+                    return;
+
+                LogLevel level;
+                bool isException = false;
+                switch (type)
+                {
+                    case LogType.Log: level = LogLevel.Debug; break;
+                    case LogType.Warning: level = LogLevel.Warning; break;
+                    case LogType.Error: level = LogLevel.Error; break;
+                    case LogType.Assert: level = LogLevel.Error; break;
+                    case LogType.Exception: level = LogLevel.Exception; isException = true; break;
+                    default: level = LogLevel.Debug; break;
+                }
+
+                if ((int)level < (int)_autoCaptureMinLevel) return;
+
+                if (isException)
+                    Pipeline?.EnqueueLog("exception", condition ?? "", stackTrace);
+                else
+                    Pipeline?.EnqueueLog(level.ToString().ToLower(), condition ?? "");
+            }
+            catch
+            {
+                // Never let log capture throw — would re-trigger the log handler.
+            }
+        }
+    }
+
+    internal enum LifecycleTransition
+    {
+        BackgroundStart,
+        Foreground
     }
 }

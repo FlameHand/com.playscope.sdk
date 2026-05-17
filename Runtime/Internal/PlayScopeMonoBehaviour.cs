@@ -23,12 +23,9 @@ namespace PlayScopeSdk.Internal
         private void OnApplicationPause(bool isPaused)
         {
             PlayScopeRuntime.FlushOnPause();
-            if (isPaused)
-                PlayScopeRuntime.Pipeline?.EnqueueEvent("lifecycle",
-                    metadataJson: "{\"transition\":\"background_start\"}");
-            else
-                PlayScopeRuntime.Pipeline?.EnqueueEvent("lifecycle",
-                    metadataJson: "{\"transition\":\"foreground\"}");
+            PlayScopeRuntime.RecordLifecycle(isPaused
+                ? LifecycleTransition.BackgroundStart
+                : LifecycleTransition.Foreground);
         }
 
         private void OnApplicationQuit()
@@ -41,10 +38,9 @@ namespace PlayScopeSdk.Internal
         {
             if (!hasFocus)
                 PlayScopeRuntime.FlushOnPause();
-            PlayScopeRuntime.Pipeline?.EnqueueEvent("lifecycle",
-                metadataJson: hasFocus
-                    ? "{\"transition\":\"foreground\"}"
-                    : "{\"transition\":\"background_start\"}");
+            PlayScopeRuntime.RecordLifecycle(hasFocus
+                ? LifecycleTransition.Foreground
+                : LifecycleTransition.BackgroundStart);
         }
 
         private void OnDestroy()

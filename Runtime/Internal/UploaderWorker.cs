@@ -28,6 +28,9 @@ namespace PlayScopeSdk.Internal
         private readonly UploadQueue _queue;
         private CancellationTokenSource? _cts;
 
+        // Thread-local jitter RNG — UnityEngine.Random is main-thread only.
+        private static readonly System.Random _jitterRng = new System.Random();
+
         // Semaphore used to wake the poll loop on-demand (instant upload trigger)
         private readonly SemaphoreSlim _wakeSignal = new SemaphoreSlim(0, 1);
 
@@ -71,10 +74,13 @@ namespace PlayScopeSdk.Internal
         {
             while (!ct.IsCancellationRequested)
             {
-                // Wait for either a wake signal or the polling timeout
+                // Wait for either a wake signal or the polling timeout (30s ±20% jitter per spec).
+                double jitterFactor;
+                lock (_jitterRng) { jitterFactor = 0.8 + _jitterRng.NextDouble() * 0.4; }
+                var waitSeconds = PollingIntervalSeconds * jitterFactor;
                 try
                 {
-                    await _wakeSignal.WaitAsync(TimeSpan.FromSeconds(PollingIntervalSeconds), ct);
+                    await _wakeSignal.WaitAsync(TimeSpan.FromSeconds(waitSeconds), ct);
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception) { /* timeout is fine — proceed to upload cycle */ }
@@ -123,9 +129,12 @@ namespace PlayScopeSdk.Internal
                     if (state == null) continue;
                     if (state.IsUploaded) continue;
 
-                    // Check TTL — if last_attempt is older than 7 days → dead letter
-                    if (state.LastAttemptAt.HasValue &&
-                        (now - state.LastAttemptAt.Value).TotalDays >= RetryTtlDays)
+                    // Check TTL — based on CreatedAt (NOT LastAttemptAt), otherwise a chunk that
+                    // keeps failing would reset its own TTL on every retry. Legacy state files
+                    // missing CreatedAt fall back to LastAttemptAt for backwards compatibility.
+                    var ttlAnchor = state.CreatedAt ?? state.LastAttemptAt;
+                    if (ttlAnchor.HasValue &&
+                        (now - ttlAnchor.Value).TotalDays >= RetryTtlDays)
                     {
                         var chunkForState = ChunkPathFromStateFile(stateFile);
                         MoveToDeadLetter(chunkForState, stateFile);
@@ -154,8 +163,10 @@ namespace PlayScopeSdk.Internal
             var chunkName = Path.GetFileName(chunkPath);
             var stateFilePath = Path.Combine(PlayScopeDirectory.UploadQueue, chunkName + ".state.json");
 
-            // Load or create state
-            var state = LoadState(stateFilePath) ?? new UploadState { ChunkId = chunkName };
+            // Load or create state. New state files record CreatedAt at first attempt; this
+            // anchors the 7-day retry TTL (issue #9).
+            var state = LoadState(stateFilePath) ?? new UploadState { ChunkId = chunkName, CreatedAt = DateTime.UtcNow };
+            if (!state.CreatedAt.HasValue) state.CreatedAt = DateTime.UtcNow;
 
             // Build envelope
             byte[] payload;
@@ -202,8 +213,10 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            // Non-retryable errors → dead letter
-            if (!networkError && (httpStatus == 400 || httpStatus == 401 || httpStatus == 403 || httpStatus == 409))
+            // Non-retryable errors → dead letter (spec: 400/401/402/403/422).
+            // 409 was removed — it indicates an idempotency/conflict that should retry.
+            if (!networkError && (httpStatus == 400 || httpStatus == 401 || httpStatus == 402 ||
+                                   httpStatus == 403 || httpStatus == 422))
             {
                 Debug.LogWarning($"[PlayScope] Non-retryable HTTP {httpStatus} for {chunkName} — moving to dead letter.");
                 MoveToDeadLetter(chunkPath, stateFilePath);
@@ -212,7 +225,9 @@ namespace PlayScopeSdk.Internal
 
             // Retryable (429, 5xx, network error) → schedule next retry
             double baseSeconds = BackoffBase[Math.Min(state.Attempts - 1, BackoffBase.Length - 1)];
-            double jitter = baseSeconds * 0.2 * (UnityEngine.Random.value * 2.0 - 1.0); // ±20%
+            double rand;
+            lock (_jitterRng) { rand = _jitterRng.NextDouble(); }
+            double jitter = baseSeconds * 0.2 * (rand * 2.0 - 1.0); // ±20%
             var nextRetry = DateTime.UtcNow.AddSeconds(baseSeconds + jitter);
             state.NextRetryAt = nextRetry;
             SaveState(stateFilePath, state);
@@ -452,12 +467,16 @@ namespace PlayScopeSdk.Internal
         {
             internal string ChunkId = "";
             internal int Attempts;
+            internal DateTime? CreatedAt;
             internal DateTime? LastAttemptAt;
             internal DateTime? NextRetryAt;
             internal bool IsUploaded;
 
             internal string ToJson()
             {
+                var created = CreatedAt.HasValue
+                    ? "\"" + CreatedAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + "\""
+                    : "null";
                 var last = LastAttemptAt.HasValue
                     ? "\"" + LastAttemptAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + "\""
                     : "null";
@@ -465,7 +484,7 @@ namespace PlayScopeSdk.Internal
                     ? "\"" + NextRetryAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + "\""
                     : "null";
                 return $"{{\"chunk_id\":\"{EscapeJsonString(ChunkId)}\",\"attempts\":{Attempts}," +
-                       $"\"last_attempt_at\":{last},\"next_retry_at\":{next}," +
+                       $"\"created_at\":{created},\"last_attempt_at\":{last},\"next_retry_at\":{next}," +
                        $"\"is_uploaded\":{(IsUploaded ? "true" : "false")}}}";
             }
 
@@ -476,6 +495,8 @@ namespace PlayScopeSdk.Internal
                 var state = new UploadState();
                 if (dict.TryGetValue("chunk_id", out var ci) && ci is string ciStr) state.ChunkId = ciStr;
                 if (dict.TryGetValue("attempts", out var att)) state.Attempts = ParseInt(att);
+                if (dict.TryGetValue("created_at", out var ca) && ca is string caStr && caStr != "null" && !string.IsNullOrEmpty(caStr))
+                    state.CreatedAt = DateTime.TryParse(caStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var caVal) ? caVal : (DateTime?)null;
                 if (dict.TryGetValue("last_attempt_at", out var la) && la is string laStr && laStr != "null" && !string.IsNullOrEmpty(laStr))
                     state.LastAttemptAt = DateTime.TryParse(laStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var laVal) ? laVal : (DateTime?)null;
                 if (dict.TryGetValue("next_retry_at", out var nr) && nr is string nrStr && nrStr != "null" && !string.IsNullOrEmpty(nrStr))

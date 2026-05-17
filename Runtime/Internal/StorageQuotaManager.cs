@@ -14,6 +14,50 @@ namespace PlayScopeSdk.Internal
         private const long DefaultCapBytes = 50L * 1024 * 1024;   // 50 MB
         private const long HardCapBytes    = 100L * 1024 * 1024;  // 100 MB
 
+        // ── Cached storage size (issue #16) ───────────────────────────────────────
+        // Avoid rescanning the whole tree on every flush. We track running total via
+        // append/delete notifications and re-baseline every 60 seconds for drift.
+        private static readonly object _sizeLock = new object();
+        private static long _cachedTotalBytes = -1;            // -1 == uninitialised
+        private static DateTime _lastFullScanUtc = DateTime.MinValue;
+        private static readonly TimeSpan _fullScanInterval = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// Called by WriterWorker each time bytes are appended to the live chunk.
+        /// </summary>
+        internal static void NotifyBytesAppended(long bytes)
+        {
+            if (bytes <= 0) return;
+            lock (_sizeLock)
+            {
+                if (_cachedTotalBytes < 0) return; // not initialised yet — next scan picks it up
+                _cachedTotalBytes += bytes;
+            }
+        }
+
+        /// <summary>
+        /// Called by WriterWorker when a chunk is finalized (renamed). The byte count
+        /// is unchanged but the file count changes — included for future use.
+        /// </summary>
+        internal static void NotifyChunkFinalized(string finalizedPath)
+        {
+            // Currently a no-op for byte accounting (rename keeps the bytes), but kept as
+            // a hook so callers don't need to change later.
+            _ = finalizedPath;
+        }
+
+        /// <summary>
+        /// Invalidate the cache (used by tests).
+        /// </summary>
+        internal static void InvalidateSizeCache()
+        {
+            lock (_sizeLock)
+            {
+                _cachedTotalBytes = -1;
+                _lastFullScanUtc = DateTime.MinValue;
+            }
+        }
+
         // ── Public API ────────────────────────────────────────────────────────────
 
         /// <summary>
@@ -38,8 +82,23 @@ namespace PlayScopeSdk.Internal
 
         /// <summary>
         /// Returns the total bytes used across all PlayScope storage directories.
+        /// Cached and re-baselined every 60 seconds — avoids a full tree scan on every flush.
         /// </summary>
         internal static long GetTotalStorageBytes()
+        {
+            lock (_sizeLock)
+            {
+                var now = DateTime.UtcNow;
+                if (_cachedTotalBytes < 0 || now - _lastFullScanUtc > _fullScanInterval)
+                {
+                    _cachedTotalBytes = ScanTotalStorageBytes();
+                    _lastFullScanUtc = now;
+                }
+                return _cachedTotalBytes;
+            }
+        }
+
+        private static long ScanTotalStorageBytes()
         {
             long total = 0;
             total += SumDirectory(PlayScopeDirectory.Chunks);
@@ -133,7 +192,17 @@ namespace PlayScopeSdk.Internal
             }
 
             if (droppedChunkCount > 0)
-                WritePartialMarker(droppedChunkCount);
+                WritePartialMarker(PlayScopeDirectory.Chunks, droppedChunkCount);
+        }
+
+        /// <summary>
+        /// Writes a session_data_partial marker into a completed_sessions/{id}/ directory after
+        /// non-critical chunks were dropped from that session. Used by recovery / future callers
+        /// that delete from a completed (non-current) session. See issue #10.
+        /// </summary>
+        internal static void WritePartialMarkerForCompletedSession(string completedSessionDir, int droppedChunks)
+        {
+            WritePartialMarker(completedSessionDir, droppedChunks);
         }
 
         // ── Phase 1 ───────────────────────────────────────────────────────────────
@@ -298,10 +367,13 @@ namespace PlayScopeSdk.Internal
 
         // ── Partial marker ────────────────────────────────────────────────────────
 
-        private static void WritePartialMarker(int droppedChunks)
+        private static void WritePartialMarker(string targetDir, int droppedChunks)
         {
             try
             {
+                if (string.IsNullOrEmpty(targetDir)) targetDir = PlayScopeDirectory.Chunks;
+                Directory.CreateDirectory(targetDir);
+
                 var now = DateTime.UtcNow;
                 var timestampMs = (long)(now - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
                 var iso = now.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
@@ -309,7 +381,7 @@ namespace PlayScopeSdk.Internal
                 var json = "{\"record_type\":\"event\",\"event_type\":\"session_data_partial\",\"timestamp\":\"" + iso + "\",\"metadata\":{\"data_loss_reason\":\"local_quota_exceeded\",\"dropped_chunks\":" + droppedChunks + "}}";
 
                 var fileName = $"partial_marker_{timestampMs}.jsonl";
-                var path = Path.Combine(PlayScopeDirectory.Chunks, fileName);
+                var path = Path.Combine(targetDir, fileName);
                 File.WriteAllText(path, json + "\n", new UTF8Encoding(false));
             }
             catch (Exception ex)
@@ -424,6 +496,11 @@ namespace PlayScopeSdk.Internal
             {
                 long size = new FileInfo(path).Length;
                 File.Delete(path);
+                lock (_sizeLock)
+                {
+                    if (_cachedTotalBytes >= 0)
+                        _cachedTotalBytes = Math.Max(0, _cachedTotalBytes - size);
+                }
                 return size;
             }
             catch
