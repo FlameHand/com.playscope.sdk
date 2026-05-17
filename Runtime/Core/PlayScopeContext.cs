@@ -33,6 +33,6 @@ namespace PlayScopeSdk
         /// Base URL for the PlayScope ingest API. Defaults to the PlayScope production endpoint.
         /// Override only for staging or on-premise deployments.
         /// </summary>
-        public string UploadEndpoint { get; set; } = "https://itst-api-dev.flamehands.online";
+        public string UploadEndpoint { get; set; } = "https://api.playscope.dev";
     }
 }
