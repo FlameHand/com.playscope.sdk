@@ -187,11 +187,12 @@ namespace PlayScopeSdk.Internal
             SaveState(stateFilePath, state);
 
             int httpStatus = 0;
+            string responseBody = "";
             bool networkError = false;
 
             try
             {
-                httpStatus = await SendRequestAsync(endpoint, payload, ct);
+                (httpStatus, responseBody) = await SendRequestAsync(endpoint, payload, ct);
             }
             catch (OperationCanceledException)
             {
@@ -218,7 +219,10 @@ namespace PlayScopeSdk.Internal
             if (!networkError && (httpStatus == 400 || httpStatus == 401 || httpStatus == 402 ||
                                    httpStatus == 403 || httpStatus == 422))
             {
-                Debug.LogWarning($"[PlayScope] Non-retryable HTTP {httpStatus} for {chunkName} — moving to dead letter.");
+                var bodySnippet = string.IsNullOrEmpty(responseBody)
+                    ? ""
+                    : " body=" + (responseBody.Length > 512 ? responseBody.Substring(0, 512) + "…" : responseBody);
+                Debug.LogWarning($"[PlayScope] Non-retryable HTTP {httpStatus} for {chunkName} — moving to dead letter.{bodySnippet}");
                 MoveToDeadLetter(chunkPath, stateFilePath);
                 return;
             }
@@ -240,7 +244,7 @@ namespace PlayScopeSdk.Internal
 
         // ── HTTP ──────────────────────────────────────────────────────────────────
 
-        private async UniTask<int> SendRequestAsync(string url, byte[] gzipBody, CancellationToken ct)
+        private async UniTask<(int Status, string Body)> SendRequestAsync(string url, byte[] gzipBody, CancellationToken ct)
         {
             using var request = new UnityWebRequest(url, "POST");
             request.uploadHandler = new UploadHandlerRaw(gzipBody);
@@ -265,7 +269,9 @@ namespace PlayScopeSdk.Internal
                 throw new Exception(request.error);
 #endif
 
-            return (int)request.responseCode;
+            var body = "";
+            try { body = request.downloadHandler?.text ?? ""; } catch { /* best-effort */ }
+            return ((int)request.responseCode, body);
         }
 
         // ── Payload building ──────────────────────────────────────────────────────
