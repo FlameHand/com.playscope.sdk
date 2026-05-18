@@ -291,11 +291,17 @@ namespace PlayScopeSdk.Internal
                 }
             }
 
+            // Recovered chunks live under completed_sessions/{sessionId}/ and carry a manifest
+            // (session.json) with the original session's identity. Use it so the envelope
+            // attributes the data to the crashed session, not the currently-running one.
+            ResolveEnvelopeIdentity(chunkPath,
+                out var envelopeSessionId, out var envelopeSdkVersion, out var envelopeSchemaVersion);
+
             var sb = new StringBuilder();
             sb.Append("{");
-            sb.Append("\"session_id\":\"").Append(EscapeJsonString(_session.SessionId)).Append("\",");
-            sb.Append("\"sdk_version\":\"").Append(EscapeJsonString(_session.SdkVersion)).Append("\",");
-            sb.Append("\"schema_version\":").Append(_session.SchemaVersion).Append(",");
+            sb.Append("\"session_id\":\"").Append(EscapeJsonString(envelopeSessionId)).Append("\",");
+            sb.Append("\"sdk_version\":\"").Append(EscapeJsonString(envelopeSdkVersion)).Append("\",");
+            sb.Append("\"schema_version\":").Append(envelopeSchemaVersion).Append(",");
             sb.Append("\"batch_id\":\"").Append(EscapeJsonString(Path.GetFileNameWithoutExtension(chunkPath))).Append("\",");
             sb.Append("\"sent_at\":\"").Append(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")).Append("\",");
             sb.Append("\"events\":[").Append(string.Join(",", events)).Append("],");
@@ -309,6 +315,55 @@ namespace PlayScopeSdk.Internal
             using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
                 gz.Write(jsonBytes, 0, jsonBytes.Length);
             return ms.ToArray();
+        }
+
+        /// <summary>
+        /// Determines which session_id / sdk_version / schema_version should be attached to the
+        /// envelope for the given chunk. For chunks that were recovered into
+        /// completed_sessions/{sessionId}/ by SessionRecovery, we read the bundled manifest
+        /// (session.json snapshot) so the envelope describes the original (crashed) session,
+        /// not the currently-running one. Falls back to the live SessionInfo otherwise.
+        /// </summary>
+        private void ResolveEnvelopeIdentity(string chunkPath,
+            out string sessionId, out string sdkVersion, out int schemaVersion)
+        {
+            sessionId = _session.SessionId;
+            sdkVersion = _session.SdkVersion;
+            schemaVersion = _session.SchemaVersion;
+
+            try
+            {
+                var chunkDir = Path.GetDirectoryName(chunkPath);
+                if (string.IsNullOrEmpty(chunkDir)) return;
+
+                // Only honor a manifest when the chunk lives somewhere under completed_sessions/.
+                // Live chunks (current session) use the live SessionInfo, which is always correct.
+                var completedRoot = PlayScopeDirectory.CompletedSessions;
+                if (!chunkDir.StartsWith(completedRoot, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                var manifestPath = Path.Combine(chunkDir, "session.json");
+                if (!File.Exists(manifestPath)) return;
+
+                var json = File.ReadAllText(manifestPath, new UTF8Encoding(false));
+                var dto = SimpleJson.Deserialize(json);
+                if (dto == null) return;
+
+                if (dto.TryGetValue("session_id", out var sid) && sid is string sidStr && !string.IsNullOrEmpty(sidStr))
+                    sessionId = sidStr;
+                if (dto.TryGetValue("sdk_version", out var sv) && sv is string svStr && !string.IsNullOrEmpty(svStr))
+                    sdkVersion = svStr;
+                if (dto.TryGetValue("schema_version", out var schv))
+                {
+                    if (schv is int schvInt) schemaVersion = schvInt;
+                    else if (schv is string schvStr && int.TryParse(schvStr, out var parsed)) schemaVersion = parsed;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] Could not read recovered-session manifest for {Path.GetFileName(chunkPath)}: {ex.Message}");
+                // Best-effort: out-params already hold the live-session fallback.
+            }
         }
 
         /// <summary>

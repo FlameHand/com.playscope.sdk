@@ -131,6 +131,12 @@ namespace PlayScopeSdk.Internal
             // Step 3c/3d (cont.): move ALL .jsonl files (including chunk_current) to destDir
             MoveAllChunksToDir(chunksDir, currentChunk, destDir);
 
+            // Step 3d.1: snapshot session.json into destDir as a manifest. UploaderWorker reads
+            // this when building the envelope for recovered chunks so the original session_id,
+            // sdk_version, and schema_version are preserved (without it, recovered chunks would
+            // be attributed to the NEW session that runs the upload).
+            CopySessionManifest(destDir);
+
             // Step 3e: enqueue all .jsonl files in destDir
             EnqueueJsonlFilesInDir(destDir, queue);
 
@@ -173,6 +179,28 @@ namespace PlayScopeSdk.Internal
             catch (Exception ex)
             {
                 Debug.LogWarning($"[PlayScope] SessionRecovery: error listing chunk files: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Copies the live session.json into the completed-session folder as session.json so that
+        /// at upload time we can read the ORIGINAL session_id, sdk_version, and schema_version
+        /// for chunks that belong to the crashed session.
+        /// Best-effort: failures are logged but never fatal — uploader falls back to current session.
+        /// </summary>
+        private static void CopySessionManifest(string destDir)
+        {
+            try
+            {
+                var src = PlayScopeDirectory.SessionJson;
+                if (!File.Exists(src)) return;
+                var dest = Path.Combine(destDir, "session.json");
+                if (File.Exists(dest)) return; // never overwrite an existing manifest
+                File.Copy(src, dest);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] SessionRecovery: failed to copy session manifest: {ex.Message}");
             }
         }
 
