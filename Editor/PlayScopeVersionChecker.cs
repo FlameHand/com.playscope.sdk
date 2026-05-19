@@ -193,8 +193,7 @@ namespace PlayScopeSdk.Editor
         private enum Phase { Listing, Fetching, UpToDate, UpdateAvailable, Error }
 
         private Phase _phase = Phase.Listing;
-        private float _progress;
-        private string _statusLine = "Listing installed packages…";
+        private float _progress = 0.33f;
         private string _installedVersion;
         private string _latestVersion;
         private string _errorMessage;
@@ -202,6 +201,10 @@ namespace PlayScopeSdk.Editor
         private ListRequest _listReq;
         private UnityWebRequest _www;
         private double _lastSpinnerTime;
+        private int _spinnerFrame;
+
+        // Single-char marquee for the in-flight bar. Same pattern as gh / cargo.
+        private static readonly string[] SpinnerFrames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
         public static void Open()
         {
@@ -217,12 +220,14 @@ namespace PlayScopeSdk.Editor
 
         private void StartCheck()
         {
-            // If a previous check is still running on this window, leave it be.
-            // Otherwise (re-open after terminal state) reset everything.
-            if (_phase == Phase.Listing || _phase == Phase.Fetching) return;
+            // Guard by the actual in-flight handles, not by _phase: _phase
+            // defaults to Phase.Listing on a fresh window, which would make
+            // the old "is in Listing/Fetching" check skip the very first
+            // request and leave the bar bouncing forever.
+            if (_listReq != null || _www != null) return;
+
             _phase = Phase.Listing;
-            _progress = 0f;
-            _statusLine = "Listing installed packages…";
+            _progress = 0.33f;
             _installedVersion = null;
             _latestVersion = null;
             _errorMessage = null;
@@ -252,12 +257,16 @@ namespace PlayScopeSdk.Editor
                     break;
             }
 
-            // Cheap spinner animation while a request is in flight.
+            // Animate spinner glyph + repaint roughly every 100ms while a
+            // request is in flight. Progress value itself stays static at the
+            // phase's bucket (0.33 / 0.66 / 1.0) — drifting it created the
+            // "fills then resets" illusion that looked like a hang.
             if (_phase == Phase.Listing || _phase == Phase.Fetching)
             {
                 if (EditorApplication.timeSinceStartup - _lastSpinnerTime > 0.1)
                 {
                     _lastSpinnerTime = EditorApplication.timeSinceStartup;
+                    _spinnerFrame++;
                     Repaint();
                 }
             }
@@ -298,8 +307,7 @@ namespace PlayScopeSdk.Editor
             }
 
             _phase = Phase.Fetching;
-            _progress = 0.5f;
-            _statusLine = $"Checking GitHub for releases newer than {_installedVersion}…";
+            _progress = 0.66f;
 
             _www = UnityWebRequest.Get(PlayScopeVersionChecker.LatestReleaseUrl);
             _www.SetRequestHeader("User-Agent", PlayScopeVersionChecker.PackageName + "-version-checker");
@@ -333,16 +341,9 @@ namespace PlayScopeSdk.Editor
             PlayScopeVersionChecker.MarkCheckedNow();
 
             _progress = 1f;
-            if (PlayScopeVersionChecker.IsNewer(_latestVersion, _installedVersion))
-            {
-                _phase = Phase.UpdateAvailable;
-                _statusLine = "Update available.";
-            }
-            else
-            {
-                _phase = Phase.UpToDate;
-                _statusLine = "You're on the latest version.";
-            }
+            _phase = PlayScopeVersionChecker.IsNewer(_latestVersion, _installedVersion)
+                ? Phase.UpdateAvailable
+                : Phase.UpToDate;
             Repaint();
         }
 
@@ -350,10 +351,28 @@ namespace PlayScopeSdk.Editor
         {
             _phase = Phase.Error;
             _errorMessage = msg;
-            _statusLine = "Update check failed.";
             _progress = 0f;
             if (_www != null) { _www.Dispose(); _www = null; }
+            if (_listReq != null) _listReq = null;
             Repaint();
+        }
+
+        // Status text shown ON the progress bar, kept as a derived value so
+        // there's no _statusLine field to keep in sync as the phase changes.
+        private string CurrentStatus()
+        {
+            var spin = (_phase == Phase.Listing || _phase == Phase.Fetching)
+                ? SpinnerFrames[_spinnerFrame % SpinnerFrames.Length] + "  "
+                : "";
+            switch (_phase)
+            {
+                case Phase.Listing:         return spin + "Listing installed packages…";
+                case Phase.Fetching:        return spin + "Checking GitHub for the latest release…";
+                case Phase.UpToDate:        return "Up to date";
+                case Phase.UpdateAvailable: return "Update available";
+                case Phase.Error:           return "Update check failed";
+                default:                    return "";
+            }
         }
 
         private void OnGUI()
@@ -370,12 +389,11 @@ namespace PlayScopeSdk.Editor
             EditorGUILayout.Space(10);
 
             // Progress bar — always rendered so the layout doesn't jump when
-            // we transition from in-flight to terminal state.
+            // we transition from in-flight to terminal state. Value is static
+            // per phase; the spinner glyph in the status text carries the
+            // "things are happening" cue.
             var rect = EditorGUILayout.GetControlRect(false, 18);
-            var displayProgress = (_phase == Phase.Listing || _phase == Phase.Fetching)
-                ? AnimatedProgress(_progress)
-                : (_phase == Phase.Error ? 0f : 1f);
-            EditorGUI.ProgressBar(rect, displayProgress, _statusLine);
+            EditorGUI.ProgressBar(rect, _progress, CurrentStatus());
 
             EditorGUILayout.Space(10);
 
@@ -452,28 +470,14 @@ namespace PlayScopeSdk.Editor
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button("Retry", GUILayout.Width(80)))
                 {
-                    _phase = Phase.Error == _phase ? Phase.Listing : _phase;
-                    // Re-arm and start over.
-                    _phase = Phase.Listing;
-                    _progress = 0f;
-                    _statusLine = "Listing installed packages…";
-                    _errorMessage = null;
-                    _installedVersion = null;
-                    _latestVersion = null;
-                    _listReq = Client.List(offlineMode: false);
-                    Repaint();
+                    // Reuse the canonical start path so re-arm logic stays in
+                    // one place — and StartCheck's guard correctly sees that
+                    // both handles are null (we cleared them on EnterError).
+                    StartCheck();
                 }
                 if (GUILayout.Button("Close", GUILayout.Width(80))) Close();
             }
         }
 
-        // Slow drift on the progress bar while a request is in flight — gives
-        // the user a "something is happening" cue even if the underlying op
-        // hasn't reported any concrete progress yet.
-        private float AnimatedProgress(float baseValue)
-        {
-            float drift = (float)((EditorApplication.timeSinceStartup % 1.0) * 0.05);
-            return Mathf.Clamp01(baseValue + drift);
-        }
     }
 }
