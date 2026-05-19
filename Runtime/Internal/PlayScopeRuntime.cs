@@ -8,7 +8,7 @@ namespace PlayScopeSdk.Internal
 {
     internal static class PlayScopeRuntime
     {
-        internal const string SdkVersion = "0.1.22";
+        internal const string SdkVersion = "0.1.23";
 
         private static volatile bool _initialized;
         private static volatile bool _disabled;
