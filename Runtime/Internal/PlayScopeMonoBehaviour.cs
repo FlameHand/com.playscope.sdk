@@ -18,6 +18,9 @@ namespace PlayScopeSdk.Internal
             if (PlayScopeRuntime.Pipeline == null)
                 _sampler = null;
             _sampler?.Tick();
+            // Drive the patch coalescer's window timer on the same frame
+            // pulse — keeps it cheap and avoids a separate worker thread.
+            PlayScopeRuntime.StatePatchCoalescer.TickAndMaybeFlush();
         }
 
         private void OnApplicationPause(bool isPaused)

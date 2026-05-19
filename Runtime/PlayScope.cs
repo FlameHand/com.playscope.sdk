@@ -96,12 +96,30 @@ namespace PlayScopeSdk
         /// </summary>
         /// <param name="patch">Dictionary of keys to update in the current state.</param>
         public static void UpdateState(IReadOnlyDictionary<string, object> patch)
+            => UpdateState(patch, reason: null);
+
+        /// <summary>
+        /// Applies a partial patch with an explanatory reason. The reason is
+        /// recorded in the patch payload under <c>_reason</c> and shown in the
+        /// dashboard so reviewers can answer "why did this state change?"
+        /// without digging through call stacks.
+        /// </summary>
+        /// <param name="patch">Dictionary of keys to update in the current state.</param>
+        /// <param name="reason">Short human-readable cause: "level_up", "purchase_completed",
+        /// "save_loaded", etc. Free-form but keep it consistent across call sites — the
+        /// dashboard groups patches by reason.</param>
+        public static void UpdateState(IReadOnlyDictionary<string, object> patch, string reason)
         {
             try
             {
                 if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
                 patch = SensitiveKeyFilter.FilterState(patch);
-                PlayScopeRuntime.Pipeline?.EnqueueEvent("state_patch", statePatchJson: EventPipeline.DictToJson(patch));
+                // Hand off to the coalescer instead of emitting directly. The
+                // coalescer folds a per-frame burst of UpdateState() calls
+                // into one row per ~100ms window — see StatePatchCoalescer.
+                // It stamps _reason itself before the actual emit, so callers
+                // don't need to merge anything here.
+                PlayScopeRuntime.StatePatchCoalescer.Add(patch, reason);
             }
             catch (Exception ex) { PlayScopeLog.Warning("UpdateState failed", ex); }
         }

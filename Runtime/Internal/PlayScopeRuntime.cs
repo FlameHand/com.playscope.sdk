@@ -8,7 +8,7 @@ namespace PlayScopeSdk.Internal
 {
     internal static class PlayScopeRuntime
     {
-        internal const string SdkVersion = "0.1.17";
+        internal const string SdkVersion = "0.1.18";
 
         private static volatile bool _initialized;
         private static volatile bool _disabled;
@@ -23,6 +23,10 @@ namespace PlayScopeSdk.Internal
         internal static EventQueue? Queue { get; private set; }
         internal static EventPipeline? Pipeline { get; private set; }
         internal static UploadQueue? UploadQueue { get; private set; }
+        // Single shared coalescer for state_patch debouncing. Lives for the
+        // session lifetime — flushed on pause / shutdown so its buffer never
+        // strands a patch.
+        internal static StatePatchCoalescer StatePatchCoalescer { get; } = new();
         private static WriterWorker? _writer;
         private static HeartbeatWorker? _heartbeat;
         internal static UploaderWorker? _uploader;
@@ -211,6 +215,11 @@ namespace PlayScopeSdk.Internal
             _heartbeat?.Stop();
             _heartbeat = null;
 
+            // Flush any buffered state patch before session_end so the last
+            // changes survive — otherwise the 100ms coalescing window would
+            // strand them in the buffer when we stop the pipeline below.
+            StatePatchCoalescer.FlushNow();
+
             // Enqueue session_end (critical — triggers instant upload)
             Pipeline?.EnqueueEvent("session_end",
                 metadataJson: "{\"end_status\":\"normal\"}");
@@ -242,8 +251,14 @@ namespace PlayScopeSdk.Internal
 #endif
         }
 
-        // Called from OnApplicationPause
-        internal static void FlushOnPause() => _writer?.FlushImmediate();
+        // Called from OnApplicationPause / focus lost. Flushes both the patch
+        // coalescer (so its buffer doesn't sit through a background period
+        // that may end with the OS killing the app) and the writer.
+        internal static void FlushOnPause()
+        {
+            StatePatchCoalescer.FlushNow();
+            _writer?.FlushImmediate();
+        }
 
         /// <summary>
         /// Records a lifecycle transition. Called from MonoBehaviour pause/focus callbacks.
