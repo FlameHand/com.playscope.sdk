@@ -174,6 +174,15 @@ namespace PlayScopeSdk.Internal
             {
                 payload = BuildGzipPayload(chunkPath);
             }
+            catch (InvalidOperationException ex)
+            {
+                // Unrecoverable: the chunk's session identity cannot be determined.
+                // Re-uploading under the live session would mis-attribute data. Park it.
+                Debug.LogWarning(
+                    $"[PlayScope] Cannot attribute {chunkName}: {ex.Message}. Moving to dead letter.");
+                MoveToDeadLetter(chunkPath, stateFilePath);
+                return;
+            }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[PlayScope] Failed to build payload for {chunkName}: {ex.Message}");
@@ -300,6 +309,7 @@ namespace PlayScopeSdk.Internal
             // Recovered chunks live under completed_sessions/{sessionId}/ and carry a manifest
             // (session.json) with the original session's identity. Use it so the envelope
             // attributes the data to the crashed session, not the currently-running one.
+            // Throws if a recovered chunk has no usable manifest — see ResolveEnvelopeIdentity.
             ResolveEnvelopeIdentity(chunkPath,
                 out var envelopeSessionId, out var envelopeSdkVersion, out var envelopeSchemaVersion);
 
@@ -325,10 +335,23 @@ namespace PlayScopeSdk.Internal
 
         /// <summary>
         /// Determines which session_id / sdk_version / schema_version should be attached to the
-        /// envelope for the given chunk. For chunks that were recovered into
-        /// completed_sessions/{sessionId}/ by SessionRecovery, we read the bundled manifest
-        /// (session.json snapshot) so the envelope describes the original (crashed) session,
-        /// not the currently-running one. Falls back to the live SessionInfo otherwise.
+        /// envelope for the given chunk.
+        ///
+        /// <para>
+        /// For chunks under <c>chunks/</c> (the live session's directory) we use the live
+        /// SessionInfo — by the time a chunk gets here, RecoverPendingChunks has already
+        /// filtered out anything that isn't owned by the current session.
+        /// </para>
+        ///
+        /// <para>
+        /// For chunks under <c>completed_sessions/{sessionId}/</c> we read the bundled
+        /// <c>session.json</c> manifest so the envelope describes the ORIGINAL session, not
+        /// the currently-running one. If the manifest is missing or unreadable we cannot
+        /// safely attribute the data to ANY session — falling back to the live SessionInfo
+        /// would commingle two sessions under one backend session_id, which is the exact
+        /// bug we fixed in 0.1.16. In that case we throw <see cref="InvalidOperationException"/>
+        /// so the caller can dead-letter the chunk.
+        /// </para>
         /// </summary>
         private void ResolveEnvelopeIdentity(string chunkPath,
             out string sessionId, out string sdkVersion, out int schemaVersion)
@@ -337,38 +360,46 @@ namespace PlayScopeSdk.Internal
             sdkVersion = _session.SdkVersion;
             schemaVersion = _session.SchemaVersion;
 
+            var chunkDir = Path.GetDirectoryName(chunkPath);
+            if (string.IsNullOrEmpty(chunkDir)) return;
+
+            var completedRoot = PlayScopeDirectory.CompletedSessions;
+            if (!chunkDir.StartsWith(completedRoot, StringComparison.OrdinalIgnoreCase))
+                return; // live chunk → live identity, correct by construction
+
+            // Recovered chunk: the manifest is the ONLY source of truth for which session
+            // this data belongs to. No fallback allowed.
+            var manifestPath = Path.Combine(chunkDir, "session.json");
+            if (!File.Exists(manifestPath))
+                throw new InvalidOperationException(
+                    $"Recovered chunk '{Path.GetFileName(chunkPath)}' has no session.json manifest " +
+                    $"in {chunkDir}. Refusing to upload — would risk attributing to wrong session.");
+
+            Dictionary<string, object>? dto;
             try
             {
-                var chunkDir = Path.GetDirectoryName(chunkPath);
-                if (string.IsNullOrEmpty(chunkDir)) return;
-
-                // Only honor a manifest when the chunk lives somewhere under completed_sessions/.
-                // Live chunks (current session) use the live SessionInfo, which is always correct.
-                var completedRoot = PlayScopeDirectory.CompletedSessions;
-                if (!chunkDir.StartsWith(completedRoot, StringComparison.OrdinalIgnoreCase))
-                    return;
-
-                var manifestPath = Path.Combine(chunkDir, "session.json");
-                if (!File.Exists(manifestPath)) return;
-
                 var json = File.ReadAllText(manifestPath, new UTF8Encoding(false));
-                var dto = SimpleJson.Deserialize(json);
-                if (dto == null) return;
-
-                if (dto.TryGetValue("session_id", out var sid) && sid is string sidStr && !string.IsNullOrEmpty(sidStr))
-                    sessionId = sidStr;
-                if (dto.TryGetValue("sdk_version", out var sv) && sv is string svStr && !string.IsNullOrEmpty(svStr))
-                    sdkVersion = svStr;
-                if (dto.TryGetValue("schema_version", out var schv))
-                {
-                    if (schv is int schvInt) schemaVersion = schvInt;
-                    else if (schv is string schvStr && int.TryParse(schvStr, out var parsed)) schemaVersion = parsed;
-                }
+                dto = SimpleJson.Deserialize(json);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[PlayScope] Could not read recovered-session manifest for {Path.GetFileName(chunkPath)}: {ex.Message}");
-                // Best-effort: out-params already hold the live-session fallback.
+                throw new InvalidOperationException(
+                    $"Recovered chunk '{Path.GetFileName(chunkPath)}' has an unreadable manifest: {ex.Message}. " +
+                    "Refusing to upload — would risk attributing to wrong session.", ex);
+            }
+            if (dto == null || !dto.TryGetValue("session_id", out var sid)
+                || sid is not string sidStr || string.IsNullOrEmpty(sidStr))
+                throw new InvalidOperationException(
+                    $"Recovered chunk '{Path.GetFileName(chunkPath)}' has a manifest with no session_id. " +
+                    "Refusing to upload — would risk attributing to wrong session.");
+
+            sessionId = sidStr;
+            if (dto.TryGetValue("sdk_version", out var sv) && sv is string svStr && !string.IsNullOrEmpty(svStr))
+                sdkVersion = svStr;
+            if (dto.TryGetValue("schema_version", out var schv))
+            {
+                if (schv is int schvInt) schemaVersion = schvInt;
+                else if (schv is string schvStr && int.TryParse(schvStr, out var parsed)) schemaVersion = parsed;
             }
         }
 
@@ -469,8 +500,18 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// On startup, scan the chunks directory for finalized .jsonl files left from a previous
-        /// session crash (they were never uploaded). Enqueue them so the upload loop picks them up.
+        /// On startup, scan the chunks directory for finalized .jsonl files left from THIS
+        /// session (e.g. a crash mid-upload). Enqueue them so the upload loop picks them up.
+        ///
+        /// <para>
+        /// Critically: only files whose name contains the current session's short id are
+        /// picked up here. Finalized chunks are named <c>chunk_{shortId}_{counter:D6}.jsonl</c>;
+        /// any chunk with a DIFFERENT short id is an orphan from a prior session and must NOT
+        /// be uploaded under the current session's envelope (doing so commingles events from
+        /// multiple SDK sessions into one backend session_id — see ClickHouse audit
+        /// 2026-05-19). Orphans are left for <see cref="SessionRecovery"/> to relocate.
+        /// </para>
+        ///
         /// Skips chunk_current.jsonl (still being written) and already-uploaded chunks
         /// (tracked via state files marked is_uploaded=true).
         /// </summary>
@@ -478,14 +519,30 @@ namespace PlayScopeSdk.Internal
         {
             var dir = PlayScopeDirectory.Chunks;
             if (!Directory.Exists(dir)) return;
+            var ownPrefix = $"chunk_{_session.SessionShortId}_";
             try
             {
                 foreach (var file in Directory.GetFiles(dir, "chunk_*.jsonl"))
                 {
+                    var name = Path.GetFileName(file);
+
                     // Skip the live current chunk
-                    if (string.Equals(Path.GetFileName(file), "chunk_current.jsonl",
+                    if (string.Equals(name, "chunk_current.jsonl",
                             StringComparison.OrdinalIgnoreCase))
                         continue;
+
+                    // Belt-and-braces ownership check: only OUR finalized chunks belong on
+                    // this session's upload queue. SessionRecovery should have already
+                    // relocated everything else to completed_sessions/, but if anything
+                    // slipped through, refuse to claim it.
+                    if (!name.StartsWith(ownPrefix, StringComparison.Ordinal))
+                    {
+                        Debug.LogWarning(
+                            $"[PlayScope] UploaderWorker: skipping orphan chunk '{name}' " +
+                            $"(does not belong to current session '{_session.SessionShortId}'). " +
+                            "SessionRecovery should relocate it on next start.");
+                        continue;
+                    }
 
                     // Skip if already uploaded (state file says so)
                     var stateFilePath = Path.Combine(PlayScopeDirectory.UploadQueue,

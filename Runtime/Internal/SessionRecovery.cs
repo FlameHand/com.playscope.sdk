@@ -24,34 +24,79 @@ namespace PlayScopeSdk.Internal
         {
             try
             {
-                // Step 1: check for stale lock
-                if (!File.Exists(PlayScopeDirectory.SessionLock))
+                bool hasStaleLock = File.Exists(PlayScopeDirectory.SessionLock);
+                // Orphan detection: any leftover chunk_*.jsonl in chunksDir (or a non-empty
+                // chunk_current.jsonl) means the prior session left data behind. We must
+                // relocate it to completed_sessions/{priorSessionId}/ BEFORE the new session
+                // takes over chunksDir, otherwise the uploader would upload those chunks
+                // under the NEW session's envelope and commingle two sessions' events
+                // under one backend session_id (regression seen 2026-05-19).
+                bool hasOrphans = ChunksDirHasOrphans();
+
+                if (!hasStaleLock && !hasOrphans)
                 {
-                    // No stale lock — still pick up any orphaned completed_sessions
+                    // Clean state — just pick up any orphaned completed_sessions
                     EnqueueCompletedSessions(uploadQueue);
                     return;
                 }
 
-                // Step 3a: read session_id from stale session.json
+                // Step 3a: read session_id from the on-disk session.json (still holds the
+                // PRIOR session's identity — the new session hasn't been generated yet).
                 var sessionId = ReadStaleSesionId();
 
-                // Determine the folder name we'll use to store the recovered session. We must
-                // pass this same name as the excludeSessionId below so the just-recovered
-                // folder is not re-enqueued by the subsequent scan (issue #11).
                 var recoveredFolder = !string.IsNullOrEmpty(sessionId)
                     ? sessionId
                     : $"recovered_{DateTime.UtcNow:yyyyMMddHHmmss}";
 
-                // Step 3b-e: move chunks, write synthetic event if needed
-                ProcessStaleLockSession(sessionId, recoveredFolder, uploadQueue);
+                // For the no-lock-but-orphans case we suppress the synthetic abnormal-end
+                // event — the prior session ended cleanly enough to remove its lock, so
+                // tagging it as abnormal would be a lie. ProcessStaleLockSession reads this
+                // flag.
+                ProcessStaleLockSession(sessionId, recoveredFolder, uploadQueue,
+                    appendSyntheticAbnormalEnd: hasStaleLock);
 
-                // Step 4: pick up any other old completed sessions (excluding the one we just enqueued)
                 EnqueueCompletedSessions(uploadQueue, excludeSessionId: recoveredFolder);
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[PlayScope] SessionRecovery encountered an unexpected error: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// True if chunksDir contains any finalized chunk_*.jsonl (an orphan from a prior
+        /// session that didn't upload before shutdown) or a non-empty chunk_current.jsonl.
+        /// </summary>
+        private static bool ChunksDirHasOrphans()
+        {
+            var chunksDir = PlayScopeDirectory.Chunks;
+            if (!Directory.Exists(chunksDir)) return false;
+
+            try
+            {
+                foreach (var file in Directory.GetFiles(chunksDir, "*.jsonl"))
+                {
+                    var name = Path.GetFileName(file);
+                    if (string.Equals(name, "chunk_current.jsonl", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Non-empty current chunk also counts — could happen if WriterWorker
+                        // didn't get to finalize before the prior process exited.
+                        try
+                        {
+                            if (new FileInfo(file).Length > 0) return true;
+                        }
+                        catch { /* fall through */ }
+                        continue;
+                    }
+                    // Any finalized chunk is an orphan from a previous session by definition.
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] SessionRecovery: error checking for orphans: {ex.Message}");
+            }
+            return false;
         }
 
         // -------------------------------------------------------------------------
@@ -86,7 +131,8 @@ namespace PlayScopeSdk.Internal
         /// - Otherwise → abnormal end; append synthetic session_abnormal_end line.
         /// Then moves all chunks to completed_sessions/{sessionId}/ and enqueues them.
         /// </summary>
-        private static void ProcessStaleLockSession(string sessionId, string folderName, UploadQueue queue)
+        private static void ProcessStaleLockSession(string sessionId, string folderName, UploadQueue queue,
+            bool appendSyntheticAbnormalEnd = true)
         {
             var chunksDir = PlayScopeDirectory.Chunks;
             var currentChunk = PlayScopeDirectory.CurrentChunkPath;
@@ -108,7 +154,7 @@ namespace PlayScopeSdk.Internal
             // Step 3b: scan completed (non-current) chunks for session_end
             bool sessionEndFound = ScanChunksForSessionEnd(chunksDir);
 
-            if (!sessionEndFound)
+            if (!sessionEndFound && appendSyntheticAbnormalEnd)
             {
                 // Step 3d: abnormal end — append synthetic event to chunk_current.jsonl
                 try

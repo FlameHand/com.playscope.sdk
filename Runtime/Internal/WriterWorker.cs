@@ -46,8 +46,63 @@ namespace PlayScopeSdk.Internal
         internal void Start()
         {
             _cts = new CancellationTokenSource();
+            // Defense in depth: if SessionRecovery couldn't relocate the prior session's
+            // chunk_current.jsonl (file locked, AV scanner, partial-failure inside
+            // TryMoveFile — it swallows exceptions), the file would still be on disk and
+            // EnsureCurrentChunk would open it with FileMode.Append, mixing this session's
+            // events with the previous session's content. The merged chunk would later
+            // rotate to chunk_{ourShortId}_NNNNNN.jsonl and upload under OUR envelope,
+            // re-introducing the cross-session commingling we just fixed in 0.1.16.
+            // So before we touch the file at all, quarantine any leftover content.
+            QuarantineStaleCurrentChunk();
             EnsureCurrentChunk();
             RunAsync(_cts.Token).Forget();
+        }
+
+        /// <summary>
+        /// If <c>chunk_current.jsonl</c> exists with non-zero size at startup, that content
+        /// belongs to a previous session that SessionRecovery failed to relocate. We don't
+        /// know which backend session_id it belonged to (the JSONL lines don't carry one —
+        /// only the envelope does), so we cannot re-upload it correctly. Move it into the
+        /// dead-letter directory under a timestamped name so:
+        /// <list type="bullet">
+        /// <item>it never gets appended to by the new session,</item>
+        /// <item>it never gets uploaded under the wrong session_id,</item>
+        /// <item>the bytes are preserved for forensic recovery if anyone ever needs them,</item>
+        /// <item>dead-letter TTL eventually reclaims the disk.</item>
+        /// </list>
+        /// </summary>
+        private void QuarantineStaleCurrentChunk()
+        {
+            var currentPath = PlayScopeDirectory.CurrentChunkPath;
+            try
+            {
+                if (!File.Exists(currentPath)) return;
+                if (new FileInfo(currentPath).Length == 0)
+                {
+                    // Empty file is harmless — just delete it to start clean.
+                    try { File.Delete(currentPath); } catch { /* best-effort */ }
+                    return;
+                }
+
+                var deadLetterDir = PlayScopeDirectory.DeadLetter;
+                Directory.CreateDirectory(deadLetterDir);
+                var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+                var destName = $"orphaned_chunk_current_{stamp}.jsonl";
+                var dest = Path.Combine(deadLetterDir, destName);
+                File.Move(currentPath, dest);
+                PlayScopeLog.Warning(
+                    $"WriterWorker: stale chunk_current.jsonl quarantined to dead_letter/{destName}. " +
+                    "SessionRecovery likely could not relocate it (file locked at startup?). " +
+                    "Content cannot be re-uploaded — original session_id unknown.");
+            }
+            catch (Exception ex)
+            {
+                // Last resort: if we can't even move it, truncate to zero so we don't append
+                // foreign data. Data loss, but better than cross-session commingling.
+                PlayScopeLog.Warning("WriterWorker: failed to quarantine stale chunk_current; truncating", ex);
+                try { File.WriteAllBytes(currentPath, Array.Empty<byte>()); } catch { /* swallow */ }
+            }
         }
 
         internal void Stop()

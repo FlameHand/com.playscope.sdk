@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using PlayScopeSdk.Internal;
@@ -14,6 +15,19 @@ namespace PlayScopeSdk
     {
         // One-time warning flag for CompleteOperation in disabled state.
         private static int _disabledCompleteWarned;
+
+        // opId → OperationType.ToString() — populated by StartOperation, read
+        // and drained by CompleteOperation so the operation_end event carries
+        // the type the dashboard needs to drive its per-channel filter
+        // (HTTP / ResourceLoad / SceneLoad / Purchase / Custom).
+        //
+        // Without this the timeline can only tell the type of a "start" event;
+        // toggling the HTTP filter off would still leave every HTTP "end"
+        // visible because it carried no type at all and fell through to the
+        // "Custom" bucket. ConcurrentDictionary so cross-thread Start/End
+        // (the common case — request fires on the main thread, completes on
+        // a worker) is safe.
+        private static readonly ConcurrentDictionary<string, string> _openOperationTypes = new();
 
         /// <summary>
         /// Initializes the SDK with the provided configuration.
@@ -146,11 +160,15 @@ namespace PlayScopeSdk
                 metadata = SensitiveKeyFilter.FilterMetadata(metadata);
                 var session = PlayScopeRuntime.CurrentSession;
                 var operationId = $"{session?.SessionShortId}-{SequenceCounter.Next()}";
+                var typeStr = type.ToString();
+                // Remember the type so the matching CompleteOperation can stamp
+                // it onto the operation_end event too — see the field comment.
+                _openOperationTypes[operationId] = typeStr;
                 // Merge operation_name into metadata
                 var merged = new Dictionary<string, object> { ["operation_name"] = operationName ?? "" };
                 if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
                 PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_start", operationId: operationId,
-                    operationType: type.ToString(), metadataJson: EventPipeline.DictToJson(merged));
+                    operationType: typeStr, metadataJson: EventPipeline.DictToJson(merged));
                 return operationId;
             }
             catch (Exception ex)
@@ -182,11 +200,14 @@ namespace PlayScopeSdk
                 }
                 if (string.IsNullOrEmpty(operationId)) return;
                 metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-                // Merge status into metadata
+                // Drain the type stamped by StartOperation so the end event
+                // carries the same operationType as its start — the timeline
+                // filter needs it to put the end on the right channel.
+                _openOperationTypes.TryRemove(operationId, out var typeStr);
                 var merged = new Dictionary<string, object> { ["status"] = status.ToString() };
                 if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
                 PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_end", operationId: operationId,
-                    metadataJson: EventPipeline.DictToJson(merged));
+                    operationType: typeStr, metadataJson: EventPipeline.DictToJson(merged));
             }
             catch (Exception ex) { PlayScopeLog.Warning("CompleteOperation failed", ex); }
         }
