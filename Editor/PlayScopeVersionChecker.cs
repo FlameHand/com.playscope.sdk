@@ -2,40 +2,46 @@ using System;
 using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEditor.PackageManager;
+using UnityEditor.PackageManager.Requests;
 using UnityEngine;
 using UnityEngine.Networking;
 
 namespace PlayScopeSdk.Editor
 {
     /// <summary>
-    /// Checks GitHub Releases once per 24 h and prompts when a newer version is available.
-    /// Accessible manually via PlayScope ▸ Check for Updates.
+    /// Auto-checks GitHub Releases once per 24 h and prompts when a newer
+    /// version is available. Manual entry via <c>PlayScope ▸ Check for Updates</c>
+    /// opens a window with a live progress bar — the auto-check stays silent
+    /// so it doesn't interrupt editor startup.
     /// </summary>
     [InitializeOnLoad]
     internal static class PlayScopeVersionChecker
     {
-        private const string PackageName      = "com.playscope.sdk";
-        private const string RepoOwner        = "FlameHand";
-        private const string RepoName         = "com.playscope.sdk";
-        private const string LatestReleaseUrl = "https://api.github.com/repos/" + RepoOwner + "/" + RepoName + "/releases/latest";
-        private const string InstallUrlBase   = "https://github.com/" + RepoOwner + "/" + RepoName + ".git";
+        internal const string PackageName      = "com.playscope.sdk";
+        internal const string RepoOwner        = "FlameHand";
+        internal const string RepoName         = "com.playscope.sdk";
+        internal const string LatestReleaseUrl = "https://api.github.com/repos/" + RepoOwner + "/" + RepoName + "/releases/latest";
+        internal const string InstallUrlBase   = "https://github.com/" + RepoOwner + "/" + RepoName + ".git";
 
-        private const string PrefLastCheck    = "PlayScope_LastVersionCheck";
-        private const string PrefSkipVersion  = "PlayScope_SkipVersion";
+        private const string PrefLastCheck     = "PlayScope_LastVersionCheck";
+        private const string PrefSkipVersion   = "PlayScope_SkipVersion";
         private const double CheckIntervalHours = 24.0;
 
         static PlayScopeVersionChecker()
         {
-            EditorApplication.delayCall += RunCheck;
+            EditorApplication.delayCall += AutoCheckSilent;
         }
 
-        // ── Menu entry ────────────────────────────────────────────────────────────
+        // ── Menu entries ──────────────────────────────────────────────────────────
 
         [MenuItem("PlayScope/Check for Updates")]
         private static void ForceCheck()
         {
+            // The window opens immediately in Checking state so the user sees
+            // *something* the moment they click — the silent old behaviour was
+            // the actual UX bug, not the check itself.
             EditorPrefs.DeleteKey(PrefLastCheck);
-            RunCheck();
+            PlayScopeUpdateWindow.Open();
         }
 
         [MenuItem("PlayScope/About PlayScope SDK")]
@@ -50,11 +56,14 @@ namespace PlayScopeSdk.Editor
                 "OK");
         }
 
-        // ── Core flow ─────────────────────────────────────────────────────────────
+        // ── Silent 24 h background check (editor startup) ─────────────────────────
+        //
+        // Stays a fire-and-forget chain with no UI — only opens a dialog if a
+        // new version is found. We don't want to pop a window every time the
+        // editor starts; that's noisy.
 
-        private static void RunCheck()
+        private static void AutoCheckSilent()
         {
-            // Throttle — skip if checked within the last 24 h
             if (EditorPrefs.HasKey(PrefLastCheck))
             {
                 var raw = EditorPrefs.GetString(PrefLastCheck, "");
@@ -70,32 +79,25 @@ namespace PlayScopeSdk.Editor
             {
                 if (!listReq.IsCompleted) return;
                 EditorApplication.update -= WaitForList;
-
                 if (listReq.Status != StatusCode.Success) return;
 
-                string installedVersion = null;
+                string installed = null;
                 foreach (var pkg in listReq.Result)
                 {
-                    if (pkg.name == PackageName)
-                    {
-                        installedVersion = pkg.version;
-                        break;
-                    }
+                    if (pkg.name == PackageName) { installed = pkg.version; break; }
                 }
-
-                if (installedVersion == null) return;
+                if (installed == null) return;
 
                 EditorPrefs.SetString(PrefLastCheck, DateTime.UtcNow.ToString("o"));
-                FetchLatestAndCompare(installedVersion);
+                SilentFetchAndPromptIfNewer(installed);
             }
         }
 
-        private static void FetchLatestAndCompare(string installedVersion)
+        private static void SilentFetchAndPromptIfNewer(string installed)
         {
             var www = UnityWebRequest.Get(LatestReleaseUrl);
             www.SetRequestHeader("User-Agent", PackageName + "-version-checker");
             var op = www.SendWebRequest();
-
             op.completed += _ =>
             {
                 if (www.result != UnityWebRequest.Result.Success)
@@ -104,25 +106,18 @@ namespace PlayScopeSdk.Editor
                     www.Dispose();
                     return;
                 }
-
                 var json = www.downloadHandler.text;
                 www.Dispose();
 
-                // Extract tag_name from GitHub API response
-                var match = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
-                if (!match.Success) return;
+                if (!TryParseLatestTag(json, out var latest)) return;
+                if (!IsNewer(latest, installed)) return;
+                if (EditorPrefs.GetString(PrefSkipVersion, "") == latest) return;
 
-                var latestVersion = match.Groups[1].Value.Trim();
-                if (!IsNewer(latestVersion, installedVersion)) return;
-
-                // User previously chose "Skip this version"
-                if (EditorPrefs.GetString(PrefSkipVersion, "") == latestVersion) return;
-
-                ShowUpdateDialog(installedVersion, latestVersion);
+                PromptUpdate(installed, latest);
             };
         }
 
-        private static void ShowUpdateDialog(string installed, string latest)
+        internal static void PromptUpdate(string installed, string latest)
         {
             int choice = EditorUtility.DisplayDialogComplex(
                 "PlayScope SDK — Update Available",
@@ -130,31 +125,22 @@ namespace PlayScopeSdk.Editor
                 $"  Installed:  {installed}\n" +
                 $"  Available:  {latest}\n\n" +
                 $"Update now?",
-                "Update",           // 0
+                "Update",            // 0
                 "Skip this version", // 1
-                "Later"             // 2
+                "Later"              // 2
             );
 
             switch (choice)
             {
-                case 0:
-                    // Re-add with explicit version tag so the lock file records a stable ref
-                    Client.Add($"{InstallUrlBase}#v{latest}");
-                    break;
-
-                case 1:
-                    EditorPrefs.SetString(PrefSkipVersion, latest);
-                    break;
-
-                // case 2 — remind on next editor launch (do nothing)
+                case 0: Client.Add($"{InstallUrlBase}#v{latest}"); break;
+                case 1: EditorPrefs.SetString(PrefSkipVersion, latest); break;
             }
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────────────
+        // ── Shared helpers used by both flows ─────────────────────────────────────
 
-        private static string GetInstalledVersion()
+        internal static string GetInstalledVersion()
         {
-            // Read directly from package.json — fast, no async needed
             var guids = AssetDatabase.FindAssets("package", new[] { "Packages/" + PackageName });
             foreach (var guid in guids)
             {
@@ -169,11 +155,325 @@ namespace PlayScopeSdk.Editor
             return null;
         }
 
-        private static bool IsNewer(string candidate, string installed)
+        internal static bool TryParseLatestTag(string githubJson, out string version)
+        {
+            var match = Regex.Match(githubJson, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
+            if (match.Success)
+            {
+                version = match.Groups[1].Value.Trim();
+                return true;
+            }
+            version = null;
+            return false;
+        }
+
+        internal static bool IsNewer(string candidate, string installed)
         {
             return Version.TryParse(candidate, out var c) &&
                    Version.TryParse(installed,  out var i) &&
                    c > i;
+        }
+
+        internal static void MarkCheckedNow() =>
+            EditorPrefs.SetString(PrefLastCheck, DateTime.UtcNow.ToString("o"));
+
+        internal static void MarkSkippedVersion(string version) =>
+            EditorPrefs.SetString(PrefSkipVersion, version);
+    }
+
+    /// <summary>
+    /// Manual "Check for Updates" UI. Opens the window IMMEDIATELY with a
+    /// progress bar so the user knows the click registered, then transitions
+    /// to one of three terminal states (Up to date / Update available /
+    /// Error). Cancellable — closing the window mid-flight disposes the
+    /// in-flight web request.
+    /// </summary>
+    internal sealed class PlayScopeUpdateWindow : EditorWindow
+    {
+        private enum Phase { Listing, Fetching, UpToDate, UpdateAvailable, Error }
+
+        private Phase _phase = Phase.Listing;
+        private float _progress;
+        private string _statusLine = "Listing installed packages…";
+        private string _installedVersion;
+        private string _latestVersion;
+        private string _errorMessage;
+
+        private ListRequest _listReq;
+        private UnityWebRequest _www;
+        private double _lastSpinnerTime;
+
+        public static void Open()
+        {
+            // GetWindow keeps the same instance on repeat clicks — the user can
+            // mash the menu and we won't fan out parallel requests.
+            var w = GetWindow<PlayScopeUpdateWindow>(true, "PlayScope SDK — Update Check");
+            w.minSize = new Vector2(440, 220);
+            w.maxSize = new Vector2(440, 220);
+            w.StartCheck();
+            w.Show();
+            w.Focus();
+        }
+
+        private void StartCheck()
+        {
+            // If a previous check is still running on this window, leave it be.
+            // Otherwise (re-open after terminal state) reset everything.
+            if (_phase == Phase.Listing || _phase == Phase.Fetching) return;
+            _phase = Phase.Listing;
+            _progress = 0f;
+            _statusLine = "Listing installed packages…";
+            _installedVersion = null;
+            _latestVersion = null;
+            _errorMessage = null;
+
+            _listReq = Client.List(offlineMode: false);
+            Repaint();
+        }
+
+        private void OnDisable()
+        {
+            if (_www != null)
+            {
+                try { _www.Dispose(); } catch { /* best-effort */ }
+                _www = null;
+            }
+        }
+
+        private void Update()
+        {
+            switch (_phase)
+            {
+                case Phase.Listing:
+                    TickListing();
+                    break;
+                case Phase.Fetching:
+                    TickFetching();
+                    break;
+            }
+
+            // Cheap spinner animation while a request is in flight.
+            if (_phase == Phase.Listing || _phase == Phase.Fetching)
+            {
+                if (EditorApplication.timeSinceStartup - _lastSpinnerTime > 0.1)
+                {
+                    _lastSpinnerTime = EditorApplication.timeSinceStartup;
+                    Repaint();
+                }
+            }
+        }
+
+        private void TickListing()
+        {
+            if (_listReq == null || !_listReq.IsCompleted) return;
+
+            if (_listReq.Status != StatusCode.Success)
+            {
+                EnterError("Couldn't read installed packages: " + (_listReq.Error?.message ?? "unknown error"));
+                return;
+            }
+
+            foreach (var pkg in _listReq.Result)
+            {
+                if (pkg.name == PlayScopeVersionChecker.PackageName)
+                {
+                    _installedVersion = pkg.version;
+                    break;
+                }
+            }
+            _listReq = null;
+
+            if (_installedVersion == null)
+            {
+                // Fall back to package.json so we still show something useful
+                // even when UPM list doesn't surface the package (rare but
+                // happens on first import).
+                _installedVersion = PlayScopeVersionChecker.GetInstalledVersion();
+            }
+
+            if (_installedVersion == null)
+            {
+                EnterError("PlayScope SDK package not found in this project.");
+                return;
+            }
+
+            _phase = Phase.Fetching;
+            _progress = 0.5f;
+            _statusLine = $"Checking GitHub for releases newer than {_installedVersion}…";
+
+            _www = UnityWebRequest.Get(PlayScopeVersionChecker.LatestReleaseUrl);
+            _www.SetRequestHeader("User-Agent", PlayScopeVersionChecker.PackageName + "-version-checker");
+            _www.SendWebRequest();
+            Repaint();
+        }
+
+        private void TickFetching()
+        {
+            if (_www == null || !_www.isDone) return;
+
+            if (_www.result != UnityWebRequest.Result.Success)
+            {
+                var err = _www.error ?? "network error";
+                _www.Dispose();
+                _www = null;
+                EnterError("Couldn't reach GitHub: " + err);
+                return;
+            }
+
+            var json = _www.downloadHandler.text;
+            _www.Dispose();
+            _www = null;
+
+            if (!PlayScopeVersionChecker.TryParseLatestTag(json, out _latestVersion))
+            {
+                EnterError("GitHub returned a release JSON we couldn't parse for a tag.");
+                return;
+            }
+
+            PlayScopeVersionChecker.MarkCheckedNow();
+
+            _progress = 1f;
+            if (PlayScopeVersionChecker.IsNewer(_latestVersion, _installedVersion))
+            {
+                _phase = Phase.UpdateAvailable;
+                _statusLine = "Update available.";
+            }
+            else
+            {
+                _phase = Phase.UpToDate;
+                _statusLine = "You're on the latest version.";
+            }
+            Repaint();
+        }
+
+        private void EnterError(string msg)
+        {
+            _phase = Phase.Error;
+            _errorMessage = msg;
+            _statusLine = "Update check failed.";
+            _progress = 0f;
+            if (_www != null) { _www.Dispose(); _www = null; }
+            Repaint();
+        }
+
+        private void OnGUI()
+        {
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("PlayScope SDK", EditorStyles.boldLabel);
+            EditorGUILayout.Space(4);
+
+            if (_installedVersion != null)
+                EditorGUILayout.LabelField("Installed", _installedVersion);
+            if (_latestVersion != null)
+                EditorGUILayout.LabelField("Latest", _latestVersion);
+
+            EditorGUILayout.Space(10);
+
+            // Progress bar — always rendered so the layout doesn't jump when
+            // we transition from in-flight to terminal state.
+            var rect = EditorGUILayout.GetControlRect(false, 18);
+            var displayProgress = (_phase == Phase.Listing || _phase == Phase.Fetching)
+                ? AnimatedProgress(_progress)
+                : (_phase == Phase.Error ? 0f : 1f);
+            EditorGUI.ProgressBar(rect, displayProgress, _statusLine);
+
+            EditorGUILayout.Space(10);
+
+            switch (_phase)
+            {
+                case Phase.Listing:
+                case Phase.Fetching:
+                    DrawInFlightButtons();
+                    break;
+                case Phase.UpToDate:
+                    DrawUpToDateButtons();
+                    break;
+                case Phase.UpdateAvailable:
+                    DrawUpdateAvailableButtons();
+                    break;
+                case Phase.Error:
+                    DrawErrorButtons();
+                    break;
+            }
+        }
+
+        private void DrawInFlightButtons()
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Cancel", GUILayout.Width(100)))
+                {
+                    if (_www != null) { _www.Dispose(); _www = null; }
+                    Close();
+                }
+            }
+        }
+
+        private void DrawUpToDateButtons()
+        {
+            EditorGUILayout.HelpBox(
+                $"PlayScope SDK is up to date ({_installedVersion}).",
+                MessageType.Info);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Close", GUILayout.Width(100))) Close();
+            }
+        }
+
+        private void DrawUpdateAvailableButtons()
+        {
+            EditorGUILayout.HelpBox(
+                $"A newer release ({_latestVersion}) is available.",
+                MessageType.Warning);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("Skip this version", GUILayout.Width(140)))
+                {
+                    PlayScopeVersionChecker.MarkSkippedVersion(_latestVersion);
+                    Close();
+                }
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Later", GUILayout.Width(80))) Close();
+                if (GUILayout.Button("Update now", GUILayout.Width(120)))
+                {
+                    Client.Add($"{PlayScopeVersionChecker.InstallUrlBase}#v{_latestVersion}");
+                    Close();
+                }
+            }
+        }
+
+        private void DrawErrorButtons()
+        {
+            EditorGUILayout.HelpBox(_errorMessage ?? "Unknown error.", MessageType.Error);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Retry", GUILayout.Width(80)))
+                {
+                    _phase = Phase.Error == _phase ? Phase.Listing : _phase;
+                    // Re-arm and start over.
+                    _phase = Phase.Listing;
+                    _progress = 0f;
+                    _statusLine = "Listing installed packages…";
+                    _errorMessage = null;
+                    _installedVersion = null;
+                    _latestVersion = null;
+                    _listReq = Client.List(offlineMode: false);
+                    Repaint();
+                }
+                if (GUILayout.Button("Close", GUILayout.Width(80))) Close();
+            }
+        }
+
+        // Slow drift on the progress bar while a request is in flight — gives
+        // the user a "something is happening" cue even if the underlying op
+        // hasn't reported any concrete progress yet.
+        private float AnimatedProgress(float baseValue)
+        {
+            float drift = (float)((EditorApplication.timeSinceStartup % 1.0) * 0.05);
+            return Mathf.Clamp01(baseValue + drift);
         }
     }
 }
