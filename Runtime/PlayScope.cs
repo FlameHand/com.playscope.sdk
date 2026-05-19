@@ -29,6 +29,13 @@ namespace PlayScopeSdk
         // a worker) is safe.
         private static readonly ConcurrentDictionary<string, string> _openOperationTypes = new();
 
+        // opId → start tick reading (DateTime.UtcNow.Ticks). Lets CompleteOperation
+        // attach a duration_ms field to the operation_end metadata even when the
+        // caller (or its wrapper) didn't measure it themselves — so the dashboard
+        // can show how long EVERY tracked op took, not just HTTP requests where
+        // a separate communicator happened to record it.
+        private static readonly ConcurrentDictionary<string, long> _openOperationStartTicks = new();
+
         /// <summary>
         /// Initializes the SDK with the provided configuration.
         /// Must be called once before using any other SDK methods.
@@ -182,6 +189,10 @@ namespace PlayScopeSdk
                 // Remember the type so the matching CompleteOperation can stamp
                 // it onto the operation_end event too — see the field comment.
                 _openOperationTypes[operationId] = typeStr;
+                // Remember when we started so we can attach a measured duration
+                // on the matching CompleteOperation. Ticks are monotonic enough
+                // for ms-resolution durations and survive a wall-clock change.
+                _openOperationStartTicks[operationId] = DateTime.UtcNow.Ticks;
                 // Merge operation_name into metadata
                 var merged = new Dictionary<string, object> { ["operation_name"] = operationName ?? "" };
                 if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
@@ -222,8 +233,21 @@ namespace PlayScopeSdk
                 // carries the same operationType as its start — the timeline
                 // filter needs it to put the end on the right channel.
                 _openOperationTypes.TryRemove(operationId, out var typeStr);
+                // Drain start tick so we can compute and stamp duration_ms. We
+                // only add it when the caller didn't already provide one — the
+                // HTTP wrapper, for example, measures duration including its
+                // own deserialization step and that figure is more honest than
+                // the raw SDK span.
+                _openOperationStartTicks.TryRemove(operationId, out var startTicks);
+
                 var merged = new Dictionary<string, object> { ["status"] = status.ToString() };
                 if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
+                if (startTicks != 0
+                    && !merged.ContainsKey("duration_ms") && !merged.ContainsKey("durationMs"))
+                {
+                    var durationMs = (DateTime.UtcNow.Ticks - startTicks) / TimeSpan.TicksPerMillisecond;
+                    if (durationMs >= 0) merged["duration_ms"] = durationMs;
+                }
                 PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_end", operationId: operationId,
                     operationType: typeStr, metadataJson: EventPipeline.DictToJson(merged));
             }
