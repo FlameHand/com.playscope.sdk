@@ -132,6 +132,35 @@ namespace PlayScopeSdk
         }
 
         /// <summary>
+        /// Records or patches diagnostic <b>session-level</b> data — device,
+        /// environment, addressables, disk, memory, anything <i>about</i> the
+        /// runtime rather than about the player. Different from
+        /// <see cref="UpdateState"/> which carries the game's profile state.
+        /// </summary>
+        /// <param name="patch">Dictionary of fields to merge into the session
+        /// data snapshot. Last write per key wins; <c>null</c> removes a key.</param>
+        public static void UpdateSessionData(IReadOnlyDictionary<string, object> patch)
+            => UpdateSessionData(patch, reason: null);
+
+        /// <summary>
+        /// Same as <see cref="UpdateSessionData(IReadOnlyDictionary{string,object})"/>
+        /// but with an explanatory reason recorded under <c>_reason</c>.
+        /// </summary>
+        /// <param name="patch">Fields to merge into the session data snapshot.</param>
+        /// <param name="reason">Short cause label: "addressables_init",
+        /// "periodic_disk_sample", "network_change", etc.</param>
+        public static void UpdateSessionData(IReadOnlyDictionary<string, object> patch, string reason)
+        {
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                patch = SensitiveKeyFilter.FilterMetadata(patch);
+                PlayScopeRuntime.SessionDataCoalescer.Add(patch, reason);
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("UpdateSessionData failed", ex); }
+        }
+
+        /// <summary>
         /// Records a screen/scene navigation event.
         /// Use to track which screen the player is currently viewing.
         /// </summary>

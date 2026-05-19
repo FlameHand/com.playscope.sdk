@@ -27,6 +27,10 @@ namespace PlayScopeSdk.Internal
         // session lifetime — flushed on pause / shutdown so its buffer never
         // strands a patch.
         internal static StatePatchCoalescer StatePatchCoalescer { get; } = new();
+        // Parallel coalescer for session_data_* events. Independent buffer
+        // from profile-state so a periodic device sample never overwrites a
+        // gameplay key. Wider window (1 s vs 100 ms) folds init-burst patches.
+        internal static SessionDataCoalescer SessionDataCoalescer { get; } = new();
         private static WriterWorker? _writer;
         private static HeartbeatWorker? _heartbeat;
         internal static UploaderWorker? _uploader;
@@ -189,6 +193,36 @@ namespace PlayScopeSdk.Internal
             Pipeline!.EnqueueEvent("session_start",
                 metadataJson: EventPipeline.DictToJson(sessionMeta));
 
+            // Seed session_data with diagnostic fields the dashboard needs but
+            // didn't get into session_start. These describe the runtime that
+            // sessions can later patch on top of (Addressables locators after
+            // their init, periodic disk samples, etc.) — see UpdateSessionData.
+            // We push through the coalescer so the first wave of bootstrap
+            // pushes from wrappers folds into one session_data_initial row.
+            try
+            {
+                var systemInfo = new System.Collections.Generic.Dictionary<string, object>
+                {
+                    ["screen_width"]        = UnityEngine.Screen.width,
+                    ["screen_height"]       = UnityEngine.Screen.height,
+                    ["screen_dpi"]          = UnityEngine.Screen.dpi,
+                    ["device_locale"]       = UnityEngine.Application.systemLanguage.ToString(),
+                    ["device_unique_id"]    = Device.SdkUserId,
+                    ["processor_count"]     = UnityEngine.SystemInfo.processorCount,
+                    ["processor_type"]      = UnityEngine.SystemInfo.processorType,
+                    ["system_memory_mb"]    = UnityEngine.SystemInfo.systemMemorySize,
+                    ["graphics_device_name"]   = UnityEngine.SystemInfo.graphicsDeviceName,
+                    ["graphics_memory_mb"]     = UnityEngine.SystemInfo.graphicsMemorySize,
+                    ["graphics_device_type"]   = UnityEngine.SystemInfo.graphicsDeviceType.ToString(),
+                    ["operating_system_family"] = UnityEngine.SystemInfo.operatingSystemFamily.ToString(),
+                };
+                SessionDataCoalescer.Add(systemInfo, reason: "sdk_init");
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Failed to seed session_data with system info", ex);
+            }
+
             PlayScopeLog.Info($"Initialized. session_id={CurrentSession.SessionId}, sdk_user_id={Device.SdkUserId}");
         }
 
@@ -215,10 +249,11 @@ namespace PlayScopeSdk.Internal
             _heartbeat?.Stop();
             _heartbeat = null;
 
-            // Flush any buffered state patch before session_end so the last
-            // changes survive — otherwise the 100ms coalescing window would
-            // strand them in the buffer when we stop the pipeline below.
+            // Flush any buffered state / session-data patches before session_end
+            // so the last changes survive — otherwise the coalescing windows
+            // would strand them in the buffer when we stop the pipeline below.
             StatePatchCoalescer.FlushNow();
+            SessionDataCoalescer.FlushNow();
 
             // Enqueue session_end (critical — triggers instant upload)
             Pipeline?.EnqueueEvent("session_end",
@@ -257,6 +292,7 @@ namespace PlayScopeSdk.Internal
         internal static void FlushOnPause()
         {
             StatePatchCoalescer.FlushNow();
+            SessionDataCoalescer.FlushNow();
             _writer?.FlushImmediate();
         }
 
