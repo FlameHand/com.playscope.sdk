@@ -55,5 +55,23 @@ namespace PlayScopeSdk
         /// running in the Unity Editor (false positives from breakpoints).
         /// </summary>
         public int AnrThresholdMs { get; set; } = 2000;
+
+        /// <summary>
+        /// Enables value-level PII regex masking on metadata and state values
+        /// (in addition to the always-on key-name filter). When true, string
+        /// values are scanned for emails, JWTs, bearer/basic tokens,
+        /// well-known service tokens (GitHub/Stripe/Slack/AWS), Luhn-valid
+        /// credit-card numbers, international phone numbers, and public
+        /// IPv4 addresses. Matches are replaced in-line with placeholders
+        /// like <c>[redacted-email]</c> — surrounding context is preserved.
+        ///
+        /// <para>
+        /// Default true. Disable only if your game absolutely needs raw
+        /// values to flow through (e.g. you're testing the masks themselves
+        /// in CI). Disabling exposes you to GDPR / CCPA risk if user data
+        /// ends up in metadata accidentally.
+        /// </para>
+        /// </summary>
+        public bool PiiValueMasksEnabled { get; set; } = true;
     }
 }

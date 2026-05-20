@@ -143,6 +143,10 @@ namespace PlayScopeSdk.Internal
             // event never re-emitted; SequenceCounter at its end-of-prior-session
             // value → mixed-up sequence numbers on early events.
             SensitiveKeyFilter.ResetWarnings();
+            // Wire PII value-mask toggle from context. Default is true on the
+            // filter side too, so a partial Initialize that crashes before
+            // reaching here still gets safe-by-default behaviour.
+            SensitiveKeyFilter.SetPiiValueMasksEnabled(context?.PiiValueMasksEnabled ?? true);
             _initialStateSet = 0;
             _currentLifecycleState = "foreground";
             _currentLifecycleStateEnteredAtTicks = DateTime.UtcNow.Ticks;
