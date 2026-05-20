@@ -474,19 +474,32 @@ namespace PlayScopeSdk
         /// <summary>
         /// Starts a timed purchase operation. Shorthand for <see cref="StartOperation"/> with <see cref="OperationType.Purchase"/>.
         /// Returns <see cref="string.Empty"/> in disabled state.
+        /// <para>
+        /// For the canonical metadata schema (<c>store</c> / <c>currency</c> /
+        /// <c>price_amount</c> / <c>is_restore</c>) use
+        /// <see cref="PurchaseMetadata.BuildStartMetadata"/> — the dashboard
+        /// surfaces those keys as first-class fields in PurchaseDetails.
+        /// </para>
         /// </summary>
         /// <param name="productId">Store product identifier being purchased.</param>
-        /// <param name="metadata">Optional purchase-initiation attributes (e.g. store, currency).</param>
+        /// <param name="metadata">Optional purchase-initiation attributes; build via <see cref="PurchaseMetadata.BuildStartMetadata"/> for the canonical schema.</param>
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartPurchase(string productId, IReadOnlyDictionary<string, object> metadata = null)
             => StartOperation(OperationType.Purchase, productId, metadata);
 
         /// <summary>
         /// Completes a purchase operation started with <see cref="StartPurchase"/>.
+        /// <para>
+        /// For the canonical end-of-purchase metadata schema
+        /// (<c>transaction_id_hash</c> / <c>validation_status</c> /
+        /// <c>failure_reason</c>) use <see cref="PurchaseMetadata.BuildEndMetadata"/>.
+        /// The helper SHA-256-16-hashes the raw transaction ID before
+        /// it ever leaves the device.
+        /// </para>
         /// </summary>
         /// <param name="operationId">ID returned by <see cref="StartPurchase"/>.</param>
         /// <param name="status">Final outcome of the purchase (Success, Failure, Cancelled, etc.).</param>
-        /// <param name="metadata">Optional completion-time attributes (e.g. transaction_id, price).</param>
+        /// <param name="metadata">Optional completion-time attributes; build via <see cref="PurchaseMetadata.BuildEndMetadata"/> for the canonical schema.</param>
         public static void EndPurchase(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
             => CompleteOperation(operationId, status, metadata);
 
