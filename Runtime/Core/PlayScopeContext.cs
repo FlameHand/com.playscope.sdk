@@ -34,5 +34,26 @@ namespace PlayScopeSdk
         /// Override only for staging or on-premise deployments.
         /// </summary>
         public string UploadEndpoint { get; set; } = "https://api.playscope.dev";
+
+        /// <summary>
+        /// Enable the ANR (Application Not Responding) watchdog. Default true.
+        /// When the main thread stops responding (e.g. blocked Update, sync
+        /// asset load, deadlocked native call) for longer than
+        /// <see cref="AnrThresholdMs"/>, the SDK emits an <c>anr</c> event;
+        /// on recovery it emits <c>anr_recovered</c> with the total stuck
+        /// duration. The watchdog auto-disables in the Unity Editor — see
+        /// the comment on AnrThresholdMs.
+        /// </summary>
+        public bool AnrDetectionEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Threshold in milliseconds before a main-thread stall is reported
+        /// as an ANR. Default 2000 ms. Tune up to 5000 ms to match Android's
+        /// OS-level ANR threshold (less noise on GC spikes); tune down to
+        /// 1000 ms on hard-60-fps games where any visible hitch is critical.
+        /// Ignored when <see cref="AnrDetectionEnabled"/> is false or when
+        /// running in the Unity Editor (false positives from breakpoints).
+        /// </summary>
+        public int AnrThresholdMs { get; set; } = 2000;
     }
 }

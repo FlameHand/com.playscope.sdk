@@ -21,6 +21,9 @@ namespace PlayScopeSdk.Internal
             // Runtime handles the once-only guard internally so a transient
             // Pipeline==null window can't cause us to double-emit.
             PlayScopeRuntime.EmitFirstFrameRenderedOnce();
+            // ANR watchdog heartbeat — null-conditional skips when the
+            // watchdog is disabled (Editor or opted-out via context).
+            PlayScopeRuntime.AnrWatchdog?.RecordHeartbeat();
             _sampler?.Tick();
             // Drive both coalescers' window timers on the same frame pulse —
             // cheap, no worker thread, deterministic with Unity's main loop.

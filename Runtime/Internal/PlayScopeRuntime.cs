@@ -58,6 +58,10 @@ namespace PlayScopeSdk.Internal
         private static WriterWorker? _writer;
         private static HeartbeatWorker? _heartbeat;
         internal static UploaderWorker? _uploader;
+        // Main-thread ANR watchdog. Null when disabled (Editor, or via
+        // PlayScopeContext.AnrDetectionEnabled = false) so the MonoBehaviour
+        // heartbeat call short-circuits without overhead.
+        internal static AnrWatchdog? AnrWatchdog { get; private set; }
         private static GameObject? _driverGo;
         private static bool _quittingSubscribed;
         private static bool _logCaptureSubscribed;
@@ -189,6 +193,24 @@ namespace PlayScopeSdk.Internal
 
             _heartbeat = new HeartbeatWorker();
             _heartbeat.Start();
+
+            // ANR watchdog — disabled in Editor by default since IDE
+            // breakpoints would generate false positives. Batch mode is
+            // OK because there's no debugger attached. Disabled entirely
+            // when the caller opted out via PlayScopeContext.
+            if (context.AnrDetectionEnabled && (!Application.isEditor || Application.isBatchMode))
+            {
+                try
+                {
+                    AnrWatchdog = new AnrWatchdog(Pipeline!, context.AnrThresholdMs);
+                    AnrWatchdog.Start();
+                }
+                catch (Exception ex)
+                {
+                    PlayScopeLog.Warning("Failed to start ANR watchdog", ex);
+                    AnrWatchdog = null;
+                }
+            }
 
             // Optional: subscribe to Unity log stream
             if (context.AutoCaptureUnityLogs)
@@ -346,6 +368,12 @@ namespace PlayScopeSdk.Internal
             _heartbeat?.Stop();
             _heartbeat = null;
 
+            // Stop the ANR watchdog FIRST so its threadpool timer can't
+            // race into a pipeline that's about to be nulled. Stop is
+            // idempotent — safe to call when watchdog was never started.
+            AnrWatchdog?.Stop();
+            AnrWatchdog = null;
+
             // Flush any buffered state / session-data patches before session_end
             // so the last changes survive — otherwise the coalescing windows
             // would strand them in the buffer when we stop the pipeline below.
@@ -427,6 +455,11 @@ namespace PlayScopeSdk.Internal
             StatePatchCoalescer.FlushNow();
             SessionDataCoalescer.FlushNow();
             _writer?.FlushImmediate();
+            // The OS will stop running Update() in a moment — suspending
+            // the watchdog now keeps it from reporting the backgrounded
+            // state as a multi-minute ANR. Re-armed on the matching
+            // foreground transition via the RecordLifecycle path.
+            AnrWatchdog?.Suspend();
         }
 
         /// <summary>
@@ -462,6 +495,14 @@ namespace PlayScopeSdk.Internal
             Pipeline?.EnqueueEvent("lifecycle", metadataJson: EventPipeline.DictToJson(meta));
             _currentLifecycleState = nextState;
             _currentLifecycleStateEnteredAtTicks = nowTicks;
+
+            // ANR watchdog state follows the OS: suspended while the app
+            // is backgrounded (Update() doesn't run, so a long stretch
+            // with no heartbeat would mis-classify as a freeze), re-armed
+            // on foreground with a refreshed heartbeat so the first
+            // half-second post-resume can't false-positive.
+            if (nextState == "background") AnrWatchdog?.Suspend();
+            else                            AnrWatchdog?.Resume();
         }
 
         /// <summary>
