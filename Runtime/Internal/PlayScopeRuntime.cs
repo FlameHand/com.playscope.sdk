@@ -37,9 +37,23 @@ namespace PlayScopeSdk.Internal
         // first_frame_rendered guard — flipped by MonoBehaviour on its first
         // Update tick so we emit the event exactly once per session.
         private static int _firstFrameEmitted;
+        // Ticks at which first_frame_rendered fired. Used as the zero-point
+        // for first_input_latency so that metric measures "how long the
+        // player stared at a rendered screen before tapping anything" —
+        // a much more useful TTI signal than ms-since-session-start
+        // (which includes the headless pre-render initialisation).
+        private static long _firstFrameTicks;
+        // first_input_latency guard — flipped by MonoBehaviour the first
+        // tick on which Unity reports any input (touch / mouse / key /
+        // gamepad button) after first_frame_rendered has already fired.
+        private static int _firstInputEmitted;
 
         internal static bool IsInitialized => _initialized;
         internal static bool IsDisabled => _disabled;
+        // Exposed so the MonoBehaviour's per-frame input poll can fast-path
+        // out of the Input API after the event has fired — keeps the hot
+        // loop a single field read instead of a CompareExchange roundtrip.
+        internal static bool HasEmittedFirstInputLatency => _firstInputEmitted != 0;
 
         internal static DeviceIdentity Device { get; private set; }
         internal static SessionInfo CurrentSession { get; private set; }
@@ -133,6 +147,8 @@ namespace PlayScopeSdk.Internal
             _currentLifecycleState = "foreground";
             _currentLifecycleStateEnteredAtTicks = DateTime.UtcNow.Ticks;
             _firstFrameEmitted = 0;
+            _firstFrameTicks = 0;
+            _firstInputEmitted = 0;
             _lastNetworkReachability = int.MinValue;
             SequenceCounter.Reset();
             PlayScope.ResetSessionScopedState();
@@ -579,6 +595,10 @@ namespace PlayScopeSdk.Internal
         {
             if (!_initialized || _disabled) return;
             if (Interlocked.CompareExchange(ref _firstFrameEmitted, 1, 0) != 0) return;
+            // Stamp the first-frame moment so first_input_latency below can
+            // measure from "player saw the screen" instead of from session_start
+            // (which folds in headless init time).
+            _firstFrameTicks = DateTime.UtcNow.Ticks;
             var elapsedMs = _currentLifecycleStateEnteredAtTicks == 0
                 ? 0
                 : (DateTime.UtcNow.Ticks - _currentLifecycleStateEnteredAtTicks) / TimeSpan.TicksPerMillisecond;
@@ -587,6 +607,46 @@ namespace PlayScopeSdk.Internal
                 ["ms_since_session_start"] = Math.Max(0L, elapsedMs),
             };
             Pipeline?.EnqueueEvent("first_frame_rendered",
+                metadataJson: EventPipeline.DictToJson(meta));
+        }
+
+        /// <summary>
+        /// Emits a one-shot <c>first_input_latency</c> event the first frame
+        /// on which Unity reports any input after <c>first_frame_rendered</c>
+        /// has fired. Carries the elapsed ms since first-frame as
+        /// <c>latency_ms</c> plus the input kind that tripped it.
+        ///
+        /// <para>
+        /// The MonoBehaviour driver polls this once per Update; this method
+        /// is the no-op fast path when either guard is set, or when the first
+        /// frame hasn't been emitted yet. Cheap to call every frame.
+        /// </para>
+        ///
+        /// <para>
+        /// Editor / headless / batch-mode sessions where the user never
+        /// taps anything simply never emit the event — that's correct,
+        /// "no input ever arrived" is not a sample worth recording.
+        /// </para>
+        /// </summary>
+        internal static void EmitFirstInputLatencyIfFired(string inputKind)
+        {
+            if (!_initialized || _disabled) return;
+            if (_firstFrameEmitted == 0) return; // wait for first frame
+            if (Interlocked.CompareExchange(ref _firstInputEmitted, 1, 0) != 0) return;
+            var nowTicks = DateTime.UtcNow.Ticks;
+            // Defensive: if first-frame ticks somehow weren't stamped (race
+            // we don't expect, but the field defaults to 0), report a
+            // latency of 0 instead of an absurdly large number derived
+            // from epoch-start.
+            var latencyMs = _firstFrameTicks == 0
+                ? 0L
+                : Math.Max(0L, (nowTicks - _firstFrameTicks) / TimeSpan.TicksPerMillisecond);
+            var meta = new Dictionary<string, object>
+            {
+                ["latency_ms"] = latencyMs,
+                ["input_kind"] = inputKind ?? "unknown",
+            };
+            Pipeline?.EnqueueEvent("first_input_latency",
                 metadataJson: EventPipeline.DictToJson(meta));
         }
 
