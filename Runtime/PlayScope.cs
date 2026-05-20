@@ -529,5 +529,44 @@ namespace PlayScopeSdk
             }
             catch (Exception ex) { PlayScopeLog.Warning("TrackException failed", ex); }
         }
+
+        // ── Restart ───────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Records an in-game restart — a point at which the game logically
+        /// throws away the current profile (player chose "New game", restart
+        /// after defeat, full progress reset, etc.). Distinct from an app
+        /// restart, which already produces a new session.
+        /// </summary>
+        /// <param name="metadata">Optional attributes (e.g. <c>reason=new_game</c>,
+        /// <c>from_level=12</c>) — surface on the dashboard's restart marker.</param>
+        /// <remarks>
+        /// After this call the SetInitialState lock is re-armed: the caller is
+        /// expected to push a fresh <see cref="SetInitialState"/> for the
+        /// post-restart period. The dashboard's profile-state reconstruction
+        /// rebuilds from the most recent <c>state_initial</c> so the new
+        /// snapshot naturally replaces the old one — no client-side hack.
+        /// Session-data (device / environment / addressables) is NOT reset:
+        /// it stays the same across a restart by definition.
+        /// </remarks>
+        public static void TrackRestart(IReadOnlyDictionary<string, object> metadata = null)
+        {
+            try
+            {
+                if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
+                metadata = SensitiveKeyFilter.FilterMetadata(metadata);
+                var metaJson = metadata != null && metadata.Count > 0
+                    ? EventPipeline.DictToJson(metadata) : null;
+                // Flush any in-flight state patches BEFORE the restart marker
+                // lands so the dashboard's per-restart replay sees a clean
+                // boundary instead of patches straddling the divider.
+                PlayScopeRuntime.StatePatchCoalescer.FlushNow();
+                PlayScopeRuntime.Pipeline?.EnqueueEvent("restart", metadataJson: metaJson);
+                // Re-arm the SetInitialState gate so the game can push a
+                // fresh snapshot for the post-restart period.
+                PlayScopeRuntime.ResetInitialStateLock();
+            }
+            catch (Exception ex) { PlayScopeLog.Warning("TrackRestart failed", ex); }
+        }
     }
 }

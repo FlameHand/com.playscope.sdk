@@ -90,6 +90,18 @@ namespace PlayScopeSdk.Internal
             return Interlocked.CompareExchange(ref _initialStateSet, 1, 0) == 0;
         }
 
+        /// <summary>
+        /// Re-arms the initial-state lock so the caller can legally call
+        /// <see cref="PlayScope.SetInitialState"/> again. Used by
+        /// <see cref="PlayScope.TrackRestart"/> — an in-game restart logically
+        /// throws away the current profile snapshot, and the game is expected
+        /// to push a fresh one for the post-restart period.
+        /// </summary>
+        internal static void ResetInitialStateLock()
+        {
+            Interlocked.Exchange(ref _initialStateSet, 0);
+        }
+
         // Called by PlayScope.Initialize()
         internal static void Initialize(PlayScopeContext context)
         {
