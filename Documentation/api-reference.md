@@ -1,6 +1,6 @@
 # API Reference
 
-All methods are on the `PlayScope` static class in the `PlayScopeSdk` namespace. Every method is thread-safe and never throws — calls while the SDK is uninitialised or disabled are silent no-ops.
+All methods are on the `PlayScope` static class in the `PlayScopeSdk` namespace. Every method is thread-safe and never throws — calls while the SDK is uninitialised or disabled are silent no-ops, return values default to `string.Empty` / `void`.
 
 ---
 
@@ -8,7 +8,7 @@ All methods are on the `PlayScope` static class in the `PlayScopeSdk` namespace.
 
 ### `PlayScope.Initialize(PlayScopeContext context)`
 
-Initialises the SDK. Must be called once before any other method. Subsequent calls are a warning and no-op — the first call wins.
+Initialises the SDK. Must be called once before any other method. Subsequent calls emit a warning and no-op — the first call wins.
 
 ```csharp
 PlayScope.Initialize(new PlayScopeContext
@@ -19,12 +19,16 @@ PlayScope.Initialize(new PlayScopeContext
     Metadata = new Dictionary<string, string>
     {
         ["environment"] = "production",
-        ["app_version"] = Application.version
-    }
+        ["app_version"] = Application.version,
+    },
 });
 ```
 
 See [Configuration](configuration.md) for all `PlayScopeContext` fields.
+
+### `PlayScope.Shutdown()`
+
+Flushes any buffered events, emits a final `session_end`, stops worker threads, and disposes the MonoBehaviour driver. Called automatically on `OnApplicationQuit` — most integrators never need to call it manually.
 
 ---
 
@@ -34,46 +38,77 @@ See [Configuration](configuration.md) for all `PlayScopeContext` fields.
 
 Associates the current session with a user identity. Safe to call multiple times — each call updates the current identity.
 
-| Parameter  | Description |
+| Parameter | Description |
 |---|---|
 | `userId`   | Your application-side user identifier. |
-| `metadata` | Optional key-value attributes (e.g. plan, region). Sensitive keys are filtered automatically. |
+| `metadata` | Optional key-value attributes (e.g. plan, region). Sensitive keys / values are filtered automatically. |
 
 ```csharp
 PlayScope.SetUserData("user-123", new Dictionary<string, object>
 {
     ["plan"]   = "premium",
-    ["region"] = "eu-west"
+    ["region"] = "eu-west",
 });
 ```
 
 ---
 
-## State
+## State (player profile)
 
 ### `PlayScope.SetInitialState(IReadOnlyDictionary<string, object> state)`
 
-Sets the full initial game state snapshot for the session. The second call is a warning and ignored — use `UpdateState` for incremental changes after the initial snapshot.
+Sets the full initial game-state snapshot for the session. Calling it a second time without an intervening `TrackRestart` emits a warning and is ignored — use `UpdateState` for incremental changes.
 
 ```csharp
 PlayScope.SetInitialState(new Dictionary<string, object>
 {
     ["level"]    = 5,
     ["currency"] = 1200,
-    ["items"]    = new List<object> { "sword", "shield" }
+    ["items"]    = new List<object> { "sword", "shield" },
 });
 ```
 
-### `PlayScope.UpdateState(IReadOnlyDictionary<string, object> patch)`
+### `PlayScope.UpdateState(IReadOnlyDictionary<string, object> patch, string reason = null)`
 
-Applies a partial patch to the current game state. Only the provided keys are updated; unmentioned keys remain unchanged.
+Applies a partial patch to the current game state. Only the provided keys are updated; unmentioned keys remain unchanged. Patches within a 100 ms window are coalesced by the SDK so a flurry of small updates collapses into one event.
 
 ```csharp
-PlayScope.UpdateState(new Dictionary<string, object>
-{
-    ["currency"] = 950   // only currency changes
-});
+PlayScope.UpdateState(new Dictionary<string, object> { ["currency"] = 950 });
+
+// With a reason — surfaces in the dashboard as the "why" column
+PlayScope.UpdateState(new Dictionary<string, object> { ["level"] = 6 }, reason: "level_up");
 ```
+
+### `PlayScope.TrackRestart(string reason = null, IReadOnlyDictionary<string, object> metadata = null)`
+
+In-game restart marker — call when the player discards their current profile (new game, defeat reset, full progress wipe). The dashboard treats this as a boundary for profile-state replay: state shown after a restart starts from the *next* `SetInitialState`.
+
+```csharp
+PlayScope.TrackRestart(reason: "new_game", metadata: new Dictionary<string, object>
+{
+    ["from_level"] = playerData.Level,
+});
+// Push a fresh post-restart snapshot:
+PlayScope.SetInitialState(new Dictionary<string, object> { ["level"] = 1, ["currency"] = 0 });
+```
+
+---
+
+## Session data (environment / device)
+
+A parallel stream to profile state — same `initial + patch` protocol, different semantic. Session data carries the *environment* (device model, OS version, addressables version, disk free, memory budget), profile state carries *the player*. Reviewers see them on different dashboard tabs.
+
+### `PlayScope.UpdateSessionData(IReadOnlyDictionary<string, object> patch, string reason = null)`
+
+```csharp
+PlayScope.UpdateSessionData(new Dictionary<string, object>
+{
+    ["addressables_catalog_version"] = "1.4.2",
+    ["disk_free_mb"]                  = 8421,
+}, reason: "catalog_loaded");
+```
+
+The SDK seeds session data on init with `device_model`, `os_version`, `system_memory_mb`, `graphics_device_name`, etc. — call `UpdateSessionData` for anything game-specific.
 
 ---
 
@@ -81,30 +116,19 @@ PlayScope.UpdateState(new Dictionary<string, object>
 
 ### `PlayScope.SetScreen(string screenName, IReadOnlyDictionary<string, object> metadata = null)`
 
-Records a screen or scene navigation event.
-
 ```csharp
 PlayScope.SetScreen("GameplayHUD");
-PlayScope.SetScreen("ShopScreen", new Dictionary<string, object>
-{
-    ["source"] = "main_menu"
-});
+PlayScope.SetScreen("ShopScreen", new Dictionary<string, object> { ["source"] = "main_menu" });
 ```
 
----
-
-## Actions
-
 ### `PlayScope.TrackAction(string actionName, IReadOnlyDictionary<string, object> metadata = null)`
-
-Records a discrete player action.
 
 ```csharp
 PlayScope.TrackAction("TapPlayButton");
 PlayScope.TrackAction("UseHealthPotion", new Dictionary<string, object>
 {
     ["potion_type"] = "small",
-    ["hp_before"]   = 45
+    ["hp_before"]   = 45,
 });
 ```
 
@@ -112,15 +136,10 @@ PlayScope.TrackAction("UseHealthPotion", new Dictionary<string, object>
 
 ## Operations
 
-Operations are timed spans with a start and an end.
+Operations are timed spans with a start and an end. Returns an opaque ID from `Start*`; pass it to the matching `End*`.
 
-### `PlayScope.StartOperation(OperationType type, string operationName, IReadOnlyDictionary<string, object> metadata = null) → string`
-
-Starts a timed operation. Returns an opaque operation ID (empty string when SDK is disabled).
-
-### `PlayScope.CompleteOperation(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)`
-
-Completes a previously started operation.
+### `PlayScope.StartOperation(OperationType type, string operationName, ...) → string`
+### `PlayScope.CompleteOperation(string operationId, OperationCompletionStatus status, ...)`
 
 ```csharp
 var opId = PlayScope.StartOperation(OperationType.Custom, "LoadSaveData");
@@ -128,29 +147,73 @@ var opId = PlayScope.StartOperation(OperationType.Custom, "LoadSaveData");
 PlayScope.CompleteOperation(opId, OperationCompletionStatus.Success);
 ```
 
-### Typed Shortcuts
+### Typed shortcuts
 
 | Start | End | OperationType |
 |---|---|---|
 | `StartHTTP(name, metadata)` | `EndHTTP(id, status, metadata)` | `HTTP` |
 | `StartResourceLoad(name, metadata)` | `EndResourceLoad(id, status, metadata)` | `ResourceLoad` |
-| `StartSceneLoad(sceneName, metadata)` | `EndSceneLoad(id, status, metadata)` | `SceneLoad` |
+| `StartSceneLoad(sceneName[, asyncOp], metadata)` | `EndSceneLoad(id, status, metadata)` | `SceneLoad` |
 | `StartPurchase(productId, metadata)` | `EndPurchase(id, status, metadata)` | `Purchase` |
 
-```csharp
-// HTTP example
-var id = PlayScope.StartHTTP("GET /api/leaderboard");
-var result = await httpClient.GetAsync(url);
-PlayScope.EndHTTP(id, result.IsSuccessStatusCode
-    ? OperationCompletionStatus.Success
-    : OperationCompletionStatus.Failure,
-    new Dictionary<string, object> { ["status_code"] = (int)result.StatusCode });
+### HTTP example
 
-// Scene load example
-var sceneOpId = PlayScope.StartSceneLoad("GameplayScene");
-await SceneManager.LoadSceneAsync("GameplayScene");
-PlayScope.EndSceneLoad(sceneOpId, OperationCompletionStatus.Success);
+```csharp
+var id = PlayScope.StartHTTP("GET /api/leaderboard", new Dictionary<string, object>
+{
+    ["method"] = "GET",
+    ["url"]    = "/api/leaderboard",
+});
+var result = await httpClient.GetAsync(url);
+PlayScope.EndHTTP(id,
+    result.IsSuccessStatusCode
+        ? OperationCompletionStatus.Success
+        : OperationCompletionStatus.Failure,
+    new Dictionary<string, object>
+    {
+        ["status_code"] = (int)result.StatusCode,
+    });
 ```
+
+### Scene load with progress sampling
+
+```csharp
+var asyncOp = SceneManager.LoadSceneAsync("GameplayScene");
+asyncOp.allowSceneActivation = false;
+// Pass the AsyncOperation — the SDK polls .progress every 250 ms on
+// the main thread and stamps the samples into the matching EndSceneLoad
+// as scene_progress_samples — visible on the dashboard as a 0 % → 100 %
+// strip.
+var opId = PlayScope.StartSceneLoad("GameplayScene", asyncOp);
+await asyncOp;
+PlayScope.EndSceneLoad(opId, OperationCompletionStatus.Success);
+```
+
+### Purchase with canonical metadata
+
+Use `PurchaseMetadata.BuildStartMetadata` / `BuildEndMetadata` to construct dicts with the canonical schema the dashboard surfaces as first-class fields:
+
+```csharp
+using PlayScopeSdk;
+
+// Start — store, currency, price (store auto-detects from Application.platform)
+var startMeta = PurchaseMetadata.BuildStartMetadata(
+    currency:    "USD",
+    priceAmount: 4.99m);
+var opId = PlayScope.StartPurchase(product.id, startMeta);
+
+// ... store callback resolves ...
+
+// End — transaction id is SHA-256-16 hashed by the helper before leaving the device
+var endMeta = PurchaseMetadata.BuildEndMetadata(
+    transactionId:    productReceipt.TransactionId,
+    validationStatus: PurchaseMetadata.ValidationStatus.Valid);
+PlayScope.EndPurchase(opId, OperationCompletionStatus.Success, endMeta);
+```
+
+Canonical schema:
+- **start:** `store` (auto: `app_store` / `google_play` / `steam` / `amazon` / `other`), `currency`, `price_amount`, `is_restore`
+- **end:** `transaction_id_hash` (sha256-16), `validation_status` (`pending` / `valid` / `invalid` / `error`), `failure_reason` (`user_cancelled` / `payment_declined` / `network_error` / `validation_failed` / …)
 
 ---
 
@@ -164,6 +227,8 @@ Manually tracks a log entry. Use when `AutoCaptureUnityLogs` is disabled or you 
 PlayScope.TrackLog(LogLevel.Warning, "Inventory full — item dropped",
     new Dictionary<string, object> { ["item"] = "health_potion" });
 ```
+
+Identical `(level, message)` pairs within a 5 s window are collapsed by the SDK's `LogDedupBuffer` and the resulting timeline row carries `repeat_count: N`. Error and exception levels bypass dedup entirely.
 
 ### `PlayScope.TrackException(Exception exception, IReadOnlyDictionary<string, object> metadata = null)`
 
@@ -179,10 +244,43 @@ catch (Exception ex)
     PlayScope.TrackException(ex, new Dictionary<string, object>
     {
         ["context"] = "profile_load",
-        ["user_id"] = currentUserId
+        ["user_id"] = currentUserId,
     });
 }
 ```
+
+---
+
+## Emitted automatically
+
+These events fire without API calls — listed here so you know what to expect on the dashboard.
+
+| Event | Trigger | Carries |
+|---|---|---|
+| `session_start` | `Initialize` | app_version, platform, device_model, os_version, sdk_version |
+| `session_end` | `Shutdown` / `OnApplicationQuit` | end_status: `normal` |
+| `session_abnormal_end` | Recovery on next launch when prior session didn't emit `session_end` | end_status: `abnormal` |
+| `lifecycle` | Foreground / background transitions | transition, duration_in_prev_state_ms |
+| `app_update_detected` | First launch on a new `Application.version` | from_version, to_version |
+| `first_frame_rendered` | First `Update()` after `Initialize` | ms_since_session_start |
+| `first_input_latency` | First touch / mouse / key / gamepad after `first_frame_rendered` | latency_ms, input_kind |
+| `network_change` | `Application.internetReachability` flips | from, to |
+| `anr` | Main thread blocked > `AnrThresholdMs` | stuck_for_ms, threshold_ms, started_at |
+| `anr_recovered` | Main thread resumes after an `anr` | total_stuck_ms |
+| `memory_warning` | `Application.lowMemory` fires | heap_mb, reserved_mb, system_mb |
+
+Plus a periodic metric stream sampled by `MetricsSampler`:
+
+| Metric | Cadence | Source |
+|---|---|---|
+| `fps` | 1 s | rolling average |
+| `frame_time_p99_ms` | 1 s | ring buffer sorted to p99 |
+| `dropped_frames_count` | 1 s | frames > 33.4 ms in the last second |
+| `gc_alloc_kb` | 1 s | `Profiler.GetTotalAllocatedMemoryLong()` delta |
+| `memory_heap` | 5 s | `GC.GetTotalMemory(false)` |
+| `memory_unity_reserved` | 5 s | `Profiler.GetTotalReservedMemoryLong()` |
+| `battery_level` | 30 s | `SystemInfo.batteryLevel` |
+| `network_reachability` | 5 s | `Application.internetReachability` |
 
 ---
 

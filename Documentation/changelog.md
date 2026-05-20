@@ -1,7 +1,91 @@
 # Changelog
 
-All notable changes to the PlayScope SDK are documented here.
-Versions follow [Semantic Versioning](https://semver.org/).
+All notable changes to the PlayScope SDK are documented here. Versions follow [Semantic Versioning](https://semver.org/).
+
+CI auto-bumps the patch version on every push to `main`, so intermediate versions (most of `0.1.3` through `0.1.39`) carry the same feature set as their nearest documented release.
+
+---
+
+## [0.1.39] — 2026-05-21
+
+### Added — Sprint 5
+- **`PiiValueScanner`** — value-level PII regex scrubbing as a complement to the always-on key-name filter. Catches emails, JWTs, Bearer/Basic auth headers, well-known service tokens (`ghp_`, `sk_live_`, `xoxb_`, `AKIA`...), Luhn-validated credit cards, international phone numbers, and public IPv4 addresses. Matches are replaced in-line with `[redacted-*]` placeholders so surrounding context survives.
+- `PlayScopeContext.PiiValueMasksEnabled` (default `true`) — toggle for the above.
+- 20+ unit tests covering happy paths and false-positive guards (version strings, sequence numbers, private IPs).
+
+### Documentation
+- `dashboard-navigator.md` — new doc explaining where each event lands in the dashboard UI.
+- `integration-guide.md`, `api-reference.md`, `configuration.md`, `index.md` — full refresh covering everything below.
+
+---
+
+## [0.1.38] — 2026-05-21
+
+### Added — Sprint 3
+- **`first_input_latency`** event — fires once per session on the first touch / mouse / key / gamepad input after `first_frame_rendered`. Carries `latency_ms` (delta from first-frame, not session_start) and `input_kind`. Closes the cold-start funnel.
+- **`frame_time_p99_ms`** + **`dropped_frames_count`** metrics — sampled every 1 s from a 128-slot ring buffer of per-frame deltas. p99 picks up stutter that average FPS hides; dropped count uses a fixed 33.4 ms threshold.
+- **`gc_alloc_kb`** metric — `Profiler.GetTotalAllocatedMemoryLong()` delta per 1 s, clamped >= 0. Available on every Unity Player without Development Build.
+
+---
+
+## [0.1.37] — 2026-05-21
+
+### Added — Sprint 2
+- **`PurchaseMetadata`** — static helper class for building canonical purchase metadata dictionaries. `BuildStartMetadata` (store / currency / price_amount / is_restore) and `BuildEndMetadata` (transaction_id_hash / validation_status / failure_reason).
+- `transaction_id` is SHA-256-hashed to 16 hex chars before leaving the device.
+- Store auto-detect from `Application.platform` (`app_store` / `google_play` / `steam` / `amazon` / `other`).
+- Canonical vocab constants: `Store`, `ValidationStatus`, `FailureReason`.
+
+---
+
+## [0.1.36] — 2026-05-20
+
+### Added — Sprint 1 (closing)
+- **`LogDedupBuffer`** — collapses repeated `(level, message)` pairs of debug / info / warning logs within a 5 s window into a single timeline row carrying `repeat_count: N`. Critical levels (error, exception) bypass dedup entirely.
+- Thread-safe; ticked from `MonoBehaviour.Update`; flushed on pause / shutdown so backgrounded sessions don't strand the tail of the buffer.
+- 256-entry safety cap on the buffer, oldest-first eviction with a warning log.
+
+---
+
+## [0.1.35] — 2026-05-20
+
+### Added — Sprint 1
+- **`memory_warning`** event — emitted on `Application.lowMemory` (cross-platform: Android `onTrimMemory` + iOS `UIApplicationDidReceiveMemoryWarning`). Carries `heap_mb`, `reserved_mb`, `system_mb`. Critical-priority so it lands server-side even if the OS kills the app moments later.
+
+---
+
+## [0.1.33] — 2026-05-19
+
+### Added — Sprint 1
+- **`PlayScope.TrackRestart(reason, metadata)`** — in-game restart marker for player-initiated profile wipes. The dashboard treats this as a boundary for state replay; the post-restart `SetInitialState` becomes the new zero-point.
+- `reason` is promoted to a dedicated positional parameter (rather than a metadata key) so the dashboard surfaces it prominently.
+- `restart` event whitelisted on backend.
+
+---
+
+## [0.1.32] — 2026-05-18
+
+### Added — Sprint 1
+- **`AnrWatchdog`** — main-thread heartbeat + thread-pool timer that emits `anr` when the heartbeat hasn't ticked for `AnrThresholdMs` (default 2 s) and `anr_recovered` when the main thread resumes.
+- Auto-disables in the Unity Editor unless running in batch mode (avoids false positives from breakpoints).
+- Suspended on background, resumed on foreground.
+- `PlayScopeContext.AnrDetectionEnabled` (default `true`) + `PlayScopeContext.AnrThresholdMs` (default `2000`).
+
+---
+
+## [0.1.20–0.1.31] — earlier work
+
+Foundation observability + op-type completion. Highlights:
+
+- **`first_frame_rendered`** + **`app_update_detected`** events — TTI signal start + version-change detection.
+- **`network_change`** event — discrete signal on `Application.internetReachability` flip (complements the periodic metric).
+- **Lifecycle event** with `duration_in_prev_state_ms` — quantifies how long the user spent in each foreground / background period.
+- **Resource-load enrichment** — `source` (remote / local / builtin), `dependency_count`, `total_download_size_bytes`.
+- **Scene-load progress sampler** — automatic 250 ms polling of an `AsyncOperation` passed to `StartSceneLoad`, stamped into `scene_progress_samples` on `EndSceneLoad`.
+- **Coalescers** — `StatePatchCoalescer` (100 ms window) + `SessionDataCoalescer` (1 s window) — collapse bursts of patches into single events.
+- **Open-ops cap** — 256 max open operations, oldest evicted on overflow to prevent leaks from runaway `Start*` calls without matching `End*`.
+- **Sensitive Key Filter** — drops keys whose names look credential-shaped (`password`, `token`, `secret`, etc.) from metadata and state dicts.
+- **JSON correctness** — RFC 8259-strict escaping, NaN / Infinity → `null`, recursion-depth cap.
 
 ---
 
@@ -15,30 +99,29 @@ Versions follow [Semantic Versioning](https://semver.org/).
 ## [0.1.1] — 2026-05-17
 
 ### Changed
-- Unified all assembly and namespace names to `PlayScopeSdk` / `PlayScopeSdk.Editor` — previously the assembly names used the `PlayScope.Runtime` / `PlayScope.Editor` convention while the C# namespace was `PlayScopeSdk`.
+- Unified all assembly and namespace names to `PlayScopeSdk` / `PlayScopeSdk.Editor`.
 
 ---
 
 ## [0.1.0] — 2026-05-17
 
 ### Added
-- **`UploaderWorker`** — background upload loop with exponential backoff, stable `batch_id` (chunk filename-based), dead-letter queue, and crash-recovery on startup.
-- **`StorageQuotaManager`** — enforces a 50 MB soft cap and 100 MB hard cap; drops non-critical chunks oldest-first; never drops session_start/end or exception records.
-- **`SessionRecovery`** — detects sessions interrupted by a crash and writes a `session_abnormal_end` event on next launch.
-- **`PlayScopeVersionChecker`** (Editor) — checks GitHub Releases daily and shows an update dialog in the Unity editor.
-- **`release.yml`** GitHub Actions workflow — `workflow_dispatch`-triggered release that bumps `package.json`, commits, tags, and publishes a GitHub Release.
+- **`UploaderWorker`** — background upload loop with exponential backoff, stable `batch_id`, dead-letter queue, crash-recovery on startup.
+- **`StorageQuotaManager`** — 50 MB soft cap / 100 MB hard cap; oldest-first eviction; never drops `session_start`/`session_end`/`exception` records.
+- **`SessionRecovery`** — writes `session_abnormal_end` on next launch when prior session was interrupted.
+- **`PlayScopeVersionChecker`** (Editor) — daily GitHub Releases check with update dialog.
+- **`release.yml`** GitHub Actions workflow — `workflow_dispatch` release that bumps `package.json`, commits, tags, and publishes.
 
 ### Fixed
-- `WriterWorker.FlushImmediate` now calls `FinalizeChunk()` — previously flushed data was not committed to a chunk file.
-- `WriterWorker`: `screen_name` and `action_name` are now escaped before JSON serialisation — prevented JSON injection via untrusted strings.
-- `UploaderWorker`: `batch_id` is now the chunk filename (stable across retries) — was `Guid.NewGuid()` per attempt, causing duplicate ingestion on retry.
-- `PlayScopeMonoBehaviour`: clears `_sampler` reference on `Shutdown` and when `Pipeline == null` — prevented a null-ref in `Update` after shutdown.
-- `StorageQuotaManager.IsChunkCritical`: scans all lines of a chunk instead of only the first — previously missed critical events (e.g. `session_end`) written after the first record.
-- `EventPipeline.ValueToJson`: serialises `IList` values as JSON arrays — previously serialised as `ToString()`.
-- `MetricsSampler`: uses `GC.GetTotalMemory(false)` instead of the Profiler API — Profiler API is not available in release builds.
-- `SessionInfo`: `sdkVersion` is now a required constructor parameter — eliminates the risk of the version constant and the session record diverging.
-- `PlayScopeRuntime`: reads `environment` from `context.Metadata["environment"]` with `"production"` fallback — was a hardcoded string.
-- `PlayScope.SetUserData`: removed a dead `metaJson` variable.
+- `WriterWorker.FlushImmediate` now calls `FinalizeChunk()`.
+- `WriterWorker`: `screen_name` / `action_name` escaped before JSON serialisation.
+- `UploaderWorker`: `batch_id` is the chunk filename (stable across retries).
+- `PlayScopeMonoBehaviour`: clears `_sampler` reference on `Shutdown`.
+- `StorageQuotaManager.IsChunkCritical`: scans all lines of a chunk.
+- `EventPipeline.ValueToJson`: serialises `IList` values as JSON arrays.
+- `MetricsSampler`: uses `GC.GetTotalMemory(false)` instead of unavailable-in-release Profiler API.
+- `SessionInfo`: `sdkVersion` is now a required constructor parameter.
+- `PlayScopeRuntime`: reads `environment` from `context.Metadata["environment"]` with `"production"` fallback.
 
 ---
 
