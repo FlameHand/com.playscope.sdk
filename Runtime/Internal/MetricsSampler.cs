@@ -1,7 +1,6 @@
 using System;
 using UnityEngine;
 using UnityEngine.Profiling;
-using UnityEngine.AddressableAssets;
 
 namespace PlayScopeSdk.Internal
 {
@@ -9,6 +8,16 @@ namespace PlayScopeSdk.Internal
     /// Samples device/runtime metrics on the Unity main thread.
     /// Call Tick() from MonoBehaviour.Update() every frame.
     /// Threading rule: ALL UnityEngine API calls on main thread only.
+    ///
+    /// <para>
+    /// Deliberately stays on the Unity core API surface — no Addressables,
+    /// no Adaptive Performance, no Analytics. Anything that lives in an
+    /// optional Unity package belongs in the game-side wrapper layer, which
+    /// can push samples to us via <see cref="EventPipeline.EnqueueMetric"/>
+    /// or <c>PlayScope.UpdateSessionData</c>. That way the SDK package's
+    /// dependency list stays minimal and a project that doesn't use
+    /// Addressables can pull us in cleanly.
+    /// </para>
     /// </summary>
     internal sealed class MetricsSampler
     {
@@ -22,16 +31,11 @@ namespace PlayScopeSdk.Internal
         private float _memTimer;
         private float _batteryTimer;
         private float _networkTimer;
-        private float _addressablesTimer;
 
         private const float FpsInterval = 1f;
         private const float MemInterval = 5f;
         private const float BatteryInterval = 30f;
         private const float NetworkInterval = 5f;
-        // Periodic Addressables handle count — leaks show up as a slowly
-        // growing line on the dashboard. 15 s is fine: a real leak grows
-        // over minutes; sampling faster would just pad ingest for no signal.
-        private const float AddressablesInterval = 15f;
 
         internal MetricsSampler(EventPipeline pipeline)
         {
@@ -87,29 +91,6 @@ namespace PlayScopeSdk.Internal
                 _pipeline.EnqueueMetric("network_reachability", net);
                 PlayScopeRuntime.RecordNetworkReachabilityIfChanged(net);
                 _networkTimer = 0;
-            }
-
-            // Addressables active operations — 15s. A monotonically growing
-            // line means somewhere a load handle was retained without
-            // Addressables.Release; classic source of slow OOM crashes in
-            // long-running sessions.
-            _addressablesTimer += dt;
-            if (_addressablesTimer >= AddressablesInterval)
-            {
-                try
-                {
-                    int count = Addressables.ResourceManager.OperationCacheCount;
-                    _pipeline.EnqueueMetric("addressables_handles", count);
-                }
-                catch (Exception)
-                {
-                    // Addressables may not be initialized yet (e.g. during the
-                    // first ~15 s after Initialize when InitializeAsync hasn't
-                    // resolved). The first sample or two may be missing —
-                    // that's expected, not a bug, and steady-state samples
-                    // resume automatically on the next tick.
-                }
-                _addressablesTimer = 0;
             }
         }
     }
