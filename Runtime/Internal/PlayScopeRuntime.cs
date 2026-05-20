@@ -337,14 +337,20 @@ namespace PlayScopeSdk.Internal
             PlayScopeLog.Info("Shutdown complete.");
         }
 
+        // Runtime check beats the compile-time defines because UNITY_ANDROID /
+        // UNITY_IOS are defined whenever the *build target* is set to that
+        // platform — including in-Editor play with Android selected. Without
+        // the isEditor guard a test run from the Editor would report itself
+        // as "android" while device_model still showed the desktop name,
+        // producing confusing dashboard rows. Order: editor wins, then the
+        // actual deployed platform via the existing compile-time chain.
         private static string GetPlatformString()
         {
+            if (UnityEngine.Application.isEditor) return "editor";
 #if UNITY_IOS
             return "ios";
 #elif UNITY_ANDROID
             return "android";
-#elif UNITY_EDITOR
-            return "editor";
 #else
             return "standalone";
 #endif
