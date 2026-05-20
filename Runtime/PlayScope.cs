@@ -538,8 +538,14 @@ namespace PlayScopeSdk
         /// after defeat, full progress reset, etc.). Distinct from an app
         /// restart, which already produces a new session.
         /// </summary>
-        /// <param name="metadata">Optional attributes (e.g. <c>reason=new_game</c>,
-        /// <c>from_level=12</c>) — surface on the dashboard's restart marker.</param>
+        /// <param name="reason">Short human-readable cause: "new_game",
+        /// "defeat_restart", "settings_reset", etc. Free-form but keep it
+        /// consistent across call sites — the dashboard groups restarts by
+        /// reason. Promoted from <c>metadata</c> to its own positional
+        /// parameter because it's the field reviewers always want first.</param>
+        /// <param name="metadata">Optional additional attributes (e.g.
+        /// <c>from_level=12</c>, <c>character_name=guest_1234</c>) — surface
+        /// alongside the reason in the dashboard's restart details panel.</param>
         /// <remarks>
         /// After this call the SetInitialState lock is re-armed: the caller is
         /// expected to push a fresh <see cref="SetInitialState"/> for the
@@ -549,14 +555,33 @@ namespace PlayScopeSdk
         /// Session-data (device / environment / addressables) is NOT reset:
         /// it stays the same across a restart by definition.
         /// </remarks>
-        public static void TrackRestart(IReadOnlyDictionary<string, object> metadata = null)
+        public static void TrackRestart(string reason = null, IReadOnlyDictionary<string, object> metadata = null)
         {
             try
             {
                 if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
                 metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-                var metaJson = metadata != null && metadata.Count > 0
-                    ? EventPipeline.DictToJson(metadata) : null;
+                // Merge reason into the metadata payload as a top-level
+                // "reason" key. Dashboard's RestartDetails surfaces it
+                // first, separate from the rest of the metadata table.
+                // Reason wins over any conflicting "reason" key the caller
+                // might have already put in metadata — it's the explicit
+                // parameter, so it represents intent.
+                Dictionary<string, object> merged = null;
+                if (!string.IsNullOrEmpty(reason))
+                {
+                    merged = new Dictionary<string, object> { ["reason"] = reason };
+                    if (metadata != null)
+                        foreach (var kv in metadata)
+                            if (kv.Key != "reason") merged[kv.Key] = kv.Value;
+                }
+                else if (metadata != null && metadata.Count > 0)
+                {
+                    merged = new Dictionary<string, object>(metadata.Count);
+                    foreach (var kv in metadata) merged[kv.Key] = kv.Value;
+                }
+                var metaJson = merged != null && merged.Count > 0
+                    ? EventPipeline.DictToJson(merged) : null;
                 // Flush any in-flight state patches BEFORE the restart marker
                 // lands so the dashboard's per-restart replay sees a clean
                 // boundary instead of patches straddling the divider.
