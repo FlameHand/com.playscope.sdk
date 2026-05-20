@@ -65,6 +65,10 @@ namespace PlayScopeSdk.Internal
         private static GameObject? _driverGo;
         private static bool _quittingSubscribed;
         private static bool _logCaptureSubscribed;
+        // Application.lowMemory subscription state — tracked separately so
+        // TeardownInternal can unhook it without poking the handler if we
+        // never subscribed (e.g. ForceDisable on partial init).
+        private static bool _lowMemorySubscribed;
         private static LogLevel _autoCaptureMinLevel;
 
         /// <summary>
@@ -239,6 +243,24 @@ namespace PlayScopeSdk.Internal
                 }
             }
 
+            // OS low-memory hook. Application.lowMemory is cross-platform —
+            // fires on Android (Activity.onTrimMemory TRIM_MEMORY_RUNNING_*)
+            // and iOS (UIApplicationDidReceiveMemoryWarning) without needing
+            // a native plugin on either side. The callback runs on the Unity
+            // main thread so it's safe to read Profiler / SystemInfo APIs
+            // from inside it. We emit a critical-priority memory_warning
+            // event so the chunk gets flushed immediately — if the OS kills
+            // the app a moment later the signal still lands server-side.
+            try
+            {
+                Application.lowMemory += OnLowMemoryWarning;
+                _lowMemorySubscribed = true;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Failed to subscribe to Application.lowMemory", ex);
+            }
+
             // Wire MonoBehaviour driver + Application.quitting (main thread / play mode only).
             try
             {
@@ -368,6 +390,13 @@ namespace PlayScopeSdk.Internal
                 try { Application.logMessageReceivedThreaded -= OnUnityLogReceived; }
                 catch { /* best-effort */ }
                 _logCaptureSubscribed = false;
+            }
+
+            if (_lowMemorySubscribed)
+            {
+                try { Application.lowMemory -= OnLowMemoryWarning; }
+                catch { /* best-effort */ }
+                _lowMemorySubscribed = false;
             }
 
             if (_quittingSubscribed)
@@ -646,6 +675,36 @@ namespace PlayScopeSdk.Internal
             catch
             {
                 // Never let log capture throw — would re-trigger the log handler.
+            }
+        }
+
+        // ── Application.lowMemory handler ──────────────────────────────────────
+        //
+        // Fired by the OS on Android (Activity.onTrimMemory at TRIM_MEMORY_*
+        // levels) and iOS (UIApplicationDidReceiveMemoryWarning). Runs on the
+        // Unity main thread so it's safe to read Profiler / SystemInfo here.
+        // We don't dedupe: a burst of warnings in quick succession is itself
+        // signal (escalating memory pressure → likely OOM kill imminent).
+        private static void OnLowMemoryWarning()
+        {
+            if (!_initialized || _disabled) return;
+            try
+            {
+                long heapMb     = GC.GetTotalMemory(false) / 1048576L;
+                long reservedMb = UnityEngine.Profiling.Profiler.GetTotalReservedMemoryLong() / 1048576L;
+                int  systemMb   = UnityEngine.SystemInfo.systemMemorySize;
+                var meta = new Dictionary<string, object>
+                {
+                    ["heap_mb"]          = heapMb,
+                    ["reserved_mb"]      = reservedMb,
+                    ["system_memory_mb"] = systemMb,
+                };
+                Pipeline?.EnqueueEvent("memory_warning",
+                    metadataJson: EventPipeline.DictToJson(meta));
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("OnLowMemoryWarning failed", ex);
             }
         }
     }

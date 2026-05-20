@@ -17,7 +17,12 @@ namespace PlayScopeSdk.Internal
         internal static bool IsCritical(string eventType) =>
             eventType is "session_end" or "session_abnormal_end"
                 or "error" or "exception"
-                or "anr" or "anr_recovered";
+                or "anr" or "anr_recovered"
+                // memory_warning: OS-level low-memory signal. Same rationale
+                // as anr — the process is at elevated risk of being killed
+                // within seconds, so we want the warning already on the wire
+                // even if no further events follow.
+                or "memory_warning";
         internal static bool IsLogCritical(string level) =>
             level is "error" or "exception";
     }
