@@ -339,8 +339,12 @@ namespace PlayScopeSdk.Internal
             Append(sb, "event_id", r.EventId);
             sb.Append(",\"sequence_num\":").Append(r.SequenceNum);
             Append(sb, "timestamp", r.Timestamp);
-            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", EscapeString(r.ScreenName!));
-            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", EscapeString(r.ActionName!));
+            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", r.ScreenName!);
+            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", r.ActionName!);
+            // operation_id / operation_type are SDK-produced today but defensively
+            // escaped anyway — any future API that lets callers supply opIds
+            // (think MCP-driven sessions or scripted replays) won't be able to
+            // poison the JSON line by accident.
             if (!string.IsNullOrEmpty(r.OperationId)) Append(sb, "operation_id", r.OperationId!);
             if (!string.IsNullOrEmpty(r.OperationType)) Append(sb, "operation_type", r.OperationType!);
             if (!string.IsNullOrEmpty(r.MetadataJson)) sb.Append(",\"metadata\":").Append(r.MetadataJson);
@@ -357,10 +361,10 @@ namespace PlayScopeSdk.Internal
             sb.Append(",\"sequence_num\":").Append(r.SequenceNum);
             Append(sb, "timestamp", r.Timestamp);
             Append(sb, "level", r.Level ?? "info");
-            Append(sb, "message", EscapeString(r.Message ?? ""));
-            if (!string.IsNullOrEmpty(r.StackTrace)) Append(sb, "stack_trace", EscapeString(r.StackTrace!));
-            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", EscapeString(r.ScreenName!));
-            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", EscapeString(r.ActionName!));
+            Append(sb, "message", r.Message ?? "");
+            if (!string.IsNullOrEmpty(r.StackTrace)) Append(sb, "stack_trace", r.StackTrace!);
+            if (!string.IsNullOrEmpty(r.ScreenName)) Append(sb, "screen_name", r.ScreenName!);
+            if (!string.IsNullOrEmpty(r.ActionName)) Append(sb, "action_name", r.ActionName!);
             if (!string.IsNullOrEmpty(r.MetadataJson)) sb.Append(",\"metadata\":").Append(r.MetadataJson);
             sb.Append('}');
             return sb.ToString();
@@ -373,16 +377,24 @@ namespace PlayScopeSdk.Internal
             Append(sb, "event_id", r.EventId);
             Append(sb, "timestamp", r.Timestamp);
             Append(sb, "metric_type", r.MetricType ?? "");
-            sb.Append(",\"value\":").Append(r.MetricValue.ToString("G", System.Globalization.CultureInfo.InvariantCulture));
+            // Mirror EventPipeline.ValueToJson's non-finite guard so a bad
+            // metric sample (div-by-zero, Mathf.Infinity) can't corrupt the
+            // entire chunk JSON and force a dead-letter for the batch.
+            sb.Append(",\"value\":").Append(
+                double.IsFinite(r.MetricValue)
+                    ? r.MetricValue.ToString("G", System.Globalization.CultureInfo.InvariantCulture)
+                    : "null");
             sb.Append('}');
             return sb.ToString();
         }
 
+        // All string fields go through the same RFC 8259 escaper as
+        // EventPipeline.DictToJson so the two paths can't diverge again.
+        // Key is bare-key (already safe) — value is fully escaped.
         private static void Append(StringBuilder sb, string key, string value)
-            => sb.Append(",\"").Append(key).Append("\":\"").Append(value).Append('"');
-
-        private static string EscapeString(string s)
-            => s.Replace("\\", "\\\\").Replace("\"", "\\\"")
-               .Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
+        {
+            sb.Append(",\"").Append(key).Append("\":");
+            EventPipeline.AppendEscapedString(sb, value);
+        }
     }
 }
