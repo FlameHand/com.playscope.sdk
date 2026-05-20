@@ -105,6 +105,24 @@ namespace PlayScopeSdk
         }
 
         /// <summary>
+        /// True once <see cref="Initialize"/> has wired up every subsystem and
+        /// the public API is ready to record events. Stays true until
+        /// Shutdown (or process exit). False on an SDK that was never started
+        /// OR one that failed during Initialize and self-disabled.
+        /// </summary>
+        public static bool IsInitialized => PlayScopeRuntime.IsInitialized;
+
+        /// <summary>
+        /// True after the SDK has been permanently disabled — either because
+        /// the supplied ApiKey was blank, because a required boot step threw,
+        /// or because <see cref="Initialize"/> itself caught an exception.
+        /// Wrappers can probe this AFTER Initialize to surface the failure to
+        /// their own caller instead of letting every downstream API silently
+        /// no-op.
+        /// </summary>
+        public static bool IsDisabled => PlayScopeRuntime.IsDisabled;
+
+        /// <summary>
         /// Associates the current session with a user identity.
         /// Safe to call multiple times — each call updates the current identity.
         /// </summary>
