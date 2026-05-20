@@ -33,6 +33,28 @@ namespace PlayScopeSdk
             _openOperationStartTicks.Clear();
         }
 
+        // Walks the open-operations dicts once and removes the smallest
+        // (oldest-start-tick) ~10% of entries when the cap is breached.
+        // Cheap fast-path Count check first — eviction only runs on a real
+        // leak (forgotten CompleteOperation calls), not on the happy path.
+        private static void EvictOpenOperationsIfOverflow()
+        {
+            if (_openOperationStartTicks.Count < MaxOpenOperations) return;
+            // Snapshot start ticks, sort, drop oldest 10%. We don't claim
+            // perfect LRU — this is a safety valve.
+            var ordered = new List<KeyValuePair<string, long>>(_openOperationStartTicks);
+            ordered.Sort((a, b) => a.Value.CompareTo(b.Value));
+            int evictCount = Math.Max(1, ordered.Count / 10);
+            for (int i = 0; i < evictCount; i++)
+            {
+                _openOperationTypes.TryRemove(ordered[i].Key, out _);
+                _openOperationStartTicks.TryRemove(ordered[i].Key, out _);
+            }
+            PlayScopeLog.Warning(
+                $"PlayScope: open-operation dictionary cap ({MaxOpenOperations}) hit — " +
+                $"evicted {evictCount} oldest entry. Some CompleteOperation calls were probably missed.");
+        }
+
         // opId → OperationType.ToString() — populated by StartOperation, read
         // and drained by CompleteOperation so the operation_end event carries
         // the type the dashboard needs to drive its per-channel filter
@@ -52,6 +74,16 @@ namespace PlayScopeSdk
         // can show how long EVERY tracked op took, not just HTTP requests where
         // a separate communicator happened to record it.
         private static readonly ConcurrentDictionary<string, long> _openOperationStartTicks = new();
+
+        // Hard cap on outstanding (Start-but-not-yet-Complete) operations.
+        // Without this, a code path where CompleteOperation is never reached
+        // (forgotten end, fire-and-forget pattern, exception escapes between
+        // Start and End) leaks dictionary entries for the rest of the session.
+        // 1024 is generous — real games have at most a few dozen ops in flight.
+        // When we go over, we drop the oldest still-open op silently — the
+        // matching End will still fire but won't get duration_ms/op-type
+        // stamped, which is degraded-but-better-than-unbounded behaviour.
+        private const int MaxOpenOperations = 1024;
 
         /// <summary>
         /// Initializes the SDK with the provided configuration.
@@ -232,6 +264,10 @@ namespace PlayScopeSdk
                 var session = PlayScopeRuntime.CurrentSession;
                 var operationId = $"{session?.SessionShortId}-{SequenceCounter.Next()}";
                 var typeStr = type.ToString();
+                // Drop oldest entries when we exceed the cap. We use the
+                // Count check as a fast path; the actual eviction walks the
+                // dictionary once (rare branch — only when leaks are happening).
+                EvictOpenOperationsIfOverflow();
                 // Remember the type so the matching CompleteOperation can stamp
                 // it onto the operation_end event too — see the field comment.
                 _openOperationTypes[operationId] = typeStr;

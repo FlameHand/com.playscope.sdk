@@ -390,6 +390,11 @@ namespace PlayScopeSdk.Internal
                 _driverGo = null;
             }
 
+            // Discard any in-flight scene-load progress entries — they hold
+            // AsyncOperation references that keep their target scenes pinned
+            // in memory, which we don't want bleeding across sessions.
+            SceneLoadProgressTracker.ClearAll();
+
             try { SessionFiles.DeleteSessionLock(); } catch { /* best-effort */ }
             _initialized = false;
             PlayScopeLog.Info("Shutdown complete.");

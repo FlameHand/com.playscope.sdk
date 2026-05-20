@@ -30,12 +30,19 @@ namespace PlayScopeSdk.Internal
         // own. 64 samples covers 16 s of load detail at full rate; longer
         // loads gracefully degrade to "head + tail" by dropping middle samples.
         private const int MaxSamples = 64;
+        // Hard cap on concurrently-tracked operations. A caller that forgets
+        // to End() — or a code path where End() is unreachable — would otherwise
+        // grow _entries without bound. 64 is generous (a session almost never
+        // has more than a handful of scene loads truly in-flight at once);
+        // when exceeded we evict the oldest non-drained entry.
+        private const int MaxEntries = 64;
 
         private sealed class Entry
         {
             internal AsyncOperation Op;
             internal float LastSampleTime;
-            internal List<float> Samples = new();
+            internal bool OpDone;       // latched once Op.isDone observed true
+            internal readonly List<float> Samples = new();
         }
 
         // operationId → entry. Synchronized on _gate because Start/End can
@@ -56,6 +63,7 @@ namespace PlayScopeSdk.Internal
             if (string.IsNullOrEmpty(operationId)) return;
             lock (_gate)
             {
+                EvictIfFull_NoLock();
                 _entries[operationId] = new Entry { Op = op, LastSampleTime = -SampleIntervalSec };
             }
         }
@@ -71,7 +79,7 @@ namespace PlayScopeSdk.Internal
             lock (_gate)
             {
                 if (!_entries.TryGetValue(operationId, out var entry)) return;
-                AppendSample(entry, progress);
+                AppendSample_NoLock(entry, progress);
             }
         }
 
@@ -103,6 +111,20 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
+        /// Discards every tracked entry. Called by <c>PlayScopeRuntime.Shutdown</c>
+        /// so a re-Initialize doesn't inherit half-finished loads from the
+        /// prior session, and so the underlying AsyncOperation references
+        /// (which may keep larger Unity objects alive) can be GCed.
+        /// </summary>
+        internal static void ClearAll()
+        {
+            lock (_gate)
+            {
+                _entries.Clear();
+            }
+        }
+
+        /// <summary>
         /// Called from <c>PlayScopeMonoBehaviour.Update</c> every frame on the
         /// Unity main thread. Walks active entries and appends a sample when
         /// the per-entry timer has elapsed. We sample the bound AsyncOperation
@@ -124,18 +146,53 @@ namespace PlayScopeSdk.Internal
             float now = Time.realtimeSinceStartup;
             for (int i = 0; i < snapshot.Length; i++)
             {
+                var opId = snapshot[i].Key;
                 var entry = snapshot[i].Value;
                 if (entry.Op == null) continue;
+                // Stop sampling once the AsyncOperation has finished. Without
+                // this latch the per-frame tick keeps appending the final
+                // sample value forever (until DrainSamples is called) and
+                // wastes CPU on the head/middle-drop loop in AppendSample.
+                if (entry.OpDone) continue;
                 if (now - entry.LastSampleTime < SampleIntervalSec) continue;
-                entry.LastSampleTime = now;
+
+                float progress;
+                bool opDone;
+                try
+                {
+                    progress = entry.Op.progress;
+                    opDone = entry.Op.isDone;
+                }
+                catch
+                {
+                    // AsyncOperation is a plain managed object so this is the
+                    // rare case where the underlying native op got disposed
+                    // out from under us. Stop sampling this entry.
+                    lock (_gate)
+                    {
+                        if (_entries.TryGetValue(opId, out var live)) live.OpDone = true;
+                    }
+                    continue;
+                }
+
+                // All state mutation goes inside the lock — re-resolve the
+                // entry by key so a concurrent DrainSamples/Begin that
+                // replaced or removed it doesn't get its data appended-to
+                // here. Without this, samples can leak into an orphaned
+                // Entry the caller has already drained from.
                 lock (_gate)
                 {
-                    AppendSample(entry, entry.Op.progress);
+                    if (!_entries.TryGetValue(opId, out var live)) continue;
+                    if (live != entry) continue; // entry was replaced by a new Begin
+                    live.LastSampleTime = now;
+                    AppendSample_NoLock(live, progress);
+                    if (opDone) live.OpDone = true;
                 }
             }
         }
 
-        private static void AppendSample(Entry entry, float progress)
+        // _gate must be held by the caller.
+        private static void AppendSample_NoLock(Entry entry, float progress)
         {
             if (entry.Samples.Count >= MaxSamples)
             {
@@ -149,6 +206,25 @@ namespace PlayScopeSdk.Internal
             // 0.9f for the "ready to activate" plateau which we want to keep
             // visible rather than mask as 1.0.
             entry.Samples.Add(Mathf.Clamp01(progress));
+        }
+
+        // _gate must be held by the caller. Evicts the oldest entry (by
+        // insertion order — Dictionary in .NET Core preserves insertion order
+        // for enumeration in practice; we don't rely on a precise LRU since
+        // this is a fallback for a leak, not a hot path).
+        private static void EvictIfFull_NoLock()
+        {
+            if (_entries.Count < MaxEntries) return;
+            string victimKey = null;
+            foreach (var kv in _entries) { victimKey = kv.Key; break; }
+            if (victimKey != null)
+            {
+                _entries.Remove(victimKey);
+                PlayScopeLog.Warning(
+                    $"SceneLoadProgressTracker: evicted '{victimKey}' — too many concurrent " +
+                    "tracked operations (cap = " + MaxEntries + "). Likely an EndSceneLoad / " +
+                    "CompleteOperation call was missed somewhere upstream.");
+            }
         }
     }
 }
