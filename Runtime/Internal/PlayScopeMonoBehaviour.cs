@@ -29,6 +29,11 @@ namespace PlayScopeSdk.Internal
             // cheap, no worker thread, deterministic with Unity's main loop.
             PlayScopeRuntime.StatePatchCoalescer.TickAndMaybeFlush();
             PlayScopeRuntime.SessionDataCoalescer.TickAndMaybeFlush();
+            // Drive the log dedup buffer's 5 s window from the same pulse.
+            // Cheap when the buffer is empty (single lock + Count check),
+            // null-safe between Initialize and the first tick where the
+            // runtime has finished constructing the buffer.
+            PlayScopeRuntime.LogDedupBuffer?.TickAndMaybeFlush();
             // Also drive the sceneload progress sampler — see SceneLoadProgressTracker.
             SceneLoadProgressTracker.TickAndMaybeSample();
         }

@@ -47,6 +47,12 @@ namespace PlayScopeSdk.Internal
         internal static EventQueue? Queue { get; private set; }
         internal static EventPipeline? Pipeline { get; private set; }
         internal static UploadQueue? UploadQueue { get; private set; }
+        // Repeats-collapsing buffer for absorbable log levels. Created
+        // alongside Pipeline; nulled on teardown so a re-Initialize starts
+        // fresh. MonoBehaviour.Update ticks it once per frame; FlushOnPause /
+        // TeardownInternal drain it so a backgrounded / shutting-down session
+        // can't strand the last few seconds of buffered logs.
+        internal static LogDedupBuffer? LogDedupBuffer { get; private set; }
         // Single shared coalescer for state_patch debouncing. Lives for the
         // session lifetime — flushed on pause / shutdown so its buffer never
         // strands a patch.
@@ -199,6 +205,14 @@ namespace PlayScopeSdk.Internal
             Queue = new EventQueue();
             // Note: UploadQueue was already created in Step 4 (SessionRecovery)
             Pipeline = new EventPipeline(Queue);
+            // Wire the log dedup buffer. Pipeline.EnqueueLog routes absorbable
+            // levels (debug/info/warning, no stack trace) through this buffer
+            // so repeated identical messages within a 5 s window collapse into
+            // a single timeline row carrying repeat_count: N metadata.
+            // Critical levels (error/exception) bypass dedup entirely — every
+            // error matters individually and must hit the queue immediately.
+            LogDedupBuffer = new LogDedupBuffer(Queue);
+            Pipeline.SetLogDedupBuffer(LogDedupBuffer);
             _writer = new WriterWorker(Queue, UploadQueue, CurrentSession);
             _uploader = new UploaderWorker(context, CurrentSession, UploadQueue);
             // When the writer finalizes a chunk due to a critical event, wake the uploader immediately
@@ -420,6 +434,9 @@ namespace PlayScopeSdk.Internal
             // would strand them in the buffer when we stop the pipeline below.
             StatePatchCoalescer.FlushNow();
             SessionDataCoalescer.FlushNow();
+            // Drain the log dedup buffer for the same reason — its 5 s window
+            // would otherwise strand the last buffered first-of-key samples.
+            LogDedupBuffer?.FlushNow();
 
             if (emitSessionEnd)
             {
@@ -448,6 +465,7 @@ namespace PlayScopeSdk.Internal
             // pipeline — silent metric loss + unbounded queue growth.
             Pipeline = null;
             Queue = null;
+            LogDedupBuffer = null;
 
             // Destroy the MonoBehaviour driver. Otherwise the GameObject
             // persists DontDestroyOnLoad and EnsureDriver's early-return on
@@ -495,6 +513,10 @@ namespace PlayScopeSdk.Internal
         {
             StatePatchCoalescer.FlushNow();
             SessionDataCoalescer.FlushNow();
+            // Drain buffered log dedup entries before background — the OS may
+            // kill us at any point during the pause window and we don't want
+            // up to 5 s of buffered first-of-key samples disappearing with it.
+            LogDedupBuffer?.FlushNow();
             _writer?.FlushImmediate();
             // The OS will stop running Update() in a moment — suspending
             // the watchdog now keeps it from reporting the backgrounded
