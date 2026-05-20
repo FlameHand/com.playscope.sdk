@@ -438,11 +438,16 @@ namespace PlayScopeSdk.Internal
         internal static void RecordLifecycle(LifecycleTransition t)
         {
             if (!_initialized || _disabled) return;
+            var nextState = t == LifecycleTransition.BackgroundStart ? "background" : "foreground";
+            // Drop no-op transitions. On iOS / Android the OS frequently
+            // fires BOTH OnApplicationPause(true) AND OnFocusChanged(false)
+            // for the same backgrounding event — the prior implementation
+            // emitted two back-to-back rows (background → background_start)
+            // with a near-zero duration that was meaningless. Now the
+            // second call is silently swallowed.
+            if (nextState == _currentLifecycleState) return;
+
             var name = t == LifecycleTransition.BackgroundStart ? "background_start" : "foreground";
-            // Compute time spent in the previous state. We don't dedup repeated
-            // transitions (Unity will sometimes fire focus_changed + pause for
-            // the same OS event) — instead, an immediate "same as current"
-            // transition reports a near-zero duration which is itself signal.
             var nowTicks = DateTime.UtcNow.Ticks;
             var durationMs = _currentLifecycleStateEnteredAtTicks == 0
                 ? 0
@@ -455,7 +460,7 @@ namespace PlayScopeSdk.Internal
                 ["duration_in_prev_state_ms"]   = Math.Max(0L, durationMs),
             };
             Pipeline?.EnqueueEvent("lifecycle", metadataJson: EventPipeline.DictToJson(meta));
-            _currentLifecycleState = name == "background_start" ? "background" : "foreground";
+            _currentLifecycleState = nextState;
             _currentLifecycleStateEnteredAtTicks = nowTicks;
         }
 

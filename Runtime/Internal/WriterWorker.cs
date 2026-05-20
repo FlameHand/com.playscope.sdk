@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -18,7 +19,11 @@ namespace PlayScopeSdk.Internal
         private readonly List<EventRecord> _buffer = new(64);
         private readonly object _bufferLock = new object();
         private CancellationTokenSource? _cts;
-        private DateTime _lastFlush = DateTime.UtcNow;
+        // Monotonic wall clock for the time-trigger flush. DateTime.UtcNow is
+        // subject to NTP rewinds — a backwards step would leave the diff
+        // negative and the time-triggered flush silently disabled until the
+        // wall clock caught up. Stopwatch is hardware-monotonic everywhere.
+        private long _lastFlushStopwatchTicks = Stopwatch.GetTimestamp();
         private int _chunkCounter = 0;
         private long _currentChunkSize = 0;
 
@@ -171,7 +176,7 @@ namespace PlayScopeSdk.Internal
 
                     foreach (var r in _buffer) if (r.IsCritical) { hasCritical = true; break; }
 
-                    bool timeTriggered = (DateTime.UtcNow - _lastFlush).TotalSeconds >= FlushIntervalSeconds;
+                    bool timeTriggered = StopwatchSecondsSince(_lastFlushStopwatchTicks) >= FlushIntervalSeconds;
                     bool sizeTriggered = _buffer.Count >= FlushRecordThreshold;
 
                     if (sizeTriggered || timeTriggered || hasCritical)
@@ -221,7 +226,7 @@ namespace PlayScopeSdk.Internal
                 bytesWritten += Encoding.UTF8.GetByteCount(line) + 1;
             }
             _buffer.Clear();
-            _lastFlush = DateTime.UtcNow;
+            _lastFlushStopwatchTicks = Stopwatch.GetTimestamp();
 
             try
             {
@@ -319,6 +324,9 @@ namespace PlayScopeSdk.Internal
             _currentWriter = null;
             _currentStream = null;
         }
+
+        private static double StopwatchSecondsSince(long start)
+            => (double)(Stopwatch.GetTimestamp() - start) / Stopwatch.Frequency;
 
         private static string SerializeRecord(EventRecord r)
         {

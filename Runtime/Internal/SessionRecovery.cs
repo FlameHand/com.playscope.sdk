@@ -114,13 +114,21 @@ namespace PlayScopeSdk.Internal
             try
             {
                 var json = File.ReadAllText(path);
+                // Defensive UTF-8 BOM strip. File.ReadAllText with the default
+                // UTF-8 encoding usually swallows the BOM, but if the file got
+                // re-saved by a tool that explicitly used UTF8Encoding(true) on
+                // some platforms the BOM can survive the read and break our
+                // tolerant-but-not-permissive SimpleJson parser. We compare
+                // against the explicit ﻿ escape instead of a literal BOM
+                // char so the source stays readable in editors that hide it.
+                if (json.Length > 0 && json[0] == '﻿') json = json.Substring(1);
                 var dto = SimpleJson.Deserialize(json);
                 if (dto != null && dto.TryGetValue("session_id", out var id) && id is string idStr)
                     return idStr;
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[PlayScope] SessionRecovery: failed to read session.json: {ex.Message}");
+                PlayScopeLog.Warning($"SessionRecovery: failed to read session.json: {ex.Message}");
             }
             return null;
         }

@@ -152,7 +152,7 @@ namespace PlayScopeSdk.Internal
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[PlayScope] Error scanning upload queue dir: " + ex.Message);
+                PlayScopeLog.Warning($"Error scanning upload queue dir: " + ex.Message);
             }
         }
 
@@ -178,14 +178,14 @@ namespace PlayScopeSdk.Internal
             {
                 // Unrecoverable: the chunk's session identity cannot be determined.
                 // Re-uploading under the live session would mis-attribute data. Park it.
-                Debug.LogWarning(
-                    $"[PlayScope] Cannot attribute {chunkName}: {ex.Message}. Moving to dead letter.");
+                PlayScopeLog.Warning(
+                    $"Cannot attribute {chunkName}: {ex.Message}. Moving to dead letter.");
                 MoveToDeadLetter(chunkPath, stateFilePath);
                 return;
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[PlayScope] Failed to build payload for {chunkName}: {ex.Message}");
+                PlayScopeLog.Warning($"Failed to build payload for {chunkName}: {ex.Message}");
                 return;
             }
 
@@ -209,7 +209,7 @@ namespace PlayScopeSdk.Internal
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[PlayScope] Network error uploading {chunkName}: {ex.Message}");
+                PlayScopeLog.Warning($"Network error uploading {chunkName}: {ex.Message}");
                 networkError = true;
             }
 
@@ -231,7 +231,7 @@ namespace PlayScopeSdk.Internal
                 var bodySnippet = string.IsNullOrEmpty(responseBody)
                     ? ""
                     : " body=" + (responseBody.Length > 512 ? responseBody.Substring(0, 512) + "…" : responseBody);
-                Debug.LogWarning($"[PlayScope] Non-retryable HTTP {httpStatus} for {chunkName} — moving to dead letter.{bodySnippet}");
+                PlayScopeLog.Warning($"Non-retryable HTTP {httpStatus} for {chunkName} — moving to dead letter.{bodySnippet}");
                 MoveToDeadLetter(chunkPath, stateFilePath);
                 return;
             }
@@ -246,9 +246,9 @@ namespace PlayScopeSdk.Internal
             SaveState(stateFilePath, state);
 
             if (!networkError)
-                Debug.LogWarning($"[PlayScope] HTTP {httpStatus} for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
+                PlayScopeLog.Warning($"HTTP {httpStatus} for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
             else
-                Debug.LogWarning($"[PlayScope] Network error for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
+                PlayScopeLog.Warning($"Network error for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
         }
 
         // ── HTTP ──────────────────────────────────────────────────────────────────
@@ -442,7 +442,7 @@ namespace PlayScopeSdk.Internal
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[PlayScope] Failed to save upload state: " + ex.Message);
+                PlayScopeLog.Warning($"Failed to save upload state: " + ex.Message);
             }
         }
 
@@ -471,7 +471,7 @@ namespace PlayScopeSdk.Internal
                     if (File.Exists(dest)) File.Delete(dest);
                     File.Move(chunkPath, dest);
                 }
-                catch (Exception ex) { Debug.LogWarning("[PlayScope] Could not move chunk to dead letter: " + ex.Message); }
+                catch (Exception ex) { PlayScopeLog.Warning($"Could not move chunk to dead letter: " + ex.Message); }
             }
             TryDeleteFile(stateFilePath);
         }
@@ -495,7 +495,7 @@ namespace PlayScopeSdk.Internal
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[PlayScope] Error cleaning dead letter dir: " + ex.Message);
+                PlayScopeLog.Warning($"Error cleaning dead letter dir: " + ex.Message);
             }
         }
 
@@ -537,8 +537,8 @@ namespace PlayScopeSdk.Internal
                     // slipped through, refuse to claim it.
                     if (!name.StartsWith(ownPrefix, StringComparison.Ordinal))
                     {
-                        Debug.LogWarning(
-                            $"[PlayScope] UploaderWorker: skipping orphan chunk '{name}' " +
+                        PlayScopeLog.Warning(
+                            $"UploaderWorker: skipping orphan chunk '{name}' " +
                             $"(does not belong to current session '{_session.SessionShortId}'). " +
                             "SessionRecovery should relocate it on next start.");
                         continue;
@@ -560,7 +560,7 @@ namespace PlayScopeSdk.Internal
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[PlayScope] Error recovering pending chunks: " + ex.Message);
+                PlayScopeLog.Warning($"Error recovering pending chunks: " + ex.Message);
             }
         }
 

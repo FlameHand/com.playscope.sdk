@@ -21,8 +21,24 @@ namespace PlayScopeSdk.Internal
         {
             while (!ct.IsCancellationRequested)
             {
-                try { await UniTask.Delay(TimeSpan.FromSeconds(30), cancellationToken: ct); }
+                try
+                {
+                    await UniTask.Delay(TimeSpan.FromSeconds(30), cancellationToken: ct);
+                }
                 catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    // Don't kill the loop on whatever oddity UniTask.Delay might
+                    // throw on exotic platforms. Wait a beat and try again —
+                    // a stalled heartbeat means next-launch SessionRecovery
+                    // would mark every session as abnormal, which is loud
+                    // wrong telemetry.
+                    PlayScopeLog.Warning("HeartbeatWorker: Delay threw", ex);
+                    try { await UniTask.Delay(TimeSpan.FromSeconds(5), cancellationToken: ct); }
+                    catch (OperationCanceledException) { break; }
+                    catch { /* if even the recovery delay throws, the next iteration will try once more */ }
+                }
+
                 try { SessionFiles.UpdateHeartbeat(); }
                 catch { /* file IO — swallow */ }
             }

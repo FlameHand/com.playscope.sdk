@@ -302,8 +302,14 @@ namespace PlayScopeSdk
             {
                 if (PlayScopeRuntime.IsDisabled || !PlayScopeRuntime.IsInitialized)
                 {
-                    if (string.IsNullOrEmpty(operationId) &&
-                        Interlocked.CompareExchange(ref _disabledCompleteWarned, 1, 0) == 0)
+                    // Warn once per session that the SDK is dropping completion
+                    // calls. The prior implementation gated this on
+                    // string.IsNullOrEmpty(operationId), making the warning
+                    // unreachable for the common case (caller stored the empty
+                    // string StartOperation handed back in the disabled state
+                    // and passed it back here). Devs silently learned nothing
+                    // about why their dashboard was empty.
+                    if (Interlocked.CompareExchange(ref _disabledCompleteWarned, 1, 0) == 0)
                     {
                         PlayScopeLog.Warning("CompleteOperation called in disabled state — ignored.");
                     }
