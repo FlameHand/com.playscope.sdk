@@ -17,11 +17,17 @@ namespace PlayScopeSdk.Internal
                 _sampler = new MetricsSampler(PlayScopeRuntime.Pipeline);
             if (PlayScopeRuntime.Pipeline == null)
                 _sampler = null;
+            // First Update() after Initialize == "the player can see the game now".
+            // Runtime handles the once-only guard internally so a transient
+            // Pipeline==null window can't cause us to double-emit.
+            PlayScopeRuntime.EmitFirstFrameRenderedOnce();
             _sampler?.Tick();
             // Drive both coalescers' window timers on the same frame pulse —
             // cheap, no worker thread, deterministic with Unity's main loop.
             PlayScopeRuntime.StatePatchCoalescer.TickAndMaybeFlush();
             PlayScopeRuntime.SessionDataCoalescer.TickAndMaybeFlush();
+            // Also drive the sceneload progress sampler — see SceneLoadProgressTracker.
+            SceneLoadProgressTracker.TickAndMaybeSample();
         }
 
         private void OnApplicationPause(bool isPaused)

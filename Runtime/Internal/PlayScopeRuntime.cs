@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using UnityEngine;
 using PlayScopeSdk.Core.Session;
@@ -10,9 +11,32 @@ namespace PlayScopeSdk.Internal
     {
         internal const string SdkVersion = "0.1.22";
 
+        // PlayerPrefs key — stores the Application.version we last saw alive.
+        // Read once on Initialize so we can emit app_update_detected the first
+        // time a build with a different version starts up.
+        private const string LastSeenAppVersionPrefKey = "playscope:last_app_version";
+
         private static volatile bool _initialized;
         private static volatile bool _disabled;
         private static int _initialStateSet; // 0/1 — Interlocked
+
+        // Lifecycle state machine — feeds duration_in_prev_state_ms on every
+        // background_start / foreground transition. Initialized to "foreground"
+        // on session_start so the first transition out of it carries a real
+        // delta (entire startup spent in foreground, etc.).
+        private static string _currentLifecycleState = "foreground";
+        private static long _currentLifecycleStateEnteredAtTicks;
+
+        // Network reachability watchdog — sampled by MetricsSampler. When the
+        // value changes we emit a network_change event (separate from the
+        // periodic network_reachability metric so the timeline carries a
+        // discrete signal at the transition moment instead of a sample line
+        // crossing).
+        private static int _lastNetworkReachability = int.MinValue;
+
+        // first_frame_rendered guard — flipped by MonoBehaviour on its first
+        // Update tick so we emit the event exactly once per session.
+        private static int _firstFrameEmitted;
 
         internal static bool IsInitialized => _initialized;
         internal static bool IsDisabled => _disabled;
@@ -193,6 +217,46 @@ namespace PlayScopeSdk.Internal
             Pipeline!.EnqueueEvent("session_start",
                 metadataJson: EventPipeline.DictToJson(sessionMeta));
 
+            // Start the lifecycle clock from session_start. The very first
+            // background_start / foreground transition will report the time
+            // we spent in foreground since launch under duration_in_prev_state_ms.
+            _currentLifecycleState = "foreground";
+            _currentLifecycleStateEnteredAtTicks = DateTime.UtcNow.Ticks;
+            _firstFrameEmitted = 0;
+            _lastNetworkReachability = int.MinValue;
+
+            // app_update_detected — compare Application.version with the value
+            // PlayerPrefs remembered last time the app ran. We emit only on a
+            // real version change (first-ever install is silent — there's no
+            // "previous" to compare against and pretending otherwise would
+            // pollute the dashboard with a synthetic update for every fresh
+            // install). PlayerPrefs is read on the main thread inside Initialize,
+            // before any worker spins up, so no threading concern.
+            try
+            {
+                var currentVersion = UnityEngine.Application.version ?? "";
+                var lastSeenVersion = UnityEngine.PlayerPrefs.GetString(LastSeenAppVersionPrefKey, "");
+                if (!string.IsNullOrEmpty(lastSeenVersion) && lastSeenVersion != currentVersion)
+                {
+                    var updateMeta = new Dictionary<string, object>
+                    {
+                        ["from_version"] = lastSeenVersion,
+                        ["to_version"]   = currentVersion,
+                    };
+                    Pipeline.EnqueueEvent("app_update_detected",
+                        metadataJson: EventPipeline.DictToJson(updateMeta));
+                }
+                if (lastSeenVersion != currentVersion)
+                {
+                    UnityEngine.PlayerPrefs.SetString(LastSeenAppVersionPrefKey, currentVersion);
+                    UnityEngine.PlayerPrefs.Save();
+                }
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("app_update_detected check failed", ex);
+            }
+
             // Seed session_data with diagnostic fields the dashboard needs but
             // didn't get into session_start. These describe the runtime that
             // sessions can later patch on top of (Addressables locators after
@@ -298,13 +362,89 @@ namespace PlayScopeSdk.Internal
 
         /// <summary>
         /// Records a lifecycle transition. Called from MonoBehaviour pause/focus callbacks.
+        /// Stamps <c>duration_in_prev_state_ms</c> and <c>prev_state</c> so the
+        /// dashboard can answer "how long were they in the background before
+        /// they came back?" without reconstructing it from a pair of rows.
         /// </summary>
         internal static void RecordLifecycle(LifecycleTransition t)
         {
             if (!_initialized || _disabled) return;
             var name = t == LifecycleTransition.BackgroundStart ? "background_start" : "foreground";
-            Pipeline?.EnqueueEvent("lifecycle", metadataJson: "{\"transition\":\"" + name + "\"}");
+            // Compute time spent in the previous state. We don't dedup repeated
+            // transitions (Unity will sometimes fire focus_changed + pause for
+            // the same OS event) — instead, an immediate "same as current"
+            // transition reports a near-zero duration which is itself signal.
+            var nowTicks = DateTime.UtcNow.Ticks;
+            var durationMs = _currentLifecycleStateEnteredAtTicks == 0
+                ? 0
+                : (nowTicks - _currentLifecycleStateEnteredAtTicks) / TimeSpan.TicksPerMillisecond;
+            var prevState = _currentLifecycleState;
+            var meta = new Dictionary<string, object>
+            {
+                ["transition"]                  = name,
+                ["prev_state"]                  = prevState,
+                ["duration_in_prev_state_ms"]   = Math.Max(0L, durationMs),
+            };
+            Pipeline?.EnqueueEvent("lifecycle", metadataJson: EventPipeline.DictToJson(meta));
+            _currentLifecycleState = name == "background_start" ? "background" : "foreground";
+            _currentLifecycleStateEnteredAtTicks = nowTicks;
         }
+
+        /// <summary>
+        /// Emits a one-shot <c>first_frame_rendered</c> event on the first
+        /// Update() tick after Initialize. Carries the elapsed ms since
+        /// Initialize so the dashboard can plot TTI (time-to-interactive)
+        /// across builds. Guard via Interlocked so a worker thread can't
+        /// double-emit on a rare second-MB-instantiation path.
+        /// </summary>
+        internal static void EmitFirstFrameRenderedOnce()
+        {
+            if (!_initialized || _disabled) return;
+            if (Interlocked.CompareExchange(ref _firstFrameEmitted, 1, 0) != 0) return;
+            var elapsedMs = _currentLifecycleStateEnteredAtTicks == 0
+                ? 0
+                : (DateTime.UtcNow.Ticks - _currentLifecycleStateEnteredAtTicks) / TimeSpan.TicksPerMillisecond;
+            var meta = new Dictionary<string, object>
+            {
+                ["ms_since_session_start"] = Math.Max(0L, elapsedMs),
+            };
+            Pipeline?.EnqueueEvent("first_frame_rendered",
+                metadataJson: EventPipeline.DictToJson(meta));
+        }
+
+        /// <summary>
+        /// Emits a <c>network_change</c> event when reachability flips. Called
+        /// from MetricsSampler with the current <see cref="Application.internetReachability"/>
+        /// value (cast to int). First-ever sample initializes the watchdog
+        /// without emitting — we have no "previous" to compare against.
+        /// </summary>
+        internal static void RecordNetworkReachabilityIfChanged(int currentReachability)
+        {
+            if (!_initialized || _disabled) return;
+            if (_lastNetworkReachability == int.MinValue)
+            {
+                _lastNetworkReachability = currentReachability;
+                return;
+            }
+            if (_lastNetworkReachability == currentReachability) return;
+            var prev = _lastNetworkReachability;
+            _lastNetworkReachability = currentReachability;
+            var meta = new Dictionary<string, object>
+            {
+                ["from"] = ReachabilityToString(prev),
+                ["to"]   = ReachabilityToString(currentReachability),
+            };
+            Pipeline?.EnqueueEvent("network_change",
+                metadataJson: EventPipeline.DictToJson(meta));
+        }
+
+        private static string ReachabilityToString(int r) => r switch
+        {
+            0 => "none",                  // NetworkReachability.NotReachable
+            1 => "carrier",               // ReachableViaCarrierDataNetwork
+            2 => "wifi",                  // ReachableViaLocalAreaNetwork
+            _ => "unknown",
+        };
 
         // ── MonoBehaviour driver ──────────────────────────────────────────────────
 

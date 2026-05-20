@@ -75,12 +75,17 @@ namespace PlayScopeSdk.Internal
                 _batteryTimer = 0;
             }
 
-            // Network reachability — 5s
+            // Network reachability — 5s. We emit the periodic metric for
+            // dashboards that want a time-series, AND let the runtime emit a
+            // discrete network_change event on every transition so the
+            // timeline carries a single row at the moment the network flipped
+            // instead of forcing the reader to spot a line-crossing.
             _networkTimer += dt;
             if (_networkTimer >= NetworkInterval)
             {
                 var net = (int)Application.internetReachability; // 0/1/2
                 _pipeline.EnqueueMetric("network_reachability", net);
+                PlayScopeRuntime.RecordNetworkReachabilityIfChanged(net);
                 _networkTimer = 0;
             }
 
@@ -98,8 +103,11 @@ namespace PlayScopeSdk.Internal
                 }
                 catch (Exception)
                 {
-                    // Addressables may not be initialized yet (e.g. during
-                    // very early SDK init). Silent skip — next tick will retry.
+                    // Addressables may not be initialized yet (e.g. during the
+                    // first ~15 s after Initialize when InitializeAsync hasn't
+                    // resolved). The first sample or two may be missing —
+                    // that's expected, not a bug, and steady-state samples
+                    // resume automatically on the next tick.
                 }
                 _addressablesTimer = 0;
             }

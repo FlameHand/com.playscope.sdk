@@ -277,6 +277,15 @@ namespace PlayScopeSdk
                     var durationMs = (DateTime.UtcNow.Ticks - startTicks) / TimeSpan.TicksPerMillisecond;
                     if (durationMs >= 0) merged["duration_ms"] = durationMs;
                 }
+                // SceneLoad: drain any progress samples that were collected by
+                // SceneLoadProgressTracker between Start and End. Caller can
+                // still pass scene_progress_samples in metadata explicitly —
+                // we only auto-fill when nothing was provided.
+                if (typeStr == "SceneLoad" && !merged.ContainsKey("scene_progress_samples"))
+                {
+                    var samples = SceneLoadProgressTracker.DrainSamples(operationId);
+                    if (samples != null) merged["scene_progress_samples"] = samples;
+                }
                 PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_end", operationId: operationId,
                     operationType: typeStr, metadataJson: EventPipeline.DictToJson(merged));
             }
@@ -336,6 +345,43 @@ namespace PlayScopeSdk
         /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
         public static string StartSceneLoad(string sceneName, IReadOnlyDictionary<string, object> metadata = null)
             => StartOperation(OperationType.SceneLoad, sceneName, metadata);
+
+        /// <summary>
+        /// Convenience overload that also wires up periodic progress sampling.
+        /// Pass the <see cref="UnityEngine.AsyncOperation"/> returned by
+        /// <c>SceneManager.LoadSceneAsync</c> (or Addressables' equivalent);
+        /// the SDK polls <see cref="UnityEngine.AsyncOperation.progress"/> every
+        /// 250 ms on the main thread and drains the samples into the matching
+        /// <see cref="EndSceneLoad"/> call's metadata as <c>scene_progress_samples</c>.
+        /// </summary>
+        /// <param name="sceneName">Scene name being loaded.</param>
+        /// <param name="op">The async handle whose progress we should sample.</param>
+        /// <param name="metadata">Optional load-time attributes.</param>
+        /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
+        public static string StartSceneLoad(string sceneName, UnityEngine.AsyncOperation op,
+            IReadOnlyDictionary<string, object> metadata = null)
+        {
+            var id = StartOperation(OperationType.SceneLoad, sceneName, metadata);
+            if (!string.IsNullOrEmpty(id) && op != null)
+            {
+                try { SceneLoadProgressTracker.Begin(id, op); }
+                catch (Exception ex) { PlayScopeLog.Warning("SceneLoadProgress wire-up failed", ex); }
+            }
+            return id;
+        }
+
+        /// <summary>
+        /// Records an explicit progress reading for a previously-started
+        /// scene load (or any operation whose progress is being sampled).
+        /// Most callers should prefer the overload that takes an
+        /// <see cref="UnityEngine.AsyncOperation"/> and let the SDK sample;
+        /// this is for code that already polls progress on its own loop.
+        /// </summary>
+        public static void RecordSceneLoadProgress(string operationId, float progress)
+        {
+            try { SceneLoadProgressTracker.RecordSample(operationId, progress); }
+            catch (Exception ex) { PlayScopeLog.Warning("RecordSceneLoadProgress failed", ex); }
+        }
 
         /// <summary>
         /// Completes a scene-load operation started with <see cref="StartSceneLoad"/>.
