@@ -14,7 +14,24 @@ namespace PlayScopeSdk
     public static class PlayScope
     {
         // One-time warning flag for CompleteOperation in disabled state.
+        // Reset on every Initialize via ResetSessionScopedState so test
+        // harnesses that cycle SDK on/off get a warning per cycle instead of
+        // exactly once for the process lifetime.
         private static int _disabledCompleteWarned;
+
+        /// <summary>
+        /// Wipes any static state owned by this file that's scoped to a
+        /// single SDK session. Called from <see cref="Internal.PlayScopeRuntime.Initialize"/>
+        /// before the gate flips so a re-Initialize starts from a clean slate.
+        /// Add new session-scoped statics here when introducing them — there's
+        /// no other safe place to reset them from outside this class.
+        /// </summary>
+        internal static void ResetSessionScopedState()
+        {
+            Interlocked.Exchange(ref _disabledCompleteWarned, 0);
+            _openOperationTypes.Clear();
+            _openOperationStartTicks.Clear();
+        }
 
         // opId → OperationType.ToString() — populated by StartOperation, read
         // and drained by CompleteOperation so the operation_end event carries

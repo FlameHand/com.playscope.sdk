@@ -66,9 +66,13 @@ namespace PlayScopeSdk.Internal
         /// <summary>
         /// Called by PlayScope.Initialize if Initialize itself threw — moves SDK to a
         /// permanently disabled state so subsequent API calls are silent no-ops.
+        /// Also tears down anything Initialize had wired up before throwing
+        /// (workers, log subscription, MonoBehaviour driver) so partial state
+        /// can't leak past the failure.
         /// </summary>
         internal static void ForceDisable()
         {
+            TeardownInternal(emitSessionEnd: false);
             _disabled = true;
             // Do NOT set _initialized — IsInitialized stays false so API guards return early.
         }
@@ -91,9 +95,21 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            // Reset sensitive-key filter warnings for the new session
+            // Reset every piece of session-scoped state UP-FRONT, before any
+            // MonoBehaviour driver is created or any worker thread is started.
+            // Otherwise a re-Initialize after Shutdown (test runners, scene
+            // reload tooling) would see stale flag values — e.g.
+            // _firstFrameEmitted still 1 from the prior session → first_frame
+            // event never re-emitted; SequenceCounter at its end-of-prior-session
+            // value → mixed-up sequence numbers on early events.
             SensitiveKeyFilter.ResetWarnings();
             _initialStateSet = 0;
+            _currentLifecycleState = "foreground";
+            _currentLifecycleStateEnteredAtTicks = DateTime.UtcNow.Ticks;
+            _firstFrameEmitted = 0;
+            _lastNetworkReachability = int.MinValue;
+            SequenceCounter.Reset();
+            PlayScope.ResetSessionScopedState();
 
             // Step 1: Validate ApiKey
             if (string.IsNullOrWhiteSpace(context?.ApiKey))
@@ -154,10 +170,12 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            _initialized = true;
-
-            // PSDK-10: start event queue + writer worker
-            SequenceCounter.Reset();
+            // PSDK-10: start event queue + writer worker.
+            // Workers spin up BEFORE the _initialized gate opens so any caller
+            // that races through the public API the moment the gate flips can
+            // count on Pipeline / Queue being non-null. Without this ordering
+            // the early API call would pass IsInitialized but hit a null
+            // Pipeline and silently drop the event via null-conditional.
             Queue = new EventQueue();
             // Note: UploadQueue was already created in Step 4 (SessionRecovery)
             Pipeline = new EventPipeline(Queue);
@@ -197,6 +215,14 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Warning("Failed to install PlayScopeMonoBehaviour driver", ex);
             }
 
+            // Open the gate ONLY now — every subsystem above is wired and
+            // every state field has been reset. Subsequent public API calls
+            // hit a coherent SDK; events emitted from inside this method
+            // (session_start, app_update_detected, session_data seed) use the
+            // Pipeline directly and don't go through the IsInitialized guard
+            // so the ordering here is intentional.
+            _initialized = true;
+
             // Enqueue session_start event
             var env = "production";
             if (context.Metadata != null &&
@@ -217,39 +243,36 @@ namespace PlayScopeSdk.Internal
             Pipeline!.EnqueueEvent("session_start",
                 metadataJson: EventPipeline.DictToJson(sessionMeta));
 
-            // Start the lifecycle clock from session_start. The very first
-            // background_start / foreground transition will report the time
-            // we spent in foreground since launch under duration_in_prev_state_ms.
-            _currentLifecycleState = "foreground";
-            _currentLifecycleStateEnteredAtTicks = DateTime.UtcNow.Ticks;
-            _firstFrameEmitted = 0;
-            _lastNetworkReachability = int.MinValue;
-
             // app_update_detected — compare Application.version with the value
             // PlayerPrefs remembered last time the app ran. We emit only on a
             // real version change (first-ever install is silent — there's no
             // "previous" to compare against and pretending otherwise would
             // pollute the dashboard with a synthetic update for every fresh
-            // install). PlayerPrefs is read on the main thread inside Initialize,
-            // before any worker spins up, so no threading concern.
+            // install). Persist FIRST then emit so a save failure can't
+            // double-emit on the next launch.
             try
             {
                 var currentVersion = UnityEngine.Application.version ?? "";
                 var lastSeenVersion = UnityEngine.PlayerPrefs.GetString(LastSeenAppVersionPrefKey, "");
-                if (!string.IsNullOrEmpty(lastSeenVersion) && lastSeenVersion != currentVersion)
+                var versionChanged = lastSeenVersion != currentVersion;
+                if (versionChanged)
                 {
-                    var updateMeta = new Dictionary<string, object>
-                    {
-                        ["from_version"] = lastSeenVersion,
-                        ["to_version"]   = currentVersion,
-                    };
-                    Pipeline.EnqueueEvent("app_update_detected",
-                        metadataJson: EventPipeline.DictToJson(updateMeta));
-                }
-                if (lastSeenVersion != currentVersion)
-                {
+                    // Persist the new value BEFORE emitting. If the save throws
+                    // here, the catch suppresses the emit too — better to skip
+                    // one update event than to repeat it on every launch until
+                    // PlayerPrefs recovers.
                     UnityEngine.PlayerPrefs.SetString(LastSeenAppVersionPrefKey, currentVersion);
                     UnityEngine.PlayerPrefs.Save();
+                    if (!string.IsNullOrEmpty(lastSeenVersion))
+                    {
+                        var updateMeta = new Dictionary<string, object>
+                        {
+                            ["from_version"] = lastSeenVersion,
+                            ["to_version"]   = currentVersion,
+                        };
+                        Pipeline.EnqueueEvent("app_update_detected",
+                            metadataJson: EventPipeline.DictToJson(updateMeta));
+                    }
                 }
             }
             catch (Exception ex)
@@ -294,7 +317,17 @@ namespace PlayScopeSdk.Internal
         internal static void Shutdown()
         {
             if (!_initialized || _disabled) return;
+            TeardownInternal(emitSessionEnd: true);
+        }
 
+        /// <summary>
+        /// Idempotent teardown shared by Shutdown (normal end) and ForceDisable
+        /// (partial-init failure). Every operation is null-guarded so it can
+        /// safely run on a half-initialised SDK where some subsystems were
+        /// constructed and others weren't.
+        /// </summary>
+        private static void TeardownInternal(bool emitSessionEnd)
+        {
             // Unsubscribe Unity log capture (idempotent guard)
             if (_logCaptureSubscribed)
             {
@@ -319,18 +352,43 @@ namespace PlayScopeSdk.Internal
             StatePatchCoalescer.FlushNow();
             SessionDataCoalescer.FlushNow();
 
-            // Enqueue session_end (critical — triggers instant upload)
-            Pipeline?.EnqueueEvent("session_end",
-                metadataJson: "{\"end_status\":\"normal\"}");
+            if (emitSessionEnd)
+            {
+                // Enqueue session_end (critical — triggers instant upload).
+                // Skipped when called from ForceDisable: we can't honestly say
+                // the session "ended normally" if Initialize itself blew up
+                // partway through.
+                Pipeline?.EnqueueEvent("session_end",
+                    metadataJson: "{\"end_status\":\"normal\"}");
+            }
 
             _writer?.DrainAndFinalize();
             _writer?.Stop();
+            _writer = null;
 
             // After writer finalizes the session_end chunk it lands in UploadQueue —
             // signal the uploader to flush immediately before we stop it.
             _uploader?.TriggerInstantUpload();
             _uploader?.Stop();
             _uploader = null;
+
+            // Null out Pipeline/Queue so a subsequent Initialize starts fresh.
+            // Without this, a re-Initialize would create a NEW Pipeline but the
+            // persistent PlayScopeMonoBehaviour (see below) keeps a reference
+            // to the OLD one and routes future Update-ticks through the dead
+            // pipeline — silent metric loss + unbounded queue growth.
+            Pipeline = null;
+            Queue = null;
+
+            // Destroy the MonoBehaviour driver. Otherwise the GameObject
+            // persists DontDestroyOnLoad and EnsureDriver's early-return on
+            // _driverGo != null skips re-attachment. The next Initialize would
+            // be ticked by a stale MonoBehaviour with a frozen _sampler.
+            if (_driverGo != null)
+            {
+                try { UnityEngine.Object.Destroy(_driverGo); } catch { /* best-effort */ }
+                _driverGo = null;
+            }
 
             try { SessionFiles.DeleteSessionLock(); } catch { /* best-effort */ }
             _initialized = false;

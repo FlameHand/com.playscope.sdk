@@ -107,7 +107,23 @@ namespace PlayScopeSdk.Internal
 
         internal void Stop()
         {
+            // Cancel the loop FIRST so RunAsync drops out of its current
+            // iteration; then acquire the buffer lock to wait for any
+            // in-progress FlushBufferLocked to finish before we close the
+            // stream out from under it.
             _cts?.Cancel();
+            lock (_bufferLock)
+            {
+                // Close the long-lived chunk_current handle. Shutdown's caller
+                // already invokes DrainAndFinalize which closes via
+                // FinalizeChunkInternal → CloseCurrentWriter, but
+                // EnsureCurrentChunk reopens immediately afterwards. Without
+                // this explicit close the stream stays open until GC and the
+                // next session's Initialize fails with a sharing violation.
+                CloseCurrentWriter();
+            }
+            try { _cts?.Dispose(); } catch { /* best-effort */ }
+            _cts = null;
         }
 
         // Called from OnApplicationPause or shutdown — drain, flush, and finalize the chunk so
