@@ -35,10 +35,15 @@ namespace PlayScopeSdk.Internal
 
                 if (!hasStaleLock && !hasOrphans)
                 {
-                    // Clean state — just pick up any orphaned completed_sessions
+                    // Clean state — just pick up any orphaned completed_sessions.
+                    // No log here unless something to enqueue; otherwise every
+                    // startup is noisy.
                     EnqueueCompletedSessions(uploadQueue);
                     return;
                 }
+
+                PlayScopeLog.Info(
+                    $"SessionRecovery: starting (hasStaleLock={hasStaleLock}, hasOrphans={hasOrphans}).");
 
                 // Step 3a: read session_id from the on-disk session.json (still holds the
                 // PRIOR session's identity — the new session hasn't been generated yet).

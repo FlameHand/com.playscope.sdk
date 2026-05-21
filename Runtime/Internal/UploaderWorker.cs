@@ -72,7 +72,7 @@ namespace PlayScopeSdk.Internal
 
         private async UniTaskVoid RunAsync(CancellationToken ct)
         {
-            while (!ct.IsCancellationRequested)
+            while (true)
             {
                 // Wait for either a wake signal or the polling timeout (30s ±20% jitter per spec).
                 double jitterFactor;
@@ -82,12 +82,22 @@ namespace PlayScopeSdk.Internal
                 {
                     await _wakeSignal.WaitAsync(TimeSpan.FromSeconds(waitSeconds), ct);
                 }
-                catch (OperationCanceledException) { break; }
+                catch (OperationCanceledException) { /* fall through to one final drain */ }
                 catch (Exception) { /* timeout is fine — proceed to upload cycle */ }
 
-                if (ct.IsCancellationRequested) break;
+                // ALWAYS run ProcessQueueAsync once per wake, even on cancellation.
+                // Shutdown's flow is: enqueue session_end → DrainAndFinalize →
+                // TriggerInstantUpload → Stop. Without this unconditional drain
+                // the cancel could race the wake and skip the final upload —
+                // session_end would only land on the NEXT launch via
+                // SessionRecovery (when it works), and silently never (when
+                // anything in that chain fails). We pass CancellationToken.None
+                // so a single in-flight HTTP request gets to finish; the OS
+                // will kill us hard if we exceed Unity's quit budget anyway.
+                try { await ProcessQueueAsync(CancellationToken.None); }
+                catch (Exception ex) { PlayScopeLog.Warning("Uploader drain error", ex); }
 
-                await ProcessQueueAsync(ct);
+                if (ct.IsCancellationRequested) break;
             }
         }
 

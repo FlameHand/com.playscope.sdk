@@ -464,16 +464,45 @@ namespace PlayScopeSdk.Internal
                 // Skipped when called from ForceDisable: we can't honestly say
                 // the session "ended normally" if Initialize itself blew up
                 // partway through.
-                Pipeline?.EnqueueEvent("session_end",
-                    metadataJson: "{\"end_status\":\"normal\"}");
+                if (Pipeline != null)
+                {
+                    Pipeline.EnqueueEvent("session_end",
+                        metadataJson: "{\"end_status\":\"normal\"}");
+                    PlayScopeLog.Info("Shutdown: session_end enqueued.");
+                }
+                else
+                {
+                    PlayScopeLog.Warning(
+                        "Shutdown: Pipeline is null — session_end NOT emitted. " +
+                        "The session will appear unclosed in the dashboard.");
+                }
             }
 
-            _writer?.DrainAndFinalize();
+            // DrainAndFinalize: writes the session_end record from the queue to
+            // chunk_current.jsonl, then renames it to chunk_{shortId}_{counter}
+            // and enqueues for upload. This is the single point where session_end
+            // becomes durable on disk — if it throws we lose end-tracking for
+            // this run, and SessionRecovery on next launch can't help (no
+            // finalized chunk to relocate).
+            try
+            {
+                _writer?.DrainAndFinalize();
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Shutdown: DrainAndFinalize failed — session_end may be lost", ex);
+            }
             _writer?.Stop();
             _writer = null;
 
             // After writer finalizes the session_end chunk it lands in UploadQueue —
-            // signal the uploader to flush immediately before we stop it.
+            // signal the uploader to flush immediately. The uploader's RunAsync
+            // is now (post-2026-05-21 race fix) guaranteed to run one ProcessQueueAsync
+            // pass after the wake even if Stop() races in, so the session_end chunk
+            // gets at least one upload shot from THIS process. If the network
+            // request is killed mid-flight by Unity's quit deadline, the chunk
+            // stays on disk for next launch's SessionRecovery to relocate to
+            // completed_sessions/ and upload under the correct session_id.
             _uploader?.TriggerInstantUpload();
             _uploader?.Stop();
             _uploader = null;
