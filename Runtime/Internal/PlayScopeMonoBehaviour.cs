@@ -1,4 +1,7 @@
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 
 namespace PlayScopeSdk.Internal
 {
@@ -45,53 +48,88 @@ namespace PlayScopeSdk.Internal
             SceneLoadProgressTracker.TickAndMaybeSample();
         }
 
-        // First-input poll. Walks Unity's legacy Input API (works on both the
-        // old Input Manager AND the New Input System when the latter is
-        // configured to forward to legacy — Unity's default backwards-
-        // compatibility shim). Touch wins over mouse wins over key wins over
+        // First-input poll. Branches on Unity's input-backend defines so we
+        // work under either the legacy Input Manager, the new Input System,
+        // or the "Both" mode. Touch wins over mouse wins over key wins over
         // gamepad button — keeps the input_kind label stable when more than
         // one source fires on the same frame (e.g. mouse-down also registers
         // a touch on some emulators).
         private static void PollFirstInputLatency()
         {
-            // Cheap fast-path: bail before touching the Input API at all
-            // once the event has already fired. _firstInputEmitted is
-            // module-private so we go through the runtime helper which
-            // does its own guard — but we still want a public guard here
-            // to avoid the per-frame Input.anyKey hit forever.
+            // Cheap fast-path: bail before touching any Input API at all
+            // once the event has already fired.
             if (!PlayScopeRuntime.IsInitialized) return;
             if (PlayScopeRuntime.HasEmittedFirstInputLatency) return;
 
             string kind = null;
-            // Touch — Application.isMobilePlatform avoids a Touch API call
-            // on platforms where it's deprecated / not wired. touchCount is
-            // 0 on non-touch devices so this is also self-guarding.
-            try
-            {
-                if (Input.touchCount > 0) kind = "touch";
-            }
-            catch { /* some platforms throw if touch is disabled */ }
 
-            if (kind == null)
-            {
-                // Mouse — Input.GetMouseButtonDown(0/1/2). Cheap; works on
-                // every Standalone target.
-                if (Input.GetMouseButtonDown(0) ||
-                    Input.GetMouseButtonDown(1) ||
-                    Input.GetMouseButtonDown(2))
-                    kind = "mouse";
-            }
-            if (kind == null)
-            {
-                // Any key (keyboard or gamepad button). anyKeyDown is the
-                // narrower edge-triggered variant — we want only the moment
-                // a key was pressed, not the whole hold-down window.
-                if (Input.anyKeyDown) kind = "key_or_gamepad";
-            }
+#if ENABLE_LEGACY_INPUT_MANAGER
+            kind = PollLegacyInput();
+#endif
+#if ENABLE_INPUT_SYSTEM
+            if (kind == null) kind = PollNewInputSystem();
+#endif
 
             if (kind != null)
                 PlayScopeRuntime.EmitFirstInputLatencyIfFired(kind);
         }
+
+#if ENABLE_LEGACY_INPUT_MANAGER
+        private static string PollLegacyInput()
+        {
+            try
+            {
+                if (Input.touchCount > 0) return "touch";
+            }
+            catch { /* some platforms throw if touch is disabled */ }
+
+            if (Input.GetMouseButtonDown(0) ||
+                Input.GetMouseButtonDown(1) ||
+                Input.GetMouseButtonDown(2))
+                return "mouse";
+
+            if (Input.anyKeyDown) return "key_or_gamepad";
+
+            return null;
+        }
+#endif
+
+#if ENABLE_INPUT_SYSTEM
+        private static string PollNewInputSystem()
+        {
+            // Touch — Touchscreen.current is null on non-touch devices.
+            var touch = Touchscreen.current;
+            if (touch != null && touch.primaryTouch.press.wasPressedThisFrame)
+                return "touch";
+
+            // Mouse — any of the three standard buttons going from up→down.
+            var mouse = Mouse.current;
+            if (mouse != null && (mouse.leftButton.wasPressedThisFrame ||
+                                  mouse.rightButton.wasPressedThisFrame ||
+                                  mouse.middleButton.wasPressedThisFrame))
+                return "mouse";
+
+            // Keyboard — anyKey edge.
+            var kb = Keyboard.current;
+            if (kb != null && kb.anyKey.wasPressedThisFrame)
+                return "key_or_gamepad";
+
+            // Gamepad — walk a handful of common buttons. Cheap and
+            // covers the controllers that report through Gamepad.current.
+            var pad = Gamepad.current;
+            if (pad != null && (pad.buttonSouth.wasPressedThisFrame ||
+                                pad.buttonNorth.wasPressedThisFrame ||
+                                pad.buttonEast.wasPressedThisFrame ||
+                                pad.buttonWest.wasPressedThisFrame ||
+                                pad.startButton.wasPressedThisFrame ||
+                                pad.selectButton.wasPressedThisFrame ||
+                                pad.leftShoulder.wasPressedThisFrame ||
+                                pad.rightShoulder.wasPressedThisFrame))
+                return "key_or_gamepad";
+
+            return null;
+        }
+#endif
 
         private void OnApplicationPause(bool isPaused)
         {

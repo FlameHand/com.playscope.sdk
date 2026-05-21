@@ -2,7 +2,8 @@
   "name": "PlayScopeSdk",
   "rootNamespace": "PlayScopeSdk",
   "references": [
-    "UniTask"
+    "UniTask",
+    "Unity.InputSystem"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],
