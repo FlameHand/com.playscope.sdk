@@ -120,6 +120,7 @@ namespace PlayScopeSdk.Internal
             var dir = PlayScopeDirectory.UploadQueue;
             if (!Directory.Exists(dir)) return;
 
+            var ownPrefix = $"chunk_{_session.SessionShortId}_";
             var now = DateTime.UtcNow;
             try
             {
@@ -128,6 +129,29 @@ namespace PlayScopeSdk.Internal
                     var state = LoadState(stateFile);
                     if (state == null) continue;
                     if (state.IsUploaded) continue;
+
+                    // Belt-and-braces ownership check: a leftover state file from a PRIOR
+                    // session must not pull its chunk into THIS session's upload loop.
+                    // Without this guard, an orphan chunk_{otherShort}_NNN.jsonl in chunks/
+                    // would be uploaded under our envelope and cross-session-commingled
+                    // under our session_id (regression 2026-05-21 — three Unity runs
+                    // squashed into one backend session_id because three prior sessions'
+                    // chunks all rode in on this path).
+                    //
+                    // chunk_id in the state file is the chunk's filename (e.g.
+                    // "chunk_4e91a_000001.jsonl"). Anything not matching our short-id
+                    // prefix gets removed from the queue dir so we stop checking it
+                    // every poll; the chunk itself stays for SessionRecovery to relocate.
+                    var chunkId = state.ChunkId ?? "";
+                    if (!chunkId.StartsWith(ownPrefix, StringComparison.Ordinal))
+                    {
+                        PlayScopeLog.Warning(
+                            $"UploaderWorker: dropping orphan state file '{Path.GetFileName(stateFile)}' " +
+                            $"(does not belong to current session '{_session.SessionShortId}'). " +
+                            "SessionRecovery should relocate the chunk on next start.");
+                        TryDeleteFile(stateFile);
+                        continue;
+                    }
 
                     // Check TTL — based on CreatedAt (NOT LastAttemptAt), otherwise a chunk that
                     // keeps failing would reset its own TTL on every retry. Legacy state files
@@ -365,7 +389,28 @@ namespace PlayScopeSdk.Internal
 
             var completedRoot = PlayScopeDirectory.CompletedSessions;
             if (!chunkDir.StartsWith(completedRoot, StringComparison.OrdinalIgnoreCase))
-                return; // live chunk → live identity, correct by construction
+            {
+                // Live chunk → live identity is ONLY correct when the chunk filename
+                // actually belongs to the current session. A chunk with a foreign
+                // short-id prefix sitting in chunks/ is an orphan from a prior session
+                // that SessionRecovery failed to relocate; uploading it under the live
+                // session_id is exactly the cross-session commingling we're trying to
+                // prevent (regression 2026-05-21).
+                //
+                // Refuse to upload — the caller dead-letters the chunk. SessionRecovery
+                // remains the official path for re-attributing prior-session data via
+                // its bundled manifest.
+                var chunkName = Path.GetFileName(chunkPath);
+                var ownPrefix = $"chunk_{_session.SessionShortId}_";
+                if (!chunkName.StartsWith(ownPrefix, StringComparison.Ordinal) &&
+                    !string.Equals(chunkName, "chunk_current.jsonl", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"Live-dir chunk '{chunkName}' has a foreign short-id (expected prefix '{ownPrefix}'). " +
+                        "Refusing to upload under the live session — would commingle data from a prior run.");
+                }
+                return;
+            }
 
             // Recovered chunk: the manifest is the ONLY source of truth for which session
             // this data belongs to. No fallback allowed.
