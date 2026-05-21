@@ -210,10 +210,26 @@ namespace PlayScopeSdk.Internal
             }
             catch (InvalidOperationException ex)
             {
-                // Unrecoverable: the chunk's session identity cannot be determined.
-                // Re-uploading under the live session would mis-attribute data. Park it.
+                // Foreign short-id in chunks/ — SessionRecovery should have moved
+                // this chunk to completed_sessions/{prior_session_id}/ at startup
+                // but didn't (TryMoveFile is best-effort and swallows IO errors).
+                // Try a self-rescue: look for an existing completed_sessions
+                // manifest whose session_id starts with the chunk's short-id and
+                // relocate the chunk there so the NEXT upload pass picks it up
+                // with the correct envelope identity. Only if that fails do we
+                // dead-letter the data.
+                if (TryRescueOrphanChunk(chunkPath, stateFilePath, out var rescueDest))
+                {
+                    PlayScopeLog.Info(
+                        $"Rescued orphan chunk '{chunkName}' to {rescueDest}. " +
+                        "It will upload under its original session_id on the next pass.");
+                    return;
+                }
+
                 PlayScopeLog.Warning(
-                    $"Cannot attribute {chunkName}: {ex.Message}. Moving to dead letter.");
+                    $"Orphan chunk {chunkName}: {ex.Message} " +
+                    "SessionRecovery missed it at startup AND no matching completed_sessions " +
+                    "manifest was found to attribute it. Moving to dead letter.");
                 MoveToDeadLetter(chunkPath, stateFilePath);
                 return;
             }
@@ -509,6 +525,87 @@ namespace PlayScopeSdk.Internal
             // strip ".state.json" suffix
             var chunkFileName = stateFileName.Substring(0, stateFileName.Length - ".state.json".Length);
             return Path.Combine(PlayScopeDirectory.Chunks, chunkFileName);
+        }
+
+        // ── Orphan self-rescue ────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Last-chance rescue for a chunk with foreign short-id that SessionRecovery
+        /// failed to relocate. Scans <c>completed_sessions/*/session.json</c> for a
+        /// manifest whose session_id starts with the chunk's short-id; if found, moves
+        /// the chunk INTO that folder so the next upload pass attributes it correctly
+        /// via the existing completed_sessions code path. Best-effort — returns false
+        /// (and leaves the chunk untouched) if no matching manifest exists or any IO
+        /// step fails. The caller falls back to dead-letter on false.
+        /// </summary>
+        private static bool TryRescueOrphanChunk(string chunkPath, string stateFilePath, out string destPath)
+        {
+            destPath = "";
+            try
+            {
+                var chunkName = Path.GetFileName(chunkPath);
+                // Extract the 5-hex short-id from "chunk_{shortid}_NNNNNN.jsonl".
+                if (!chunkName.StartsWith("chunk_", StringComparison.Ordinal)) return false;
+                var rest = chunkName.Substring("chunk_".Length);
+                int us = rest.IndexOf('_');
+                if (us <= 0) return false;
+                var shortId = rest.Substring(0, us);
+
+                var completedRoot = PlayScopeDirectory.CompletedSessions;
+                if (!Directory.Exists(completedRoot)) return false;
+
+                foreach (var sessionDir in Directory.GetDirectories(completedRoot))
+                {
+                    var manifestPath = Path.Combine(sessionDir, "session.json");
+                    if (!File.Exists(manifestPath)) continue;
+
+                    string manifestSid;
+                    try
+                    {
+                        var json = File.ReadAllText(manifestPath, new UTF8Encoding(false));
+                        var dto = SimpleJson.Deserialize(json);
+                        if (dto == null || !dto.TryGetValue("session_id", out var sid) || sid is not string sidStr)
+                            continue;
+                        manifestSid = sidStr;
+                    }
+                    catch { continue; }
+
+                    // session_id is a UUID with dashes; short-id is first 5 chars of
+                    // its dash-stripped form. Compare case-insensitively to be safe.
+                    var manifestShort = manifestSid.Replace("-", "");
+                    if (manifestShort.Length < shortId.Length) continue;
+                    if (!manifestShort.Substring(0, shortId.Length)
+                            .Equals(shortId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    // Match found — move chunk into this completed_sessions folder.
+                    var dest = Path.Combine(sessionDir, chunkName);
+                    if (File.Exists(dest))
+                    {
+                        // Collision: keep both, suffix the newcomer.
+                        var nameNoExt = Path.GetFileNameWithoutExtension(dest);
+                        var ext = Path.GetExtension(dest);
+                        int n = 1;
+                        while (File.Exists(dest))
+                        {
+                            dest = Path.Combine(sessionDir, $"{nameNoExt}_rescued{n}{ext}");
+                            n++;
+                        }
+                    }
+                    File.Move(chunkPath, dest);
+                    // Clear the state file — completed_sessions chunks build their own
+                    // state on the next attempt. Leaving the stale one around would
+                    // mis-anchor the retry TTL.
+                    TryDeleteFile(stateFilePath);
+                    destPath = dest;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("TryRescueOrphanChunk failed", ex);
+            }
+            return false;
         }
 
         // ── Dead letter / cleanup ─────────────────────────────────────────────────
