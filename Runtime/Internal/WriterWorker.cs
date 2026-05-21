@@ -156,6 +156,48 @@ namespace PlayScopeSdk.Internal
             StorageQuotaManager.EnforceQuota();
         }
 
+        /// <summary>
+        /// Synchronously write a single critical record AND finalize the chunk —
+        /// bypasses the async RunAsync loop entirely. Built for the rotation /
+        /// shutdown path where the regular Pipeline.EnqueueEvent → async drain
+        /// could race with the worker loop and lose the record (post-mortem on
+        /// 2026-05-21: rotation-induced session_end didn't survive the race
+        /// between WriterWorker.RunAsync drain and TeardownInternal's
+        /// DrainAndFinalize, and the finalized chunk uploaded empty).
+        ///
+        /// <para>
+        /// The single lock acquisition covers drain-queue → append-record →
+        /// flush → close-writer → rename → enqueue-for-upload as one atomic
+        /// step, so the WorkerWorker.RunAsync loop physically cannot
+        /// interleave between flush and finalize. Returns true on success.
+        /// </para>
+        /// </summary>
+        internal bool WriteCriticalAndFinalizeSync(EventRecord record)
+        {
+            try
+            {
+                lock (_bufferLock)
+                {
+                    // First drain any events already queued so they ride along
+                    // in the same final chunk — otherwise they get stranded in
+                    // _queue when Stop() cancels the worker loop seconds later.
+                    while (_queue.TryDequeue(out var queued)) _buffer.Add(queued);
+                    _buffer.Add(record);
+                    FlushBufferLocked();
+                    // Finalize INSIDE the same lock so RunAsync can't sneak in
+                    // and finalize an empty chunk between our flush and rename.
+                    FinalizeChunkInternal();
+                }
+                StorageQuotaManager.EnforceQuota();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("WriteCriticalAndFinalizeSync failed", ex);
+                return false;
+            }
+        }
+
         private async UniTask RunAsync(CancellationToken ct)
         {
             while (!ct.IsCancellationRequested)

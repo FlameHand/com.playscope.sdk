@@ -498,39 +498,53 @@ namespace PlayScopeSdk.Internal
             // would otherwise strand the last buffered first-of-key samples.
             LogDedupBuffer?.FlushNow();
 
+            // Emit session_end and finalize the chunk in ONE synchronous step
+            // so the rotation-vs-async-worker race that lost session_end on
+            // 2026-05-21 cannot recur. We bypass Pipeline.EnqueueEvent entirely
+            // for this critical record — building it directly and handing it
+            // to WriterWorker.WriteCriticalAndFinalizeSync ensures the
+            // {drain → append → flush → rename} sequence happens under a
+            // single lock acquisition, with no opportunity for RunAsync to
+            // sneak in and finalize an empty chunk between our flush and
+            // rename. Pipeline.EnqueueEvent for non-shutdown emit paths is
+            // unchanged.
             if (emitSessionEnd)
             {
-                // Enqueue session_end (critical — triggers instant upload).
-                // Skipped when called from ForceDisable: we can't honestly say
-                // the session "ended normally" if Initialize itself blew up
-                // partway through.
-                if (Pipeline != null)
+                if (_writer != null)
                 {
-                    Pipeline.EnqueueEvent("session_end",
-                        metadataJson: $"{{\"end_status\":\"{endStatus}\"}}");
-                    PlayScopeLog.Info($"Shutdown: session_end enqueued (end_status={endStatus}).");
+                    var rec = new EventRecord
+                    {
+                        RecordType = RecordType.Event,
+                        EventType = "session_end",
+                        EventId = UlidGenerator.NewEventId(),
+                        SequenceNum = SequenceCounter.Next(),
+                        Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                        MetadataJson = $"{{\"end_status\":\"{endStatus}\"}}",
+                        IsCritical = true,
+                    };
+                    var ok = _writer.WriteCriticalAndFinalizeSync(rec);
+                    PlayScopeLog.Info(
+                        $"Shutdown: session_end sync-write (end_status={endStatus}, success={ok}).");
                 }
                 else
                 {
                     PlayScopeLog.Warning(
-                        "Shutdown: Pipeline is null — session_end NOT emitted. " +
+                        "Shutdown: _writer is null — session_end NOT emitted. " +
                         "The session will appear unclosed in the dashboard.");
                 }
             }
-
-            // DrainAndFinalize: writes the session_end record from the queue to
-            // chunk_current.jsonl, then renames it to chunk_{shortId}_{counter}
-            // and enqueues for upload. This is the single point where session_end
-            // becomes durable on disk — if it throws we lose end-tracking for
-            // this run, and SessionRecovery on next launch can't help (no
-            // finalized chunk to relocate).
-            try
+            else
             {
-                _writer?.DrainAndFinalize();
-            }
-            catch (Exception ex)
-            {
-                PlayScopeLog.Warning("Shutdown: DrainAndFinalize failed — session_end may be lost", ex);
+                // ForceDisable path — still try to flush any pending queued
+                // events that DID make it in before init failure. Best-effort.
+                try
+                {
+                    _writer?.DrainAndFinalize();
+                }
+                catch (Exception ex)
+                {
+                    PlayScopeLog.Warning("ForceDisable: DrainAndFinalize failed", ex);
+                }
             }
             _writer?.Stop();
             _writer = null;
