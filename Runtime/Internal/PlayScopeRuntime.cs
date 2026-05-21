@@ -91,6 +91,32 @@ namespace PlayScopeSdk.Internal
         private static bool _lowMemorySubscribed;
         private static LogLevel _autoCaptureMinLevel;
 
+        // Background-timeout session rotation:
+        //
+        // A "play session" in our billing/analytics model ends when the player
+        // backgrounds the app for longer than this threshold. Returning after a
+        // longer absence starts a NEW session (new session_id, sequence_num
+        // reset, fresh chunks). Hardcoded — exposing this as a per-project
+        // config would let a customer set it to "10 hours" and effectively
+        // bill for DAU instead of sessions, breaking the pricing model. Same
+        // value applies to every plan tier.
+        //
+        // See BILLING_AND_PLANS.md §4 for the long-form rationale.
+        private const long BackgroundSessionTimeoutMs = 5 * 60 * 1000L; // 5 minutes
+
+        // The context handed to Initialize() — held so RotateSession() can
+        // re-construct an identical runtime on the new session. NEVER mutated
+        // after first Initialize; treated as read-only by the rotation path.
+        private static PlayScopeContext? _context;
+
+        // Set by RecordLifecycle when a Foreground transition after a long
+        // background triggers session rotation. Consumed by PlayScopeMonoBehaviour
+        // on its next Update tick so the rotation runs OUTSIDE any
+        // OnApplicationPause / OnFocusChanged callback chain — TeardownInternal
+        // destroys the driver GameObject and we don't want to do that from
+        // inside that GameObject's own callback.
+        private static volatile bool _pendingRotation;
+
         /// <summary>
         /// Called by PlayScope.Initialize if Initialize itself threw — moves SDK to a
         /// permanently disabled state so subsequent API calls are silent no-ops.
@@ -154,6 +180,10 @@ namespace PlayScopeSdk.Internal
             _firstFrameTicks = 0;
             _firstInputEmitted = 0;
             _lastNetworkReachability = int.MinValue;
+            // Clear any in-flight rotation request — could only be non-zero if
+            // RotateSession ran AND the MonoBehaviour managed to schedule a
+            // SECOND rotation in the same frame (impossible today, defensive).
+            _pendingRotation = false;
             SequenceCounter.Reset();
             PlayScope.ResetSessionScopedState();
 
@@ -164,6 +194,12 @@ namespace PlayScopeSdk.Internal
                 _disabled = true;
                 return;
             }
+
+            // Store the context for RotateSession() to reuse on background-timeout
+            // rotation. Captured BEFORE any subsystem creation so that even if
+            // Initialize bails partway through, we still know how to re-init the
+            // SDK identically on the next rotation attempt.
+            _context = context;
 
             // Step 2: Ensure directories exist (wrap disk-write sections — never throw to caller)
             try
@@ -407,16 +443,20 @@ namespace PlayScopeSdk.Internal
         internal static void Shutdown()
         {
             if (!_initialized || _disabled) return;
-            TeardownInternal(emitSessionEnd: true);
+            TeardownInternal(emitSessionEnd: true, endStatus: "normal");
         }
 
         /// <summary>
-        /// Idempotent teardown shared by Shutdown (normal end) and ForceDisable
-        /// (partial-init failure). Every operation is null-guarded so it can
-        /// safely run on a half-initialised SDK where some subsystems were
-        /// constructed and others weren't.
+        /// Idempotent teardown shared by Shutdown (normal end), ForceDisable
+        /// (partial-init failure), and RotateSession (background timeout).
+        /// Every operation is null-guarded so it can safely run on a
+        /// half-initialised SDK where some subsystems were constructed and
+        /// others weren't.
         /// </summary>
-        private static void TeardownInternal(bool emitSessionEnd)
+        /// <param name="endStatus">Value for the <c>end_status</c> metadata
+        /// field on the session_end event. Normal user-quit → "normal";
+        /// background-timeout rotation → "background_timeout".</param>
+        private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal")
         {
             // Unsubscribe Unity log capture (idempotent guard)
             if (_logCaptureSubscribed)
@@ -467,8 +507,8 @@ namespace PlayScopeSdk.Internal
                 if (Pipeline != null)
                 {
                     Pipeline.EnqueueEvent("session_end",
-                        metadataJson: "{\"end_status\":\"normal\"}");
-                    PlayScopeLog.Info("Shutdown: session_end enqueued.");
+                        metadataJson: $"{{\"end_status\":\"{endStatus}\"}}");
+                    PlayScopeLog.Info($"Shutdown: session_end enqueued (end_status={endStatus}).");
                 }
                 else
                 {
@@ -592,12 +632,35 @@ namespace PlayScopeSdk.Internal
             // second call is silently swallowed.
             if (nextState == _currentLifecycleState) return;
 
-            var name = t == LifecycleTransition.BackgroundStart ? "background_start" : "foreground";
             var nowTicks = DateTime.UtcNow.Ticks;
             var durationMs = _currentLifecycleStateEnteredAtTicks == 0
                 ? 0
                 : (nowTicks - _currentLifecycleStateEnteredAtTicks) / TimeSpan.TicksPerMillisecond;
             var prevState = _currentLifecycleState;
+
+            // Background-timeout session rotation. Transitioning from background
+            // → foreground after more than BackgroundSessionTimeoutMs of absence
+            // means we treat the resumed app as a NEW session (new session_id,
+            // fresh chunks, sequence_num reset). The actual rotation runs on the
+            // next MonoBehaviour Update tick — we can't destroy / recreate the
+            // driver GameObject from inside its own OnApplicationPause callback.
+            //
+            // We deliberately SKIP emitting the lifecycle event in this case:
+            // the upcoming session_end (end_status="background_timeout") plus
+            // the new session_start convey the same information more clearly
+            // than a transient foreground row on a session about to be closed.
+            if (t == LifecycleTransition.Foreground &&
+                prevState == "background" &&
+                durationMs >= BackgroundSessionTimeoutMs)
+            {
+                PlayScopeLog.Info(
+                    $"Background timeout ({durationMs} ms ≥ {BackgroundSessionTimeoutMs} ms) — " +
+                    "scheduling session rotation.");
+                _pendingRotation = true;
+                return;
+            }
+
+            var name = t == LifecycleTransition.BackgroundStart ? "background_start" : "foreground";
             var meta = new Dictionary<string, object>
             {
                 ["transition"]                  = name,
@@ -615,6 +678,50 @@ namespace PlayScopeSdk.Internal
             // half-second post-resume can't false-positive.
             if (nextState == "background") AnrWatchdog?.Suspend();
             else                            AnrWatchdog?.Resume();
+        }
+
+        /// <summary>
+        /// Atomically reads-and-clears the pending-rotation flag. Called by
+        /// PlayScopeMonoBehaviour.Update at the top of every frame so the
+        /// rotation executes on the FOLLOWING tick after a foreground
+        /// transition triggers it — never re-entrantly inside the
+        /// OnApplicationPause callback that set the flag.
+        /// </summary>
+        internal static bool ConsumePendingRotation()
+        {
+            if (!_pendingRotation) return false;
+            _pendingRotation = false;
+            return true;
+        }
+
+        /// <summary>
+        /// Closes the current session with end_status="background_timeout" and
+        /// re-runs Initialize() with the originally-supplied context. Result:
+        /// a brand new session_id, sequence_num reset to 0, fresh chunks dir
+        /// state — billing counts this as a separate session.
+        ///
+        /// <para>
+        /// MUST be called from outside any OnApplicationPause / OnFocusChanged
+        /// callback chain: TeardownInternal destroys the driver GameObject,
+        /// which would be a destroy-self if called from inside that GO's own
+        /// MonoBehaviour callback. Currently invoked from MB.Update via
+        /// ConsumePendingRotation.
+        /// </para>
+        /// </summary>
+        internal static void PerformRotation()
+        {
+            if (!_initialized || _disabled) return;
+            var ctx = _context;
+            if (ctx == null)
+            {
+                PlayScopeLog.Warning(
+                    "PerformRotation called but no stored context — cannot re-initialize. " +
+                    "Falling back to clean shutdown.");
+                TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout");
+                return;
+            }
+            TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout");
+            Initialize(ctx);
         }
 
         /// <summary>

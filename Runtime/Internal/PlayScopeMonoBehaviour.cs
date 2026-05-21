@@ -16,6 +16,17 @@ namespace PlayScopeSdk.Internal
 
         private void Update()
         {
+            // Background-timeout session rotation lands here on the tick AFTER
+            // OnApplicationPause(false) set the flag. PerformRotation destroys
+            // this very GameObject as part of teardown, so we MUST `return`
+            // immediately after — any further code in this Update() would run
+            // against a half-destroyed sampler / pipeline.
+            if (PlayScopeRuntime.ConsumePendingRotation())
+            {
+                PlayScopeRuntime.PerformRotation();
+                return;
+            }
+
             if (PlayScopeRuntime.Pipeline != null && _sampler == null)
                 _sampler = new MetricsSampler(PlayScopeRuntime.Pipeline);
             if (PlayScopeRuntime.Pipeline == null)
