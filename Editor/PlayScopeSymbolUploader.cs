@@ -9,6 +9,7 @@ using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
+using PlayScopeSdk;
 
 namespace PlayScopeSdk.Editor
 {
@@ -75,19 +76,42 @@ namespace PlayScopeSdk.Editor
                 return;
             }
 
-            var settings = PlayScopeBuildSettings.LoadOrCreate();
-            if (!settings.AutoUploadSymbols)
-            {
-                Debug.Log("[PlayScope] Symbol upload skipped: AutoUploadSymbols is off in Build Settings.");
-                return;
-            }
-            var apiKey = settings.ResolvedApiKey;
-            if (string.IsNullOrEmpty(apiKey))
+            // Resolve config from the runtime settings asset shared with the
+            // SDK (Resources/PlayScopeSettings.asset). Build-time fields
+            // (AutoUploadSymbols, VerboseEditor) live on the same asset so
+            // the integrator has one config surface in the Inspector.
+            //
+            // The asset path inside the consumer's project, NOT inside the
+            // SDK package — AssetDatabase resolves the consumer copy. If
+            // it doesn't exist, the integrator hasn't run PlayScope ▸
+            // Settings yet and the upload won't work; we warn cleanly.
+            var settings = AssetDatabase.LoadAssetAtPath<PlayScopeSettings>(
+                "Assets/Resources/PlayScopeSettings.asset");
+            if (settings == null)
             {
                 Debug.LogWarning(
-                    "[PlayScope] Symbol upload skipped: no API key. " +
-                    "Paste your ps_live_… key in PlayScope ▸ Build Settings, " +
-                    "or set the PLAYSCOPE_API_KEY env var (CI).");
+                    "[PlayScope] Symbol upload skipped: Assets/Resources/PlayScopeSettings.asset " +
+                    "not found. Create it via PlayScope ▸ Settings.");
+                return;
+            }
+            if (!settings.AutoUploadSymbols)
+            {
+                Debug.Log("[PlayScope] Symbol upload skipped: AutoUploadSymbols is off in PlayScope Settings.");
+                return;
+            }
+            // SDK key: settings asset first, env var fallback for CI.
+            var sdkKey = settings.SdkKey;
+            if (string.IsNullOrEmpty(sdkKey))
+            {
+                sdkKey = System.Environment.GetEnvironmentVariable("PLAYSCOPE_SDK_KEY")
+                    ?? System.Environment.GetEnvironmentVariable("PLAYSCOPE_API_KEY"); // back-compat env name
+            }
+            if (string.IsNullOrEmpty(sdkKey))
+            {
+                Debug.LogWarning(
+                    "[PlayScope] Symbol upload skipped: no SDK key. " +
+                    "Paste your ps_live_… key in PlayScope ▸ Settings, " +
+                    "or set the PLAYSCOPE_SDK_KEY env var (CI).");
                 return;
             }
 
@@ -115,15 +139,18 @@ namespace PlayScopeSdk.Editor
             }
 
             var sizeBytes = new FileInfo(zipPath).Length;
-            if (settings.Verbose)
+            if (settings.VerboseEditor)
             {
                 Debug.Log($"[PlayScope] Uploading symbols: platform={platform} version={appVersion} build={buildNumber} size={sizeBytes / 1024}KB");
             }
 
+            var backendUrl = string.IsNullOrEmpty(settings.BackendUrl)
+                ? "https://api.playscope.dev"
+                : settings.BackendUrl;
             await UploadAsync(
-                settings.BackendUrl.TrimEnd('/'), apiKey,
+                backendUrl.TrimEnd('/'), sdkKey,
                 platform, appVersion, buildNumber, zipPath,
-                settings.Verbose);
+                settings.VerboseEditor);
         }
 
         // ── Android — Unity already zips for us ─────────────────────────────
@@ -193,7 +220,7 @@ namespace PlayScopeSdk.Editor
         // ── HTTP upload ────────────────────────────────────────────────────
 
         private static async Task UploadAsync(
-            string backendBase, string apiKey,
+            string backendBase, string sdkKey,
             string platform, string appVersion, string buildNumber,
             string zipPath, bool verbose)
         {
@@ -205,7 +232,7 @@ namespace PlayScopeSdk.Editor
             {
                 using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
                 client.DefaultRequestHeaders.Authorization =
-                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", sdkKey);
 
                 using var content = new MultipartFormDataContent();
                 using var fileStream = File.OpenRead(zipPath);

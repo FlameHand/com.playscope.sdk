@@ -310,7 +310,7 @@ namespace PlayScopeSdk.Internal
             request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("Content-Encoding", "gzip");
-            request.SetRequestHeader("Authorization", "Bearer " + _context.ApiKey);
+            request.SetRequestHeader("Authorization", "Bearer " + _context.SdkKey);
 
             var op = request.SendWebRequest();
             while (!op.isDone)

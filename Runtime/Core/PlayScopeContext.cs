@@ -1,17 +1,36 @@
+using System;
 using System.Collections.Generic;
 
 namespace PlayScopeSdk
 {
     /// <summary>
-    /// Configuration passed to <see cref="PlayScope.Initialize"/>.
+    /// Configuration passed to <see cref="PlayScope.Initialize(PlayScopeContext)"/>.
+    /// In the typical flow you don't construct this yourself — call the
+    /// parameterless <see cref="PlayScope.Initialize()"/> overload and the
+    /// SDK builds a <c>PlayScopeContext</c> from your project's
+    /// <see cref="PlayScopeSettings"/> ScriptableObject (Resources‑loaded).
     /// </summary>
     public sealed class PlayScopeContext
     {
         /// <summary>
-        /// Required. API key from the PlayScope dashboard (ps_live_...).
-        /// If null or empty, SDK enters disabled state — all calls become no-ops.
+        /// Required. SDK key from the PlayScope dashboard (ps_live_...).
+        /// If null or empty, SDK enters disabled state — all calls become
+        /// no-ops. Renamed from <c>ApiKey</c> for parity with the dashboard
+        /// terminology; <c>ApiKey</c> remains as an obsolete alias.
         /// </summary>
-        public string ApiKey { get; set; }
+        public string SdkKey { get; set; }
+
+        /// <summary>
+        /// Obsolete: use <see cref="SdkKey"/>. Kept as a setter/getter
+        /// pass-through so existing <c>new PlayScopeContext { ApiKey = "…" }</c>
+        /// initialisers keep compiling. Will be removed in a future major.
+        /// </summary>
+        [Obsolete("Renamed to SdkKey. The old name remains as an alias for back-compat.")]
+        public string ApiKey
+        {
+            get => SdkKey;
+            set => SdkKey = value;
+        }
 
         /// <summary>
         /// Automatically capture Unity log stream. Default: false.

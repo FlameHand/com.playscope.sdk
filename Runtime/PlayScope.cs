@@ -86,11 +86,46 @@ namespace PlayScopeSdk
         private const int MaxOpenOperations = 1024;
 
         /// <summary>
-        /// Initializes the SDK with the provided configuration.
-        /// Must be called once before using any other SDK methods.
-        /// Subsequent calls are a warning + no-op — the first call wins.
+        /// Initializes the SDK using the project's
+        /// <see cref="PlayScopeSettings"/> asset (loaded from
+        /// <c>Resources/PlayScopeSettings.asset</c>). This is the typical
+        /// entry point — create the asset via <c>PlayScope ▸ Settings</c>
+        /// in the Editor, paste your SDK key, and call this from a
+        /// bootstrap script.
+        ///
+        /// <para>
+        /// If the asset is missing or its <c>SdkKey</c> is empty, the SDK
+        /// stays disabled and every public API call becomes a silent no-op.
+        /// A clear console warning identifies the cause.
+        /// </para>
         /// </summary>
-        /// <param name="context">Configuration including API key and optional settings.</param>
+        public static void Initialize()
+        {
+            var settings = PlayScopeSettings.Load();
+            if (settings == null)
+            {
+                PlayScopeLog.Warning(
+                    "PlayScopeSettings asset not found at Resources/PlayScopeSettings.asset. " +
+                    "Create it via the PlayScope ▸ Settings menu in the Editor (Settings → " +
+                    "Projects → SDK key in the dashboard provides the value).");
+                PlayScopeRuntime.ForceDisable();
+                return;
+            }
+            Initialize(BuildContextFromSettings(settings));
+        }
+
+        /// <summary>
+        /// Initializes the SDK with an explicit context object. Use this
+        /// when you need to override settings programmatically (e.g. you
+        /// run multiple environments from one codebase and pick the key
+        /// at runtime). For the common case, prefer the parameterless
+        /// <see cref="Initialize()"/> + <see cref="PlayScopeSettings"/>.
+        ///
+        /// <para>
+        /// Subsequent calls after the first are a warning + no-op — the
+        /// first wins.
+        /// </para>
+        /// </summary>
         public static void Initialize(PlayScopeContext context)
         {
             try
@@ -102,6 +137,30 @@ namespace PlayScopeSdk
                 PlayScopeLog.Warning("Initialize failed — SDK disabled", ex);
                 PlayScopeRuntime.ForceDisable();
             }
+        }
+
+        /// <summary>
+        /// Loaded <see cref="PlayScopeSettings"/> asset, or null if it
+        /// doesn't exist. Wrapper / game-side code that wants to mirror
+        /// the SDK's <c>MinLogLevel</c> in its own logger can read it from
+        /// here without re-loading Resources.
+        /// </summary>
+        public static PlayScopeSettings Settings => PlayScopeSettings.Load();
+
+        private static PlayScopeContext BuildContextFromSettings(PlayScopeSettings s)
+        {
+            return new PlayScopeContext
+            {
+                SdkKey = s.SdkKey,
+                UploadEndpoint = string.IsNullOrEmpty(s.BackendUrl)
+                    ? "https://api.playscope.dev"
+                    : s.BackendUrl,
+                AutoCaptureUnityLogs = s.AutoCaptureUnityLogs,
+                AutoCaptureMinLevel = s.MinLogLevel,
+                AnrDetectionEnabled = s.AnrDetectionEnabled,
+                AnrThresholdMs = s.AnrThresholdMs,
+                PiiValueMasksEnabled = s.PiiValueMasksEnabled,
+            };
         }
 
         /// <summary>

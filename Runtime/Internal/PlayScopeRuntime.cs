@@ -187,10 +187,10 @@ namespace PlayScopeSdk.Internal
             SequenceCounter.Reset();
             PlayScope.ResetSessionScopedState();
 
-            // Step 1: Validate ApiKey
-            if (string.IsNullOrWhiteSpace(context?.ApiKey))
+            // Step 1: Validate SdkKey
+            if (string.IsNullOrWhiteSpace(context?.SdkKey))
             {
-                PlayScopeLog.Warning("ApiKey is null or empty — SDK disabled.");
+                PlayScopeLog.Warning("SdkKey is null or empty — SDK disabled.");
                 _disabled = true;
                 return;
             }
