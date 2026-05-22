@@ -296,6 +296,17 @@ namespace PlayScopeSdk.Internal
             _writer.Start();
 
             _uploader.Start();
+            // If SessionRecovery just enqueued chunks from a prior unclean
+            // exit (synthetic session_abnormal_end for swipe-killed sessions,
+            // orphan chunks from completed_sessions/), wake the uploader
+            // immediately. Without this, the first ProcessQueueAsync pass
+            // waits ~30 s (PollingIntervalSeconds + jitter) — and if the
+            // user swipe-kills again within those 30 s, the synthetic
+            // events never reach the backend. Observed in production:
+            // sessions stayed EndStatus=unknown forever because each
+            // launch's recovery fired but uploader never drained before
+            // the next swipe.
+            if (UploadQueue.Count > 0) _uploader.TriggerInstantUpload();
 
             _heartbeat = new HeartbeatWorker();
             _heartbeat.Start();
