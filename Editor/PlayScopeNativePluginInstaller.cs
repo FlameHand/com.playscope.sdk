@@ -1,8 +1,12 @@
 using System;
 using System.IO;
 using UnityEditor;
-using UnityEditor.PackageManager;
 using UnityEngine;
+
+// Alias to disambiguate from the legacy `UnityEditor.PackageInfo` (the
+// old Asset Store package metadata type) which auto-imports via
+// `using UnityEditor;`. We want the modern UPM one.
+using UpmPackageInfo = UnityEditor.PackageManager.PackageInfo;
 
 namespace PlayScopeSdk.Editor
 {
@@ -127,7 +131,7 @@ namespace PlayScopeSdk.Editor
         {
             try
             {
-                var info = PackageInfo.FindForAssembly(typeof(PlayScopeNativePluginInstaller).Assembly);
+                var info = UpmPackageInfo.FindForAssembly(typeof(PlayScopeNativePluginInstaller).Assembly);
                 return info?.resolvedPath;
             }
             catch { return null; }
