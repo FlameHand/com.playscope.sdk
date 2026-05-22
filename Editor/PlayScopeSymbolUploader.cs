@@ -48,19 +48,33 @@ namespace PlayScopeSdk.Editor
 
         public void OnPostprocessBuild(BuildReport report)
         {
-            try
+            // Architecture note — TWO threading hazards co-exist here:
+            //
+            //   (1) Unity Editor APIs (`BuildReport.summary`, `PlayerSettings.*`,
+            //       `AssetDatabase.LoadAssetAtPath`) MUST be called on the
+            //       main thread; calls from a ThreadPool worker throw
+            //       `get_*_Injected: can only be called from the main thread`.
+            //
+            //   (2) Blocking the main thread on a Task that captured the
+            //       main-thread SynchronizationContext deadlocks the build —
+            //       the continuation can't run until the main thread is
+            //       free, but the main thread is parked on GetResult().
+            //
+            // Resolution: do EVERYTHING Unity-API on the main thread
+            // synchronously, then hand a self-contained payload to a
+            // ThreadPool Task.Run for the actual HTTP upload. The Task
+            // touches zero Unity API, so its continuation has nothing it
+            // needs to send back to the main thread.
+            UploadPayload payload;
+            try { payload = CollectPayloadOnMainThread(report); }
+            catch (Exception ex)
             {
-                // Wrap in Task.Run so the async chain runs on a ThreadPool
-                // thread instead of inheriting the Unity Editor main-thread
-                // SynchronizationContext. Without this, any inner `await`
-                // tries to post its continuation back onto the main thread —
-                // but the main thread is blocked here on GetResult(), so
-                // continuation never runs and the build hangs forever after
-                // "Moving output package(s)". The first user to hit this
-                // wasted ~13 minutes on a CLOSE_WAIT socket before noticing.
-                // See https://blog.stephencleary.com/2012/07/dont-block-on-async-code.html
-                Task.Run(() => ProcessAsync(report)).GetAwaiter().GetResult();
+                Debug.LogError($"[PlayScope] Symbol upload setup failed: {ex.Message}\n{ex.StackTrace}");
+                return;
             }
+            if (payload == null) return; // pre-conditions already logged
+
+            try { Task.Run(() => UploadAsync(payload)).GetAwaiter().GetResult(); }
             catch (Exception ex)
             {
                 // NEVER fail the build over a symbol upload failure — the
@@ -70,33 +84,33 @@ namespace PlayScopeSdk.Editor
             }
         }
 
-        private static async Task ProcessAsync(BuildReport report)
+        // ── Main-thread sync collector ─────────────────────────────────────
+        //
+        // Reads every Unity API surface we need (BuildReport, PlayerSettings,
+        // AssetDatabase) and rolls them into a plain-data payload the
+        // ThreadPool can consume without ever calling back into Unity.
+        // Returns null when we should skip the upload — callers must check.
+
+        private static UploadPayload CollectPayloadOnMainThread(BuildReport report)
         {
             var summary = report.summary;
             var target = summary.platform;
 
-            // Quick exits: only IL2CPP iOS/Android need symbolication.
             if (target != BuildTarget.Android && target != BuildTarget.iOS)
-            {
-                return;
-            }
+                return null;
+
             var backend = (ScriptingImplementation)PlayerSettings.GetScriptingBackend(
                 BuildPipeline.GetBuildTargetGroup(target));
             if (backend != ScriptingImplementation.IL2CPP)
             {
                 Debug.Log("[PlayScope] Symbol upload skipped: not an IL2CPP build.");
-                return;
+                return null;
             }
 
             // Resolve config from the runtime settings asset shared with the
             // SDK (Resources/PlayScopeSettings.asset). Build-time fields
             // (AutoUploadSymbols, VerboseEditor) live on the same asset so
             // the integrator has one config surface in the Inspector.
-            //
-            // The asset path inside the consumer's project, NOT inside the
-            // SDK package — AssetDatabase resolves the consumer copy. If
-            // it doesn't exist, the integrator hasn't run PlayScope ▸
-            // Settings yet and the upload won't work; we warn cleanly.
             var settings = AssetDatabase.LoadAssetAtPath<PlayScopeSettings>(
                 "Assets/Resources/PlayScopeSettings.asset");
             if (settings == null)
@@ -104,13 +118,14 @@ namespace PlayScopeSdk.Editor
                 Debug.LogWarning(
                     "[PlayScope] Symbol upload skipped: Assets/Resources/PlayScopeSettings.asset " +
                     "not found. Create it via PlayScope ▸ Settings.");
-                return;
+                return null;
             }
             if (!settings.AutoUploadSymbols)
             {
                 Debug.Log("[PlayScope] Symbol upload skipped: AutoUploadSymbols is off in PlayScope Settings.");
-                return;
+                return null;
             }
+
             // SDK key: settings asset first, env var fallback for CI.
             var sdkKey = settings.SdkKey;
             if (string.IsNullOrEmpty(sdkKey))
@@ -124,7 +139,7 @@ namespace PlayScopeSdk.Editor
                     "[PlayScope] Symbol upload skipped: no SDK key. " +
                     "Paste your ps_live_… key in PlayScope ▸ Settings, " +
                     "or set the PLAYSCOPE_SDK_KEY env var (CI).");
-                return;
+                return null;
             }
 
             string platform = target == BuildTarget.iOS ? "ios" : "android";
@@ -133,10 +148,15 @@ namespace PlayScopeSdk.Editor
                 ? PlayerSettings.iOS.buildNumber
                 : PlayerSettings.Android.bundleVersionCode.ToString();
 
-            // Locate the symbol payload.
+            // Locate / prepare the symbol payload.
+            // FindAndroidSymbolsZip and PrepareIosDsymZip are file-system
+            // calls only — safe to run on main thread (no Unity API), but
+            // zipping dSYMs can take seconds. The cost is acceptable on
+            // a build-finished hook; we'd rather keep the threading model
+            // simple than save a few seconds.
             string zipPath = target == BuildTarget.Android
-                ? FindAndroidSymbolsZip(report)
-                : await PrepareIosDsymZipAsync(report).ConfigureAwait(false);
+                ? FindAndroidSymbolsZip(summary)
+                : PrepareIosDsymZip(summary);
 
             if (zipPath == null)
             {
@@ -147,32 +167,53 @@ namespace PlayScopeSdk.Editor
                           "and rebuild for crash resolution to work."
                         : "[PlayScope] No iOS .dSYM bundles found in the build output. " +
                           "Verify Xcode generated dSYM files (Debug Information Format = DWARF with dSYM File).");
-                return;
-            }
-
-            var sizeBytes = new FileInfo(zipPath).Length;
-            if (settings.VerboseEditor)
-            {
-                Debug.Log($"[PlayScope] Uploading symbols: platform={platform} version={appVersion} build={buildNumber} size={sizeBytes / 1024}KB");
+                return null;
             }
 
             var backendUrl = string.IsNullOrEmpty(settings.BackendUrl)
                 ? "https://api.playscope.dev"
                 : settings.BackendUrl;
-            await UploadAsync(
-                backendUrl.TrimEnd('/'), sdkKey,
-                platform, appVersion, buildNumber, zipPath,
-                settings.VerboseEditor).ConfigureAwait(false);
+
+            var payload = new UploadPayload
+            {
+                BackendBase = backendUrl.TrimEnd('/'),
+                SdkKey      = sdkKey,
+                Platform    = platform,
+                AppVersion  = appVersion,
+                BuildNumber = buildNumber,
+                ZipPath     = zipPath,
+                Verbose     = settings.VerboseEditor,
+            };
+
+            if (settings.VerboseEditor)
+            {
+                var sizeBytes = new FileInfo(zipPath).Length;
+                Debug.Log($"[PlayScope] Uploading symbols: platform={platform} version={appVersion} build={buildNumber} size={sizeBytes / 1024}KB");
+            }
+            return payload;
+        }
+
+        // Plain-data snapshot handed from main thread to the upload worker —
+        // strings + bool only, no Unity types, no callbacks.
+        private sealed class UploadPayload
+        {
+            public string BackendBase;
+            public string SdkKey;
+            public string Platform;
+            public string AppVersion;
+            public string BuildNumber;
+            public string ZipPath;
+            public bool   Verbose;
         }
 
         // ── Android — Unity already zips for us ─────────────────────────────
 
-        private static string FindAndroidSymbolsZip(BuildReport report)
+        private static string FindAndroidSymbolsZip(BuildSummary summary)
         {
             // Unity's symbols.zip lands beside the APK / AAB. Look in the
             // output directory plus its parent (Unity's "Build" sometimes
             // puts the zip one level up).
-            var artefactPath = report.summary.outputPath;
+            var artefactPath = summary.outputPath;
             var dirCandidates = new[]
             {
                 Path.GetDirectoryName(artefactPath) ?? "",
@@ -192,10 +233,15 @@ namespace PlayScopeSdk.Editor
         }
 
         // ── iOS — walk the Xcode project and zip the dSYMs ourselves ────────
+        //
+        // Synchronous: called from main thread inside CollectPayloadOnMainThread,
+        // returns plain string path to a temp file. ZipFile.Open is blocking
+        // but the artefact is typically a few MB on a debug build; the time
+        // cost vs the simplicity of staying single-threaded is worth it.
 
-        private static async Task<string> PrepareIosDsymZipAsync(BuildReport report)
+        private static string PrepareIosDsymZip(BuildSummary summary)
         {
-            var artefactDir = report.summary.outputPath;
+            var artefactDir = summary.outputPath;
             if (!Directory.Exists(artefactDir)) return null;
 
             // dSYM bundles are *directories* with the .dSYM extension. They
@@ -215,7 +261,6 @@ namespace PlayScopeSdk.Editor
                     AddDirectoryToZip(archive, dsym, Path.GetFileName(dsym));
                 }
             }
-            await Task.CompletedTask;
             return zipPath;
         }
 
@@ -230,12 +275,20 @@ namespace PlayScopeSdk.Editor
         }
 
         // ── HTTP upload ────────────────────────────────────────────────────
+        //
+        // Pure HTTP — runs on the ThreadPool, must NOT touch any Unity API.
+        // The payload is everything we need, captured from the main thread
+        // before this method starts.
 
-        private static async Task UploadAsync(
-            string backendBase, string sdkKey,
-            string platform, string appVersion, string buildNumber,
-            string zipPath, bool verbose)
+        private static async Task UploadAsync(UploadPayload p)
         {
+            string backendBase = p.BackendBase;
+            string sdkKey      = p.SdkKey;
+            string platform    = p.Platform;
+            string appVersion  = p.AppVersion;
+            string buildNumber = p.BuildNumber;
+            string zipPath     = p.ZipPath;
+            bool   verbose     = p.Verbose;
             // No retry policy in v1 — Unity Editor builds are interactive
             // and devs notice failures immediately. CI will see a single
             // upload attempt in build logs. Retry can join later if real-
