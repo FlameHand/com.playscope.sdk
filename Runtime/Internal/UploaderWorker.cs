@@ -309,6 +309,20 @@ namespace PlayScopeSdk.Internal
                 try { sizeKB = new FileInfo(chunkPath).Length / 1024; } catch { /* best-effort */ }
                 TryDeleteFile(chunkPath);
                 TryDeleteFile(stateFilePath);
+                // If delete failed (Windows Editor file lock, AV scanner,
+                // etc.), drop a sibling .uploaded marker so SessionRecovery
+                // on the next restart knows this chunk is done and can
+                // (a) skip re-enqueueing it for another redundant upload
+                // and (b) retry the deletion which usually succeeds once
+                // the original Editor process has released the lock.
+                if (File.Exists(chunkPath))
+                {
+                    try { File.WriteAllText(chunkPath + ".uploaded", "1"); }
+                    catch (Exception ex)
+                    {
+                        PlayScopeLog.Warning($"Could not write .uploaded marker for {chunkName}: {ex.Message}");
+                    }
+                }
                 _passSucceeded++;
                 // Per-chunk Info — visible when MinLogLevel=Info. Gives an
                 // explicit "the upload pipeline actually works" signal
@@ -769,7 +783,17 @@ namespace PlayScopeSdk.Internal
         private static void TryDeleteFile(string path)
         {
             try { if (File.Exists(path)) File.Delete(path); }
-            catch { /* best-effort */ }
+            catch (Exception ex)
+            {
+                // Windows file-lock from the Editor process holding the
+                // file open is the most common cause — was previously
+                // swallowed silently and the chunks accumulated on disk
+                // forever, requeueing on every Editor restart. Now logged
+                // at Warning so we can spot the situation; the actual
+                // recovery path (skip already-uploaded files on next
+                // requeue) lives in SessionRecovery.EnqueueJsonlFilesInDir.
+                PlayScopeLog.Warning($"TryDeleteFile failed for '{Path.GetFileName(path)}': {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         private void TryReleaseSemaphore()

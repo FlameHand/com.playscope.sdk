@@ -349,6 +349,18 @@ namespace PlayScopeSdk.Internal
 
         /// <summary>
         /// Enqueues all .jsonl files in a single directory into the upload queue.
+        ///
+        /// <para>
+        /// Skips chunks that already have a sibling <c>.uploaded</c> marker
+        /// file, which means UploaderWorker successfully sent them but the
+        /// follow-up File.Delete on Windows failed (Editor file lock,
+        /// AV scanner, etc.). Re-enqueueing them would mean uploading the
+        /// same data again on every Editor restart — backend is idempotent
+        /// so it absorbs the duplicate, but local disk usage and the
+        /// "rescued_rescued_rescued" chain in the log keep growing. Skipping
+        /// here breaks the cycle and we also retry the deletion: most
+        /// transient locks clear between Editor sessions.
+        /// </para>
         /// </summary>
         private static void EnqueueJsonlFilesInDir(string dir, UploadQueue queue)
         {
@@ -356,8 +368,24 @@ namespace PlayScopeSdk.Internal
             try
             {
                 var files = Directory.GetFiles(dir, "*.jsonl");
+                int skipped = 0;
                 foreach (var file in files)
+                {
+                    var markerPath = file + ".uploaded";
+                    if (File.Exists(markerPath))
+                    {
+                        // Retry the deletion the original upload couldn't do.
+                        // If it still fails (file is genuinely locked right
+                        // now), leave both files and the marker — we'll try
+                        // again next launch.
+                        try { File.Delete(file); File.Delete(markerPath); skipped++; }
+                        catch { /* still locked — try next launch */ }
+                        continue;
+                    }
                     queue.Enqueue(file);
+                }
+                if (skipped > 0)
+                    PlayScopeLog.Info($"SessionRecovery: cleaned {skipped} already-uploaded chunks left over from a prior restart in '{Path.GetFileName(dir)}'.");
             }
             catch (Exception ex)
             {
