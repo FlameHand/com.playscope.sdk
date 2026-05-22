@@ -250,6 +250,12 @@ namespace PlayScopeSdk.Internal
                 // state="foreground" and classifies the death as a
                 // foreground crash rather than "unknown".
                 SessionFiles.WriteLifecycleState("foreground");
+                // Install platform-specific lifecycle hook (Android Java
+                // ActivityLifecycleCallbacks / iOS WillTerminate
+                // notification). Adds the precise "user_close" signal on
+                // top of the C# OnApplicationPause-driven state. No-op in
+                // Editor / Standalone / WebGL.
+                NativeLifecycleBridge.Install();
             }
             catch (Exception ex)
             {

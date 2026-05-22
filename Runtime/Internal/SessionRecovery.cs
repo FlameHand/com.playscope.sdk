@@ -183,21 +183,27 @@ namespace PlayScopeSdk.Internal
                     var timestamp = heartbeat ?? DateTime.UtcNow.ToString("o");
                     var safeSessionId = sessionId ?? "";
 
-                    var (lifecycleState, _) = Core.Session.SessionFiles.TryReadLifecycleState();
-                    var reason = lifecycleState switch
-                    {
-                        "foreground" => "foreground_crash",
-                        "background" => "background_kill",
-                        _ => "unknown",
-                    };
+                    var (lifecycleState, _, intent) = Core.Session.SessionFiles.TryReadLifecycleState();
+                    // intent=true means the native (Java / iOS) lifecycle
+                    // hook explicitly observed a user-initiated close —
+                    // wins over any state-based heuristic. This is the
+                    // unambiguous "user swiped from recents" signal.
+                    var reason = intent && lifecycleState == "user_close"
+                        ? "user_close"
+                        : lifecycleState switch
+                          {
+                              "foreground" => "foreground_crash",
+                              "background" => "background_kill",
+                              _ => "unknown",
+                          };
 
                     var syntheticLine =
                         $"{{\"record_type\":\"event\",\"event_type\":\"session_abnormal_end\"," +
                         $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"," +
-                        $"\"metadata\":{{\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\"}}}}\n";
+                        $"\"metadata\":{{\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")}}}}}\n";
 
                     File.AppendAllText(currentChunk, syntheticLine, new System.Text.UTF8Encoding(false));
-                    Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {reason} (last lifecycle state: {lifecycleState ?? "unknown"}).");
+                    Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {reason} (last lifecycle state: {lifecycleState ?? "unknown"}, intent: {intent}).");
                 }
                 catch (Exception ex)
                 {

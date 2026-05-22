@@ -114,30 +114,42 @@ namespace PlayScopeSdk.Core.Session
         }
 
         /// <summary>
-        /// Reads the last persisted lifecycle state on next launch. Returns
-        /// (state, ts) where state is "foreground" / "background" / null.
-        /// Null means the file didn't exist (clean exit) or was corrupt.
+        /// Reads the last persisted lifecycle state on next launch.
+        /// Returns (state, ts, intent) where:
+        ///   state  = "foreground" / "background" / "user_close" / null
+        ///   ts     = UTC timestamp of the last write
+        ///   intent = true ONLY when the native (Java/iOS) lifecycle hook
+        ///            wrote the file in response to a precise close signal
+        ///            (Android onActivityDestroyed with isFinishing=true,
+        ///            iOS UIApplicationWillTerminateNotification). The C#
+        ///            OnApplicationPause / Application.quitting paths
+        ///            always write intent=false (the field is omitted).
+        ///
+        /// Null state means the file didn't exist (clean exit) or was
+        /// corrupt — in both cases SessionRecovery treats the previous
+        /// session as unknown / pessimistically crashed.
         /// </summary>
-        internal static (string state, DateTime? ts) TryReadLifecycleState()
+        internal static (string state, DateTime? ts, bool intent) TryReadLifecycleState()
         {
             var path = PlayScopeDirectory.SessionLifecycle;
-            if (!File.Exists(path)) return (null, null);
+            if (!File.Exists(path)) return (null, null, false);
             try
             {
                 var text = File.ReadAllText(path);
                 var dto = Internal.SimpleJson.Deserialize(text);
-                if (dto == null) return (null, null);
+                if (dto == null) return (null, null, false);
                 string state = dto.TryGetValue("state", out var s) && s is string sStr ? sStr : null;
                 DateTime? ts = null;
                 if (dto.TryGetValue("ts", out var t) && t is string tStr &&
                     DateTime.TryParse(tStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var d))
                     ts = d;
-                return (state, ts);
+                bool intent = dto.TryGetValue("intent", out var i) && i is bool ib && ib;
+                return (state, ts, intent);
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[PlayScope] Failed to read session.lifecycle: {ex.Message}");
-                return (null, null);
+                return (null, null, false);
             }
         }
 
