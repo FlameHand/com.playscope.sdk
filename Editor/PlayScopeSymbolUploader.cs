@@ -48,6 +48,7 @@ namespace PlayScopeSdk.Editor
 
         public void OnPostprocessBuild(BuildReport report)
         {
+            return;
             try { ProcessAsync(report).GetAwaiter().GetResult(); }
             catch (Exception ex)
             {
