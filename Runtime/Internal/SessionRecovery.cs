@@ -216,7 +216,7 @@ namespace PlayScopeSdk.Internal
             }
 
             // Step 3c/3d (cont.): move ALL .jsonl files (including chunk_current) to destDir
-            MoveAllChunksToDir(chunksDir, currentChunk, destDir);
+            MoveAllChunksToDir(chunksDir, currentChunk, destDir, sessionId);
 
             // Step 3d.1: snapshot session.json into destDir as a manifest. UploaderWorker reads
             // this when building the envelope for recovered chunks so the original session_id,
@@ -238,14 +238,35 @@ namespace PlayScopeSdk.Internal
         /// Moves all .jsonl files in chunksDir (both named chunks and chunk_current.jsonl)
         /// to destDir. Files that already exist in destDir get a numeric suffix to avoid collisions.
         /// </summary>
-        private static void MoveAllChunksToDir(string chunksDir, string currentChunk, string destDir)
+        private static void MoveAllChunksToDir(string chunksDir, string currentChunk, string destDir, string sessionId)
         {
             if (!Directory.Exists(chunksDir)) return;
 
-            // Move chunk_current first (if it exists and has content)
+            // Move chunk_current first (if it exists and has content).
+            //
+            // Rename it so the resulting batch_id (filename without
+            // extension) is UNIQUE per recovered session. The default
+            // name "chunk_current" collides across every recovery: when
+            // two devices/launches each recover a prior session's data,
+            // both batches upload with batch_id = "chunk_current" and
+            // backend's (project_id, batch_id) idempotency drops the
+            // second one as already_processed. The synthetic
+            // session_abnormal_end inside the second chunk is then
+            // silently lost — observed in production with all recovered
+            // sessions stuck at EndStatus=unknown.
+            //
+            // New name: chunk_{shortId}_recovered.jsonl, where shortId
+            // is the first 5 hex chars of the recovered session_id
+            // (matching the existing chunk_{shortId}_NNNNNN naming).
+            // This keeps the file aligned with the same prefix scheme
+            // UploaderWorker uses for ownership checks.
             if (File.Exists(currentChunk))
             {
-                var destName = Path.Combine(destDir, "chunk_current.jsonl");
+                var shortId = ExtractShortId(sessionId);
+                var renamedName = !string.IsNullOrEmpty(shortId)
+                    ? $"chunk_{shortId}_recovered.jsonl"
+                    : "chunk_current_recovered.jsonl";
+                var destName = Path.Combine(destDir, renamedName);
                 TryMoveFile(currentChunk, destName);
             }
 
@@ -267,6 +288,19 @@ namespace PlayScopeSdk.Internal
             {
                 Debug.LogWarning($"[PlayScope] SessionRecovery: error listing chunk files: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// First 5 hex chars of a UUID string after dash strip, mirroring
+        /// the SessionInfo.SessionShortId convention. Used to derive
+        /// unique chunk filenames on recovery. Returns empty string if
+        /// the input is missing or too short.
+        /// </summary>
+        private static string ExtractShortId(string sessionId)
+        {
+            if (string.IsNullOrEmpty(sessionId)) return "";
+            var stripped = sessionId.Replace("-", "");
+            return stripped.Length >= 5 ? stripped.Substring(0, 5) : stripped;
         }
 
         /// <summary>
