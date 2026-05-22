@@ -401,8 +401,18 @@ namespace PlayScopeSdk.Internal
                 ["platform"] = GetPlatformString(),
                 ["device_model"] = UnityEngine.SystemInfo.deviceModel,
                 ["os_version"] = UnityEngine.SystemInfo.operatingSystem,
-                ["sdk_version"] = SdkVersion
+                ["sdk_version"] = SdkVersion,
+                // Verification flag for the native lifecycle hook (Java
+                // ActivityLifecycleCallbacks on Android / WillTerminate
+                // observer on iOS). Stamped here so the dashboard can
+                // tell at a glance whether the hook landed in the build
+                // without needing adb logcat / Console.app access. When
+                // false, lifecycle_hook_error carries the reason
+                // (class_not_found / dllimport_not_found / install_exception).
+                ["lifecycle_hook_installed"] = NativeLifecycleBridge.IsInstalled,
             };
+            if (!NativeLifecycleBridge.IsInstalled && !string.IsNullOrEmpty(NativeLifecycleBridge.LastError))
+                sessionMeta["lifecycle_hook_error"] = NativeLifecycleBridge.LastError;
             Pipeline!.EnqueueEvent("session_start",
                 metadataJson: EventPipeline.DictToJson(sessionMeta));
 

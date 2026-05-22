@@ -25,7 +25,10 @@ static id sObserver = nil;
 static std::string sLifecyclePath;
 
 static void WriteIntentFile() {
-    if (sLifecyclePath.empty()) return;
+    if (sLifecyclePath.empty()) {
+        NSLog(@"[PlayScope/Lifecycle] WriteIntentFile skipped: empty path (install may have failed)");
+        return;
+    }
     @autoreleasepool {
         NSString *path = [NSString stringWithUTF8String:sLifecyclePath.c_str()];
 
@@ -43,7 +46,8 @@ static void WriteIntentFile() {
         // to a temp file and renames. Any failure is swallowed; the C#
         // lifecycle file will still be available as the fallback signal.
         NSData *bytes = [json dataUsingEncoding:NSUTF8StringEncoding];
-        [bytes writeToFile:path atomically:YES];
+        BOOL ok = [bytes writeToFile:path atomically:YES];
+        NSLog(@"[PlayScope/Lifecycle] WriteIntentFile: wrote state=user_close to %@ (ok=%d)", path, ok);
     }
 }
 
@@ -54,9 +58,15 @@ extern "C" {
 /// uses on the C# side — keeping them in sync lets the recovery code read
 /// either source.
 void _playscope_install_ios_lifecycle(const char *lifecyclePath) {
-    if (lifecyclePath == nullptr) return;
+    if (lifecyclePath == nullptr) {
+        NSLog(@"[PlayScope/Lifecycle] install FAILED: lifecyclePath is null");
+        return;
+    }
     sLifecyclePath = lifecyclePath;
-    if (sObserver != nil) return; // idempotent — already installed
+    if (sObserver != nil) {
+        NSLog(@"[PlayScope/Lifecycle] install called again — path refreshed: %s", lifecyclePath);
+        return; // idempotent — already installed
+    }
 
     @autoreleasepool {
         NSOperationQueue *queue = [NSOperationQueue mainQueue];
@@ -65,8 +75,10 @@ void _playscope_install_ios_lifecycle(const char *lifecyclePath) {
                         object:nil
                          queue:queue
                     usingBlock:^(NSNotification * _Nonnull note) {
+            NSLog(@"[PlayScope/Lifecycle] UIApplicationWillTerminateNotification fired");
             WriteIntentFile();
         }];
+        NSLog(@"[PlayScope/Lifecycle] install OK: WillTerminate observer registered. Path: %s", lifecyclePath);
     }
 }
 

@@ -33,8 +33,26 @@ namespace PlayScopeSdk.Internal
         private static extern void _playscope_install_ios_lifecycle(string lifecyclePath);
 #endif
 
+        /// <summary>
+        /// True iff Install() successfully wired the platform-specific
+        /// lifecycle hook (Java ActivityLifecycleCallbacks on Android,
+        /// WillTerminate observer on iOS). Stamped into every session_start
+        /// metadata so the dashboard can verify the hook landed in the
+        /// build without needing adb logcat.
+        /// </summary>
+        internal static bool IsInstalled { get; private set; }
+
+        /// <summary>
+        /// Last error string from the most recent failed Install() attempt.
+        /// Null on success. Surfaced in session_start metadata so the
+        /// dashboard shows it next to <c>lifecycle_hook_installed=false</c>.
+        /// </summary>
+        internal static string LastError { get; private set; }
+
         internal static void Install()
         {
+            IsInstalled = false;
+            LastError = null;
             try
             {
                 var path = PlayScopeDirectory.SessionLifecycle;
@@ -42,16 +60,20 @@ namespace PlayScopeSdk.Internal
 #if UNITY_ANDROID && !UNITY_EDITOR
                 InstallAndroid(path);
 #elif UNITY_IOS && !UNITY_EDITOR
-                _playscope_install_ios_lifecycle(path);
-                PlayScopeLog.Info("NativeLifecycleBridge: iOS WillTerminate observer installed.");
+                InstallIOS(path);
 #else
-                // Editor / Standalone / WebGL — no platform-specific hook needed.
-                // C# OnApplicationPause / Application.quitting still drive the
-                // managed-level lifecycle file write.
+                // Editor / Standalone / WebGL — no platform-specific hook
+                // needed. C# OnApplicationPause / Application.quitting still
+                // drive the managed-level lifecycle file write. Flag stays
+                // false so the dashboard shows it correctly as not installed.
+                LastError = "no_native_hook_on_this_platform";
+                PlayScopeLog.Info("NativeLifecycleBridge: no native hook on this platform (Editor/Standalone/WebGL).");
 #endif
             }
             catch (Exception ex)
             {
+                IsInstalled = false;
+                LastError = "install_exception:" + ex.GetType().Name + ":" + ex.Message;
                 PlayScopeLog.Warning("NativeLifecycleBridge.Install failed", ex);
             }
         }
@@ -62,16 +84,71 @@ namespace PlayScopeSdk.Internal
             // Resolve current Activity from UnityPlayer. Wrapped so that if
             // the host app uses a custom UnityPlayerActivity subclass we
             // still pick up the running instance.
-            using var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
-            using var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
-            if (activity == null)
+            AndroidJavaClass unityPlayer = null;
+            AndroidJavaObject activity = null;
+            AndroidJavaClass lifecycle = null;
+            try
             {
-                PlayScopeLog.Warning("NativeLifecycleBridge: UnityPlayer.currentActivity is null — Android lifecycle hook NOT installed.");
-                return;
+                unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                if (activity == null)
+                {
+                    LastError = "android_current_activity_null";
+                    PlayScopeLog.Warning("NativeLifecycleBridge: UnityPlayer.currentActivity is null — Android lifecycle hook NOT installed.");
+                    return;
+                }
+                // Try to resolve our Java class explicitly so we get a
+                // useful error if the .java file wasn't packed into the
+                // APK by Unity's Gradle plugin (e.g. PluginImporter
+                // platform checkbox left off).
+                try
+                {
+                    lifecycle = new AndroidJavaClass("com.playscope.sdk.PlayScopeLifecycle");
+                }
+                catch (Exception classEx)
+                {
+                    LastError = "android_class_not_found:com.playscope.sdk.PlayScopeLifecycle";
+                    PlayScopeLog.Warning(
+                        "NativeLifecycleBridge: com.playscope.sdk.PlayScopeLifecycle NOT found in APK. " +
+                        "Open the .java file in the SDK Plugins/Android folder, check that PluginImporter " +
+                        "has Android platform enabled, and rebuild. Underlying error: " + classEx.Message,
+                        classEx);
+                    return;
+                }
+                lifecycle.CallStatic("install", activity, lifecyclePath);
+                IsInstalled = true;
+                PlayScopeLog.Info("NativeLifecycleBridge: Android ActivityLifecycleCallbacks installed. Java logs will tag 'PlayScope/Lifecycle' — `adb logcat -s PlayScope/Lifecycle:* PlayScope:*`.");
             }
-            using var lifecycle = new AndroidJavaClass("com.playscope.sdk.PlayScopeLifecycle");
-            lifecycle.CallStatic("install", activity, lifecyclePath);
-            PlayScopeLog.Info("NativeLifecycleBridge: Android ActivityLifecycleCallbacks installed.");
+            finally
+            {
+                lifecycle?.Dispose();
+                activity?.Dispose();
+                unityPlayer?.Dispose();
+            }
+        }
+#endif
+
+#if UNITY_IOS && !UNITY_EDITOR
+        private static void InstallIOS(string lifecyclePath)
+        {
+            // DllImport resolution at first call site — if the .mm wasn't
+            // packed into the Xcode project we'll get an EntryPointNotFoundException
+            // and surface it as a useful error rather than a silent miss.
+            try
+            {
+                _playscope_install_ios_lifecycle(lifecyclePath);
+                IsInstalled = true;
+                PlayScopeLog.Info("NativeLifecycleBridge: iOS WillTerminate observer installed. NSLogs will tag '[PlayScope/Lifecycle]'.");
+            }
+            catch (EntryPointNotFoundException epnf)
+            {
+                LastError = "ios_dllimport_not_found:_playscope_install_ios_lifecycle";
+                PlayScopeLog.Warning(
+                    "NativeLifecycleBridge: _playscope_install_ios_lifecycle symbol NOT found in the iOS binary. " +
+                    "Open the .mm file in the SDK Plugins/iOS folder, check that PluginImporter has iOS platform " +
+                    "enabled, and rebuild the Xcode project. Underlying error: " + epnf.Message,
+                    epnf);
+            }
         }
 #endif
     }

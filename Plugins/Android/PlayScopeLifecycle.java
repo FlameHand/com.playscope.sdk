@@ -3,6 +3,7 @@ package com.playscope.sdk;
 import android.app.Activity;
 import android.app.Application;
 import android.os.Bundle;
+import android.util.Log;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -33,6 +34,8 @@ import java.util.TimeZone;
  */
 public final class PlayScopeLifecycle implements Application.ActivityLifecycleCallbacks {
 
+    private static final String TAG = "PlayScope/Lifecycle";
+
     // Singleton — install() is idempotent.
     private static volatile PlayScopeLifecycle sInstance;
 
@@ -50,20 +53,30 @@ public final class PlayScopeLifecycle implements Application.ActivityLifecycleCa
         if (sInstance != null) {
             // Already installed. Just refresh the path in case Initialize ran twice.
             sInstance.mLifecyclePath = lifecyclePath;
+            Log.i(TAG, "install() called again — path refreshed: " + lifecyclePath);
             return;
         }
-        if (activity == null) return;
+        if (activity == null) {
+            Log.w(TAG, "install() FAILED: activity is null");
+            return;
+        }
         Application app = activity.getApplication();
-        if (app == null) return;
+        if (app == null) {
+            Log.w(TAG, "install() FAILED: activity.getApplication() is null");
+            return;
+        }
 
         PlayScopeLifecycle hook = new PlayScopeLifecycle();
         hook.mLifecyclePath = lifecyclePath;
         try {
             app.registerActivityLifecycleCallbacks(hook);
             sInstance = hook;
+            Log.i(TAG, "install() OK: ActivityLifecycleCallbacks registered. " +
+                       "Lifecycle file path: " + lifecyclePath);
         } catch (Throwable t) {
             // Some host apps wrap getApplication() in ways that throw —
             // never let that bring down the SDK init.
+            Log.e(TAG, "install() FAILED: registerActivityLifecycleCallbacks threw", t);
         }
     }
 
@@ -89,22 +102,30 @@ public final class PlayScopeLifecycle implements Application.ActivityLifecycleCa
     public void onActivityDestroyed(Activity activity) {
         if (activity == null) return;
         try {
+            boolean finishing = activity.isFinishing();
+            boolean changingConfig = activity.isChangingConfigurations();
+            Log.i(TAG, "onActivityDestroyed: " + activity.getClass().getSimpleName() +
+                       " isFinishing=" + finishing + " isChangingConfigurations=" + changingConfig);
             // isFinishing() = the activity was told to finish (user pressed
             // back from the root, called finish(), OR Android routed the
             // recents-tray swipe through onDestroy).
             // isChangingConfigurations() = orientation change / locale
             // change / etc — we DON'T want to count that as user-close.
-            if (activity.isFinishing() && !activity.isChangingConfigurations()) {
+            if (finishing && !changingConfig) {
                 writeIntent("user_close");
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
             // Never throw from a lifecycle callback.
+            Log.e(TAG, "onActivityDestroyed threw", t);
         }
     }
 
     private void writeIntent(String state) {
         final String path = mLifecyclePath;
-        if (path == null) return;
+        if (path == null) {
+            Log.w(TAG, "writeIntent: mLifecyclePath is null — install() may have failed");
+            return;
+        }
 
         SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
         fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
@@ -124,11 +145,14 @@ public final class PlayScopeLifecycle implements Application.ActivityLifecycleCa
             // — File.renameTo is best-effort but it's all we have without
             // requiring a particular Android API level.
             if (f.exists()) f.delete();
-            tmp.renameTo(f);
-        } catch (Throwable ignored) {
+            boolean renamed = tmp.renameTo(f);
+            Log.i(TAG, "writeIntent: wrote state=" + state + " to " + path +
+                       " (rename=" + renamed + ")");
+        } catch (Throwable t) {
             // Best-effort. SessionRecovery on the next launch will fall
             // back to the C#-written lifecycle state.
-            try { if (tmp.exists()) tmp.delete(); } catch (Throwable ignored2) { }
+            Log.e(TAG, "writeIntent: failed to write " + path, t);
+            try { if (tmp.exists()) tmp.delete(); } catch (Throwable ignored) { }
         }
     }
 }
