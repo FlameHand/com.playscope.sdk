@@ -113,13 +113,49 @@ namespace PlayScopeSdk.Internal
             // Also scan the UploadQueueDir for state files that are due for retry
             GatherRetryablePaths(paths);
 
+            if (paths.Count == 0) return; // silent — most ticks have nothing to do
+
+            // Per-pass counters so we end with one summary line instead of N
+            // anonymous Info lines. Each individual chunk also logs its own
+            // outcome at Info level for fine-grained diagnosis.
+            int succeeded = 0, retryScheduled = 0, deadLettered = 0, rescued = 0, alreadyUploaded = 0;
+            _passSucceeded = 0; _passRetried = 0; _passDeadLettered = 0; _passRescued = 0; _passAlreadyUploaded = 0;
+
+            PlayScopeLog.Info($"UploaderWorker: pass starting with {paths.Count} chunk(s) to process.");
+
             foreach (var chunkPath in paths)
             {
                 if (ct.IsCancellationRequested) break;
                 if (!File.Exists(chunkPath)) continue;
                 await UploadChunkAsync(chunkPath, ct);
             }
+
+            succeeded       = _passSucceeded;
+            retryScheduled  = _passRetried;
+            deadLettered    = _passDeadLettered;
+            rescued         = _passRescued;
+            alreadyUploaded = _passAlreadyUploaded;
+
+            // Always emit a summary line. Use Warning when ANY chunk hit
+            // dead-letter (operator should notice — that's permanent data
+            // loss for that chunk), Info otherwise.
+            var summary = $"UploaderWorker: pass done. " +
+                          $"ok={succeeded} retry={retryScheduled} dead={deadLettered} " +
+                          $"rescued={rescued} already_uploaded={alreadyUploaded} " +
+                          $"total={paths.Count}";
+            if (deadLettered > 0) PlayScopeLog.Warning(summary);
+            else                  PlayScopeLog.Info(summary);
         }
+
+        // Per-pass outcome tallies. Set to 0 at the start of each
+        // ProcessQueueAsync, incremented from UploadChunkAsync, read back
+        // in the summary line. Not thread-safe — every uploader pass is
+        // strictly sequential.
+        private int _passSucceeded;
+        private int _passRetried;
+        private int _passDeadLettered;
+        private int _passRescued;
+        private int _passAlreadyUploaded;
 
         /// <summary>
         /// Scan UploadQueueDir for .jsonl files that have a state file with a past next_retry_at,
@@ -220,6 +256,7 @@ namespace PlayScopeSdk.Internal
                 // dead-letter the data.
                 if (TryRescueOrphanChunk(chunkPath, stateFilePath, out var rescueDest))
                 {
+                    _passRescued++;
                     PlayScopeLog.Info(
                         $"Rescued orphan chunk '{chunkName}' to {rescueDest}. " +
                         "It will upload under its original session_id on the next pass.");
@@ -268,8 +305,15 @@ namespace PlayScopeSdk.Internal
                 // Success
                 state.IsUploaded = true;
                 SaveState(stateFilePath, state);
+                var sizeKB = (long)0;
+                try { sizeKB = new FileInfo(chunkPath).Length / 1024; } catch { /* best-effort */ }
                 TryDeleteFile(chunkPath);
                 TryDeleteFile(stateFilePath);
+                _passSucceeded++;
+                // Per-chunk Info — visible when MinLogLevel=Info. Gives an
+                // explicit "the upload pipeline actually works" signal
+                // during integration / debugging. Suppressed at Warning+.
+                PlayScopeLog.Info($"Uploaded {chunkName} ({sizeKB} KB) → HTTP {httpStatus}");
                 return;
             }
 
@@ -283,6 +327,7 @@ namespace PlayScopeSdk.Internal
                     : " body=" + (responseBody.Length > 512 ? responseBody.Substring(0, 512) + "…" : responseBody);
                 PlayScopeLog.Warning($"Non-retryable HTTP {httpStatus} for {chunkName} — moving to dead letter.{bodySnippet}");
                 MoveToDeadLetter(chunkPath, stateFilePath);
+                _passDeadLettered++;
                 return;
             }
 
@@ -296,8 +341,10 @@ namespace PlayScopeSdk.Internal
             SaveState(stateFilePath, state);
 
             if (!networkError)
+                _passRetried++;
                 PlayScopeLog.Warning($"HTTP {httpStatus} for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
             else
+                _passRetried++;
                 PlayScopeLog.Warning($"Network error for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
         }
 
@@ -704,6 +751,7 @@ namespace PlayScopeSdk.Internal
                     {
                         TryDeleteFile(file);
                         TryDeleteFile(stateFilePath);
+                        _passAlreadyUploaded++;
                         continue;
                     }
 
