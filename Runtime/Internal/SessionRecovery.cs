@@ -170,21 +170,43 @@ namespace PlayScopeSdk.Internal
             if (!sessionEndFound && appendSyntheticAbnormalEnd)
             {
                 // Step 3d: abnormal end — append synthetic event to chunk_current.jsonl
+                //
+                // Classify *why* the previous session died by reading the
+                // persisted lifecycle state file. The categories drive the
+                // backend's corrected CFS% formula:
+                //   foreground_crash → counts as crashed (real crash / ANR / native kill in foreground)
+                //   background_kill  → does NOT count as crashed (user swipe-kill, OS low-memory in background — not the app's fault)
+                //   unknown          → counts as crashed (legacy / lifecycle file missing — pessimistic so we don't hide real crashes)
                 try
                 {
                     var heartbeat = ReadLastHeartbeat(PlayScopeDirectory.SessionHb);
                     var timestamp = heartbeat ?? DateTime.UtcNow.ToString("o");
                     var safeSessionId = sessionId ?? "";
+
+                    var (lifecycleState, _) = Core.Session.SessionFiles.TryReadLifecycleState();
+                    var reason = lifecycleState switch
+                    {
+                        "foreground" => "foreground_crash",
+                        "background" => "background_kill",
+                        _ => "unknown",
+                    };
+
                     var syntheticLine =
                         $"{{\"record_type\":\"event\",\"event_type\":\"session_abnormal_end\"," +
-                        $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"}}\n";
+                        $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"," +
+                        $"\"metadata\":{{\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\"}}}}\n";
 
                     File.AppendAllText(currentChunk, syntheticLine, new System.Text.UTF8Encoding(false));
+                    Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {reason} (last lifecycle state: {lifecycleState ?? "unknown"}).");
                 }
                 catch (Exception ex)
                 {
                     Debug.LogWarning($"[PlayScope] SessionRecovery: failed to append synthetic event: {ex.Message}");
                 }
+
+                // Tidy up the stale lifecycle file regardless of outcome —
+                // the new session about to start will write its own.
+                try { Core.Session.SessionFiles.DeleteLifecycleState(); } catch { /* best-effort */ }
             }
 
             // Step 3c/3d (cont.): move ALL .jsonl files (including chunk_current) to destDir

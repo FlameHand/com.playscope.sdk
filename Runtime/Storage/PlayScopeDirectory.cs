@@ -24,6 +24,15 @@ namespace PlayScopeSdk.Storage
         internal static string SessionHb =>
             System.IO.Path.Combine(CurrentSession, "session.hb");
 
+        // Lifecycle state mirror — last known foreground/background state and
+        // the timestamp it was entered. Persisted on every transition so that
+        // SessionRecovery (next launch after an unclean shutdown) can infer
+        // *why* the previous session died: was the app in the foreground
+        // (likely crash / ANR) or in the background (likely user swipe-kill
+        // or OS low-memory kill)?
+        internal static string SessionLifecycle =>
+            System.IO.Path.Combine(CurrentSession, "session.lifecycle");
+
         internal static string Chunks =>
             System.IO.Path.Combine(CurrentSession, "chunks");
 

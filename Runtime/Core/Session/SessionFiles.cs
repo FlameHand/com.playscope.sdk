@@ -78,6 +78,69 @@ namespace PlayScopeSdk.Core.Session
             return null;
         }
 
+        // session.lifecycle — last known lifecycle state ("foreground" or
+        // "background") plus the UTC timestamp it was entered. Rewritten on
+        // every transition (atomic via temp+rename to survive a crash mid-
+        // write) so SessionRecovery on next launch can tell us where the
+        // app was when it died.
+        //
+        // The same file gets deleted on a clean Shutdown so its presence on
+        // next launch is itself a signal of an unclean exit. (Heartbeat file
+        // alone isn't enough — it's updated periodically by background
+        // workers even on a backgrounded session and doesn't carry the
+        // state itself.)
+        internal static void WriteLifecycleState(string state)
+        {
+            var path = PlayScopeDirectory.SessionLifecycle;
+            var tmp = path + ".tmp";
+            try
+            {
+                var json = $"{{\"state\":\"{state}\",\"ts\":\"{DateTime.UtcNow:O}\"}}";
+                File.WriteAllText(tmp, json);
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] Failed to write session.lifecycle: {ex.Message}");
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* best-effort */ }
+            }
+        }
+
+        internal static void DeleteLifecycleState()
+        {
+            var path = PlayScopeDirectory.SessionLifecycle;
+            try { if (File.Exists(path)) File.Delete(path); } catch { /* best-effort */ }
+        }
+
+        /// <summary>
+        /// Reads the last persisted lifecycle state on next launch. Returns
+        /// (state, ts) where state is "foreground" / "background" / null.
+        /// Null means the file didn't exist (clean exit) or was corrupt.
+        /// </summary>
+        internal static (string state, DateTime? ts) TryReadLifecycleState()
+        {
+            var path = PlayScopeDirectory.SessionLifecycle;
+            if (!File.Exists(path)) return (null, null);
+            try
+            {
+                var text = File.ReadAllText(path);
+                var dto = Internal.SimpleJson.Deserialize(text);
+                if (dto == null) return (null, null);
+                string state = dto.TryGetValue("state", out var s) && s is string sStr ? sStr : null;
+                DateTime? ts = null;
+                if (dto.TryGetValue("ts", out var t) && t is string tStr &&
+                    DateTime.TryParse(tStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var d))
+                    ts = d;
+                return (state, ts);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] Failed to read session.lifecycle: {ex.Message}");
+                return (null, null);
+            }
+        }
+
         // Reads last heartbeat timestamp (for recovery — approximate end time)
         internal static DateTime? TryReadLastHeartbeat()
         {

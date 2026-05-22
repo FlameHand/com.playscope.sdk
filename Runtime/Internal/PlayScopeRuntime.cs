@@ -244,6 +244,12 @@ namespace PlayScopeSdk.Internal
             {
                 CurrentSession = SessionInfo.Generate(SdkVersion);
                 SessionFiles.WriteNewSession(CurrentSession, Device.SdkUserId);
+                // Seed lifecycle state to "foreground" so that if the very
+                // first frame crashes before any OnApplicationPause / Focus
+                // callback fires, recovery on the next launch sees
+                // state="foreground" and classifies the death as a
+                // foreground crash rather than "unknown".
+                SessionFiles.WriteLifecycleState("foreground");
             }
             catch (Exception ex)
             {
@@ -468,7 +474,7 @@ namespace PlayScopeSdk.Internal
         internal static void Shutdown()
         {
             if (!_initialized || _disabled) return;
-            TeardownInternal(emitSessionEnd: true, endStatus: "normal");
+            TeardownInternal(emitSessionEnd: true, endStatus: "normal", reason: "normal");
         }
 
         /// <summary>
@@ -478,10 +484,20 @@ namespace PlayScopeSdk.Internal
         /// half-initialised SDK where some subsystems were constructed and
         /// others weren't.
         /// </summary>
-        /// <param name="endStatus">Value for the <c>end_status</c> metadata
-        /// field on the session_end event. Normal user-quit → "normal";
-        /// background-timeout rotation → "background_timeout".</param>
-        private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal")
+        /// <param name="endStatus">Legacy <c>end_status</c> value
+        /// ("normal" | "abnormal" | "background_timeout"). Kept for back-compat
+        /// with the dashboard's existing badge logic.</param>
+        /// <param name="reason">Fine-grained <c>reason</c> on the session_end
+        /// event metadata. One of: <c>normal</c> (clean Application.quitting),
+        /// <c>background_timeout</c> (our 5-min rotation),
+        /// <c>background_kill</c> (recovered: was backgrounded — likely
+        /// swipe-kill or low-memory kill — NOT a real crash),
+        /// <c>foreground_crash</c> (recovered: was foregrounded with no
+        /// clean exit — likely a crash or ANR),
+        /// <c>unknown</c> (recovered, lifecycle file missing — pessimistic
+        /// fallback). Backend uses this for the corrected CFS% formula that
+        /// excludes swipe-kills from the crash count.</param>
+        private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal", string reason = "normal")
         {
             // Unsubscribe Unity log capture (idempotent guard)
             if (_logCaptureSubscribed)
@@ -544,12 +560,12 @@ namespace PlayScopeSdk.Internal
                         EventId = UlidGenerator.NewEventId(),
                         SequenceNum = SequenceCounter.Next(),
                         Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                        MetadataJson = $"{{\"end_status\":\"{endStatus}\"}}",
+                        MetadataJson = $"{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\"}}",
                         IsCritical = true,
                     };
                     var ok = _writer.WriteCriticalAndFinalizeSync(rec);
                     PlayScopeLog.Info(
-                        $"Shutdown: session_end sync-write (end_status={endStatus}, success={ok}).");
+                        $"Shutdown: session_end sync-write (end_status={endStatus}, reason={reason}, success={ok}).");
                 }
                 else
                 {
@@ -611,6 +627,9 @@ namespace PlayScopeSdk.Internal
             SceneLoadProgressTracker.ClearAll();
 
             try { SessionFiles.DeleteSessionLock(); } catch { /* best-effort */ }
+            // Lifecycle file deleted on a clean teardown — its presence on
+            // next launch is the signal that we died uncleanly.
+            try { SessionFiles.DeleteLifecycleState(); } catch { /* best-effort */ }
             _initialized = false;
             PlayScopeLog.Info("Shutdown complete.");
         }
@@ -709,6 +728,13 @@ namespace PlayScopeSdk.Internal
             Pipeline?.EnqueueEvent("lifecycle", metadataJson: EventPipeline.DictToJson(meta));
             _currentLifecycleState = nextState;
             _currentLifecycleStateEnteredAtTicks = nowTicks;
+            // Mirror the new state to disk so SessionRecovery on the next
+            // launch can classify an unclean death by where we were last:
+            // foreground → likely crash/ANR, background → likely swipe-kill
+            // or OS low-memory kill. Best-effort I/O — never throw out of
+            // the lifecycle hot path.
+            try { SessionFiles.WriteLifecycleState(nextState); }
+            catch (Exception ex) { PlayScopeLog.Warning("RecordLifecycle: lifecycle persist failed", ex); }
 
             // ANR watchdog state follows the OS: suspended while the app
             // is backgrounded (Update() doesn't run, so a long stretch
@@ -756,10 +782,10 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Warning(
                     "PerformRotation called but no stored context — cannot re-initialize. " +
                     "Falling back to clean shutdown.");
-                TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout");
+                TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
                 return;
             }
-            TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout");
+            TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
             Initialize(ctx);
         }
 
