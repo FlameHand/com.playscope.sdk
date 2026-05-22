@@ -48,6 +48,19 @@ namespace PlayScopeSdk.Internal
 
         private readonly EventQueue _queue;
         private readonly Dictionary<string, Entry> _entries = new();
+
+        // Rate-limit for the "evicted oldest entry" warning. Without this,
+        // a steady-state full buffer (consumer's code spamming many UNIQUE
+        // warnings per second — e.g. LocalizationManager logging one warn
+        // per missing translation × hundreds of UI elements per scene)
+        // would log the eviction notice on EVERY add. The notice itself is
+        // useful — it tells the integrator "your call site is too chatty" —
+        // but its value is just as high if it shows once every 10 seconds
+        // as it is if it shows hundreds of times per second.
+        private long _lastEvictionWarnTicks;
+        private long _droppedEvictionWarnings;
+        private const long EvictionWarnIntervalMs = 10_000; // log at most once per 10s
+
         private readonly object _gate = new();
 
         internal LogDedupBuffer(EventQueue queue) { _queue = queue; }
@@ -160,9 +173,30 @@ namespace PlayScopeSdk.Internal
             // is small and EmitWithCount only touches the queue (which
             // has its own lock). Safe to call inside.
             EmitWithCount(victim);
-            PlayScopeLog.Warning(
-                $"LogDedupBuffer: evicted oldest entry to make room (cap {MaxEntries}). " +
-                "Some other log family is spamming — consider rate-limiting at the call site.");
+
+            // Rate-limited Editor-console warning. Without the throttle the
+            // warning itself becomes the spam — was visibly the case in user
+            // testing where a missing-translation loop printed thousands of
+            // these per second. Show the SUPPRESSED count when we finally
+            // re-emit so the integrator sees both the signal and its scale.
+            var nowTicks = DateTime.UtcNow.Ticks;
+            var elapsedMs = (nowTicks - _lastEvictionWarnTicks) / TimeSpan.TicksPerMillisecond;
+            if (_lastEvictionWarnTicks == 0 || elapsedMs >= EvictionWarnIntervalMs)
+            {
+                var suppressed = _droppedEvictionWarnings;
+                _droppedEvictionWarnings = 0;
+                _lastEvictionWarnTicks = nowTicks;
+                var suffix = suppressed > 0
+                    ? $" ({suppressed} similar warnings suppressed in the last {EvictionWarnIntervalMs / 1000}s)"
+                    : "";
+                PlayScopeLog.Warning(
+                    $"LogDedupBuffer: evicted oldest entry to make room (cap {MaxEntries}). " +
+                    "Some other log family is spamming — consider rate-limiting at the call site." + suffix);
+            }
+            else
+            {
+                _droppedEvictionWarnings++;
+            }
         }
 
         // Emits the buffered sample, splicing repeat_count into its metadata
