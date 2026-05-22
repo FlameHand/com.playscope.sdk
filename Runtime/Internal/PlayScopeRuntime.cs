@@ -349,18 +349,43 @@ namespace PlayScopeSdk.Internal
             // so the ordering here is intentional.
             _initialized = true;
 
-            // Enqueue session_start event
-            var env = "production";
+            // Enqueue session_start event.
+            //
+            // is_editor / is_development_build are *intrinsic* to where the
+            // SDK is running and we set them ourselves — no user override.
+            // The dashboard slices on these to keep developer play-mode noise
+            // out of production CFS% / crash-free calculations. Without an
+            // explicit flag, an Editor crash spike during dev would silently
+            // drag the customer's reported crash-free user number down.
+            //
+            // environment is a *labelled* string the user can override via
+            // PlayScopeContext.Metadata for staging / canary / etc.; if not
+            // overridden we derive it from Debug.isDebugBuild so default
+            // behaviour matches what people actually mean (developers
+            // shouldn't have to remember to set environment="development"
+            // every time they hit Build).
+            bool isEditor           = UnityEngine.Application.isEditor;
+            bool isDevelopmentBuild = UnityEngine.Debug.isDebugBuild;
+
+            string env;
             if (context.Metadata != null &&
                 context.Metadata.TryGetValue("environment", out var envVal) &&
                 envVal is string envStr && !string.IsNullOrEmpty(envStr))
+            {
                 env = envStr;
+            }
+            else
+            {
+                env = isEditor ? "editor" : (isDevelopmentBuild ? "development" : "production");
+            }
 
             var sessionMeta = new System.Collections.Generic.Dictionary<string, object>
             {
                 ["app_version"] = UnityEngine.Application.version,
                 ["build_number"] = UnityEngine.Application.buildGUID,
                 ["environment"] = env,
+                ["is_editor"] = isEditor,
+                ["is_development_build"] = isDevelopmentBuild,
                 ["platform"] = GetPlatformString(),
                 ["device_model"] = UnityEngine.SystemInfo.deviceModel,
                 ["os_version"] = UnityEngine.SystemInfo.operatingSystem,
