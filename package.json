@@ -1,6 +1,6 @@
 {
   "name": "com.playscope.sdk",
-  "version": "0.1.63",
+  "version": "0.1.64",
   "displayName": "PlayScope SDK",
   "description": "Event pipeline, local storage, and upload for PlayScope session recording.",
   "unity": "2021.3",
