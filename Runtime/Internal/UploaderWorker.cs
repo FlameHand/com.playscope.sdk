@@ -354,11 +354,10 @@ namespace PlayScopeSdk.Internal
             state.NextRetryAt = nextRetry;
             SaveState(stateFilePath, state);
 
+            _passRetried++;
             if (!networkError)
-                _passRetried++;
                 PlayScopeLog.Warning($"HTTP {httpStatus} for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
             else
-                _passRetried++;
                 PlayScopeLog.Warning($"Network error for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
         }
 
