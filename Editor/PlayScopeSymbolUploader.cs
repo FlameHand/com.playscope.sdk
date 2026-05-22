@@ -48,8 +48,19 @@ namespace PlayScopeSdk.Editor
 
         public void OnPostprocessBuild(BuildReport report)
         {
-            return;
-            try { ProcessAsync(report).GetAwaiter().GetResult(); }
+            try
+            {
+                // Wrap in Task.Run so the async chain runs on a ThreadPool
+                // thread instead of inheriting the Unity Editor main-thread
+                // SynchronizationContext. Without this, any inner `await`
+                // tries to post its continuation back onto the main thread —
+                // but the main thread is blocked here on GetResult(), so
+                // continuation never runs and the build hangs forever after
+                // "Moving output package(s)". The first user to hit this
+                // wasted ~13 minutes on a CLOSE_WAIT socket before noticing.
+                // See https://blog.stephencleary.com/2012/07/dont-block-on-async-code.html
+                Task.Run(() => ProcessAsync(report)).GetAwaiter().GetResult();
+            }
             catch (Exception ex)
             {
                 // NEVER fail the build over a symbol upload failure — the
@@ -125,7 +136,7 @@ namespace PlayScopeSdk.Editor
             // Locate the symbol payload.
             string zipPath = target == BuildTarget.Android
                 ? FindAndroidSymbolsZip(report)
-                : await PrepareIosDsymZipAsync(report);
+                : await PrepareIosDsymZipAsync(report).ConfigureAwait(false);
 
             if (zipPath == null)
             {
@@ -151,7 +162,7 @@ namespace PlayScopeSdk.Editor
             await UploadAsync(
                 backendUrl.TrimEnd('/'), sdkKey,
                 platform, appVersion, buildNumber, zipPath,
-                settings.VerboseEditor);
+                settings.VerboseEditor).ConfigureAwait(false);
         }
 
         // ── Android — Unity already zips for us ─────────────────────────────
@@ -249,8 +260,8 @@ namespace PlayScopeSdk.Editor
                 var url = $"{backendBase}/v1/symbols/upload";
                 if (verbose) Debug.Log($"[PlayScope] POST {url}");
 
-                var resp = await client.PostAsync(url, content);
-                var body = await resp.Content.ReadAsStringAsync();
+                var resp = await client.PostAsync(url, content).ConfigureAwait(false);
+                var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
 
                 if (resp.IsSuccessStatusCode)
                 {
