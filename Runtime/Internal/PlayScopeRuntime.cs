@@ -173,6 +173,14 @@ namespace PlayScopeSdk.Internal
             // filter side too, so a partial Initialize that crashes before
             // reaching here still gets safe-by-default behaviour.
             SensitiveKeyFilter.SetPiiValueMasksEnabled(context?.PiiValueMasksEnabled ?? true);
+            // Wire SDK-internal log gating to the same MinLogLevel the
+            // consumer set on PlayScopeSettings (mapped via context as
+            // AutoCaptureMinLevel). With this in place, MinLogLevel=Warning
+            // suppresses our chatty Info lines (orphan-chunk rescue,
+            // session_end sync-write notice, lifecycle hook install OK)
+            // from the Editor Console — they're useful when debugging the
+            // SDK but pure noise during normal integration work.
+            PlayScopeLog.SetMinLevel(context?.AutoCaptureMinLevel ?? LogLevel.Info);
             _initialStateSet = 0;
             _currentLifecycleState = "foreground";
             _currentLifecycleStateEnteredAtTicks = DateTime.UtcNow.Ticks;
