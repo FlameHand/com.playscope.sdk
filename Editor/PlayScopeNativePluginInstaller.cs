@@ -49,7 +49,18 @@ namespace PlayScopeSdk.Editor
     [InitializeOnLoad]
     internal static class PlayScopeNativePluginInstaller
     {
-        private const string DestRoot = "Assets/Plugins/PlayScope";
+        // CANONICAL Unity native plugin locations. Anything under
+        // Assets/Plugins/Android/ ends up in the Android Gradle Library
+        // module; anything under Assets/Plugins/iOS/ ends up linked into
+        // the generated Xcode project. Sub-folders under these (e.g.
+        // Assets/Plugins/Android/PlayScope/) are scanned recursively by
+        // Unity's build pipeline, BUT putting files at the canonical root
+        // is the safest path — works on every Unity 2019+ version we
+        // care about. Earlier attempt used Assets/Plugins/PlayScope/...
+        // which was off the well-trodden path and risked Unity's Gradle
+        // step missing the .java entirely.
+        private const string AndroidDestDir = "Assets/Plugins/Android";
+        private const string IosDestDir = "Assets/Plugins/iOS";
         private const string AndroidFile = "PlayScopeLifecycle.java";
         private const string IosFile = "PlayScopeLifecycle.mm";
 
@@ -68,13 +79,15 @@ namespace PlayScopeSdk.Editor
             EditorUtility.DisplayDialog(
                 "PlayScope — Native Plugins",
                 copied > 0
-                    ? $"Installed / updated {copied} native plugin file(s) under {DestRoot}/.\n\n" +
+                    ? $"Installed / updated {copied} native plugin file(s):\n" +
+                      $"  • {AndroidDestDir}/{AndroidFile}\n" +
+                      $"  • {IosDestDir}/{IosFile}\n\n" +
                       "Rebuild your Android / iOS player for the new files to take effect."
                     : "Native plugins are already up to date.\n\n" +
                       "If you're still seeing ClassNotFoundException for " +
                       "com.playscope.sdk.PlayScopeLifecycle at runtime, check " +
-                      "the PluginImporter Inspector for the file under " +
-                      $"{DestRoot}/Android/.",
+                      "the PluginImporter Inspector on " +
+                      $"{AndroidDestDir}/{AndroidFile}.",
                 "OK");
         }
 
@@ -105,13 +118,13 @@ namespace PlayScopeSdk.Editor
             int total = 0;
             total += SyncFile(
                 src: Path.Combine(pkgDir, "Plugins", "Android", AndroidFile),
-                dstDir: Path.Combine(DestRoot, "Android"),
+                dstDir: AndroidDestDir,
                 fileName: AndroidFile,
                 platform: BuildTarget.Android,
                 verbose: verbose);
             total += SyncFile(
                 src: Path.Combine(pkgDir, "Plugins", "iOS", IosFile),
-                dstDir: Path.Combine(DestRoot, "iOS"),
+                dstDir: IosDestDir,
                 fileName: IosFile,
                 platform: BuildTarget.iOS,
                 verbose: verbose);
