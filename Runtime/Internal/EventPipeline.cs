@@ -182,6 +182,19 @@ namespace PlayScopeSdk.Internal
 
         internal void EnqueueMetric(string metricType, double value)
         {
+            // Drop NaN / ±Infinity at the door. The backend's MetricRecord
+            // DTO is non-nullable `double` and System.Text.Json refuses to
+            // deserialize JSON `null` into it → the whole envelope is
+            // rejected as invalid_body and the SDK retries forever until
+            // dead-letter. One bad value (e.g. accidental div-by-zero in a
+            // metric callback) used to kill ~10 000 events + ~5 000 logs.
+            // Safer to silently drop the metric than to torpedo the batch.
+            if (!double.IsFinite(value))
+            {
+                PlayScopeLog.Warning(
+                    $"EnqueueMetric: dropping non-finite value for metric_type={metricType} (NaN/Infinity)");
+                return;
+            }
             var r = new EventRecord
             {
                 RecordType = RecordType.Metric,
