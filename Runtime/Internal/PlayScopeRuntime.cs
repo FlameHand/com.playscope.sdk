@@ -19,6 +19,15 @@ namespace PlayScopeSdk.Internal
         private static volatile bool _initialized;
         private static volatile bool _disabled;
         private static int _initialStateSet; // 0/1 — Interlocked
+        // Atomic mutex around Initialize / PerformRotation / TeardownInternal.
+        // Unity callbacks (Update, OnApplicationPause, Application.quitting)
+        // are nominally main-thread, but the ANR watchdog and worker tasks
+        // run elsewhere — and we've been bitten before by an OnApplicationQuit
+        // landing in the middle of a PerformRotation, racing two parallel
+        // teardowns and leaving one half-initialised. CompareExchange this
+        // gate so the second concurrent caller exits silently rather than
+        // spawning a duplicate Writer / Pipeline / Uploader.
+        private static int _lifecycleBusy; // 0/1 — Interlocked
 
         // Lifecycle state machine — feeds duration_in_prev_state_ms on every
         // background_start / foreground transition. Initialized to "foreground"
@@ -154,6 +163,28 @@ namespace PlayScopeSdk.Internal
 
         // Called by PlayScope.Initialize()
         internal static void Initialize(PlayScopeContext context)
+        {
+            // Atomic admission — only ONE thread proceeds past this point.
+            // The previous `if (_initialized || _disabled)` check was a
+            // non-atomic read-then-act and could let two callers (e.g.
+            // user-code calling PlayScope.Initialize() while PerformRotation
+            // is mid-flight) both pass the check and both spin up workers.
+            if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
+            {
+                PlayScopeLog.Warning("Initialize called while another lifecycle op is in flight — ignored.");
+                return;
+            }
+            try
+            {
+                InitializeLocked(context);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _lifecycleBusy, 0);
+            }
+        }
+
+        private static void InitializeLocked(PlayScopeContext context)
         {
             if (_initialized || _disabled)
             {
@@ -508,8 +539,26 @@ namespace PlayScopeSdk.Internal
         // Called by PlayScopeMonoBehaviour on application quit / Application.quitting
         internal static void Shutdown()
         {
-            if (!_initialized || _disabled) return;
-            TeardownInternal(emitSessionEnd: true, endStatus: "normal", reason: "normal");
+            // Bracket the teardown with the same lifecycle lock as Initialize /
+            // PerformRotation. If a rotation is mid-flight when Application.quitting
+            // fires, the rotation finishes first (it's still in the middle of
+            // emitting session_end + spinning a new session) and Shutdown gets
+            // skipped — that's the correct outcome, the new session's eventual
+            // Shutdown will fire on the OS-driven kill.
+            if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
+            {
+                PlayScopeLog.Warning("Shutdown skipped — another lifecycle op is already in flight.");
+                return;
+            }
+            try
+            {
+                if (!_initialized || _disabled) return;
+                TeardownInternal(emitSessionEnd: true, endStatus: "normal", reason: "normal");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _lifecycleBusy, 0);
+            }
         }
 
         /// <summary>
@@ -810,18 +859,38 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         internal static void PerformRotation()
         {
-            if (!_initialized || _disabled) return;
-            var ctx = _context;
-            if (ctx == null)
+            // Claim the lifecycle lock for the WHOLE rotation — teardown +
+            // re-init must be atomic w.r.t. any other Initialize / Shutdown
+            // caller. Without this, an OnApplicationQuit landing between
+            // TeardownInternal and Initialize would let Shutdown observe
+            // _initialized=false and skip, leaving the SDK with no live
+            // session.
+            if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
             {
-                PlayScopeLog.Warning(
-                    "PerformRotation called but no stored context — cannot re-initialize. " +
-                    "Falling back to clean shutdown.");
-                TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
+                PlayScopeLog.Warning("PerformRotation skipped — another lifecycle op is already in flight.");
                 return;
             }
-            TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
-            Initialize(ctx);
+            try
+            {
+                if (!_initialized || _disabled) return;
+                var ctx = _context;
+                if (ctx == null)
+                {
+                    PlayScopeLog.Warning(
+                        "PerformRotation called but no stored context — cannot re-initialize. " +
+                        "Falling back to clean shutdown.");
+                    TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
+                    return;
+                }
+                TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
+                // Bypass the Initialize() admission gate — we already hold
+                // the lifecycle lock for the whole rotation.
+                InitializeLocked(ctx);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _lifecycleBusy, 0);
+            }
         }
 
         /// <summary>

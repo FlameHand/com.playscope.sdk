@@ -316,8 +316,17 @@ namespace PlayScopeSdk.Internal
             var dir = PlayScopeDirectory.UploadQueue;
             if (!Directory.Exists(dir)) return;
 
-            // Gather retryable (is_uploaded: false) chunks, oldest-first
+            // Gather retryable (is_uploaded: false) chunks, oldest-first.
+            // Bug H8: previously we only checked the is_uploaded flag. A
+            // chunk that had failed retry once and was sitting in its backoff
+            // window (state.next_retry_at > now) was still eligible for
+            // deletion — quota pressure could silently drop a chunk the
+            // uploader was about to retry, and no server-side trace was
+            // ever produced. Now we also skip chunks whose next_retry_at is
+            // in the future: they have a pending retry slot and must not be
+            // pruned out from under it.
             var candidates = new List<(string chunkPath, string stateFile, DateTime lastWrite)>();
+            var now = DateTime.UtcNow;
             try
             {
                 foreach (var stateFile in Directory.GetFiles(dir, "*.state.json"))
@@ -329,6 +338,16 @@ namespace PlayScopeSdk.Internal
                         if (dict == null) continue;
                         // Only retryable (is_uploaded == false)
                         if (dict.TryGetValue("is_uploaded", out var iu) && iu is true) continue;
+
+                        // Skip chunks that are mid-backoff with a future
+                        // next_retry_at — the uploader is going to retry
+                        // them on the next pass and they must not vanish.
+                        if (dict.TryGetValue("next_retry_at", out var nra) && nra is string nraStr &&
+                            DateTime.TryParse(nraStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var nraDt) &&
+                            nraDt > now)
+                        {
+                            continue;
+                        }
 
                         var chunkName = Path.GetFileName(stateFile);
                         chunkName = chunkName.Substring(0, chunkName.Length - ".state.json".Length);

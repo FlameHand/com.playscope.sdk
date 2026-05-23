@@ -302,27 +302,50 @@ namespace PlayScopeSdk.Internal
 
             if (!networkError && httpStatus >= 200 && httpStatus < 300)
             {
-                // Success
+                // Success. Bug L1 used to live here: we deleted the chunk
+                // FIRST and only wrote the .uploaded marker if the delete
+                // failed. A process kill landing between the 200 response
+                // and the delete (or between delete and marker, when delete
+                // failed) could leave the chunk on disk with no marker —
+                // SessionRecovery on next launch would then re-enqueue it,
+                // re-upload it (server dedups), and the chunk could pile up
+                // forever on the device.
+                //
+                // The fix is a strict two-phase shutdown:
+                //   1. Make the "this chunk is done" decision DURABLE before
+                //      we even attempt the delete. Two durable signals are
+                //      written in this order: state.IsUploaded=true, then a
+                //      sibling .uploaded marker file. Either is sufficient
+                //      to suppress re-upload on the next launch — we write
+                //      both because a stale state file alone can be deleted
+                //      by quota-pressure pruning, and a marker alone can be
+                //      missed if SessionRecovery never moves the chunk into
+                //      the upload queue dir (e.g. it died in completed_sessions/).
+                //   2. ONLY THEN attempt to free the disk by deleting the
+                //      chunk + the now-redundant marker + the state file.
                 state.IsUploaded = true;
                 SaveState(stateFilePath, state);
                 var sizeKB = (long)0;
                 try { sizeKB = new FileInfo(chunkPath).Length / 1024; } catch { /* best-effort */ }
-                TryDeleteFile(chunkPath);
-                TryDeleteFile(stateFilePath);
-                // If delete failed (Windows Editor file lock, AV scanner,
-                // etc.), drop a sibling .uploaded marker so SessionRecovery
-                // on the next restart knows this chunk is done and can
-                // (a) skip re-enqueueing it for another redundant upload
-                // and (b) retry the deletion which usually succeeds once
-                // the original Editor process has released the lock.
-                if (File.Exists(chunkPath))
+                bool markerWritten = false;
+                try
                 {
-                    try { File.WriteAllText(chunkPath + ".uploaded", "1"); }
-                    catch (Exception ex)
-                    {
-                        PlayScopeLog.Warning($"Could not write .uploaded marker for {chunkName}: {ex.Message}");
-                    }
+                    File.WriteAllText(chunkPath + ".uploaded", "1");
+                    markerWritten = true;
                 }
+                catch (Exception ex)
+                {
+                    PlayScopeLog.Warning($"Could not write .uploaded marker for {chunkName}: {ex.Message}");
+                }
+
+                TryDeleteFile(chunkPath);
+                // Clear the marker only after the chunk file is gone — if
+                // the chunk still exists the marker has to stick around so
+                // SessionRecovery sees it on the next launch.
+                if (markerWritten && !File.Exists(chunkPath))
+                    TryDeleteFile(chunkPath + ".uploaded");
+                TryDeleteFile(stateFilePath);
+
                 _passSucceeded++;
                 // Per-chunk Info — visible when MinLogLevel=Info. Gives an
                 // explicit "the upload pipeline actually works" signal

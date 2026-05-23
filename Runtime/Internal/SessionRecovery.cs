@@ -53,12 +53,20 @@ namespace PlayScopeSdk.Internal
                     ? sessionId
                     : $"recovered_{DateTime.UtcNow:yyyyMMddHHmmss}";
 
-                // For the no-lock-but-orphans case we suppress the synthetic abnormal-end
-                // event — the prior session ended cleanly enough to remove its lock, so
-                // tagging it as abnormal would be a lie. ProcessStaleLockSession reads this
-                // flag.
+                // Synthetic abnormal-end is appended whenever the chunks scan
+                // does NOT find a real session_end record (the inner check in
+                // ProcessStaleLockSession gates on that). Previously we only
+                // appended it when hasStaleLock=true, which left the "lock
+                // removed but session_end never written" case (e.g. a clean
+                // teardown that crashed AFTER unlock but BEFORE writing
+                // session_end) producing a session that lives forever with
+                // EndedAt=NULL on the dashboard — exactly the Crash-Free
+                // Sessions distortion the abandoned-session sweep on the
+                // backend now compensates for. We close it at the source
+                // here too: if no real session_end is on disk, we ALWAYS
+                // emit a synthetic one, classified by the lifecycle file.
                 ProcessStaleLockSession(sessionId, recoveredFolder, uploadQueue,
-                    appendSyntheticAbnormalEnd: hasStaleLock);
+                    appendSyntheticAbnormalEnd: true);
 
                 EnqueueCompletedSessions(uploadQueue, excludeSessionId: recoveredFolder);
             }

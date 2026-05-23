@@ -97,8 +97,23 @@ namespace PlayScopeSdk.Core.Session
             {
                 var json = $"{{\"state\":\"{state}\",\"ts\":\"{DateTime.UtcNow:O}\"}}";
                 File.WriteAllText(tmp, json);
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(tmp, path);
+                // File.Replace is atomic at the filesystem level on both NTFS
+                // and APFS/HFS+ — there's no observable window where the
+                // destination is missing (the previous Delete+Move sequence
+                // left exactly that window: a crash between Delete and Move
+                // left the file gone and SessionRecovery then mis-classified
+                // an otherwise-clean exit as "unknown crash"). When the
+                // destination doesn't exist yet (first write of the session),
+                // fall back to Move because Replace requires both files to
+                // exist.
+                if (File.Exists(path))
+                {
+                    File.Replace(tmp, path, destinationBackupFileName: null);
+                }
+                else
+                {
+                    File.Move(tmp, path);
+                }
             }
             catch (Exception ex)
             {
