@@ -900,6 +900,19 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Info(
                     $"Background timeout ({durationMs} ms ≥ {BackgroundSessionTimeoutMs} ms) — " +
                     "scheduling session rotation.");
+                // CRITICAL: advance the lifecycle state BEFORE setting the
+                // pending-rotation flag. If the rotation later fails (lock
+                // contention, transient init exception), the next
+                // RecordLifecycle call would otherwise still see
+                // prevState == "background" with durationMs > timeout and
+                // re-schedule rotation forever — an infinite loop where
+                // every Update tick triggers PerformRotation. Advancing
+                // the state here means the second observation sees
+                // prevState == "foreground" and falls through to the
+                // normal emit path.
+                _currentLifecycleState = nextState;
+                _currentLifecycleStateEnteredAtTicks = nowTicks;
+                _currentLifecycleStateEnteredAtStopwatchTicks = nowStopwatchTicks;
                 _pendingRotation = true;
                 return;
             }

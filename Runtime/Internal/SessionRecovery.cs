@@ -564,24 +564,27 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         private static bool ScanFileForSessionEnd(string filePath)
         {
+            // Stream the file line-by-line instead of File.ReadAllText. On a
+            // low-memory device (post-crash, finishing a multi-tens-of-MB
+            // chunk backlog) the previous version's read-then-split-then-
+            // string[] allocation routinely OOM'd. The catch then logged a
+            // warning and returned false → SessionRecovery synthesised
+            // session_abnormal_end → the recovered session was misreported
+            // as a crash even though session_end was in the file.
             try
             {
-                var text = File.ReadAllText(filePath);
-                if (string.IsNullOrEmpty(text)) return false;
-
-                // Split on newlines; the last element is empty or truncated — skip it
-                var lines = text.Split('\n');
-                // lines.Length - 1 because the last entry after the final '\n' is empty,
-                // or if no trailing newline, it's a partial line — either way we skip it.
-                var safeCount = lines.Length - 1;
-                for (int i = 0; i < safeCount; i++)
+                using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream, new System.Text.UTF8Encoding(false));
+                string line;
+                while ((line = reader.ReadLine()) != null)
                 {
-                    var line = lines[i];
                     if (string.IsNullOrEmpty(line)) continue;
-                    // Quick substring check before paying for JSON parse
+                    // Quick substring check before paying for JSON parse.
+                    // Note: "session_end" is a substring of
+                    // "session_abnormal_end" too — the JSON-parse check
+                    // below disambiguates.
                     if (!line.Contains("session_end")) continue;
 
-                    // Confirm it's actually in the event_type field
                     var dto = SimpleJson.Deserialize(line);
                     if (dto != null &&
                         dto.TryGetValue("event_type", out var et) &&
