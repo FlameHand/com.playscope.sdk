@@ -241,6 +241,15 @@ namespace PlayScopeSdk.Internal
             // SECOND rotation in the same frame (impossible today, defensive).
             _pendingRotation = false;
             SequenceCounter.Reset();
+            // Reset coalescer state — both are static singletons that survive
+            // PlayScopeRuntime teardowns (auto-init only once at class load).
+            // Without this, the new session's first SessionDataCoalescer.Add
+            // emits session_data_patch against a baseline that exists only in
+            // the OLD session, and the dashboard's state view is corrupt for
+            // every rotated session. StatePatchCoalescer's stale buffer would
+            // also leak old-session keys into the new session's first flush.
+            StatePatchCoalescer.ResetForNewSession();
+            SessionDataCoalescer.ResetForNewSession();
             PlayScope.ResetSessionScopedState();
 
             // Step 1: Validate SdkKey
@@ -702,7 +711,29 @@ namespace PlayScopeSdk.Internal
                         MetadataJson = $"{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\"}}",
                         IsCritical = true,
                     };
-                    var ok = _writer.WriteCriticalAndFinalizeSync(rec);
+                    // Run the sync write on a thread-pool worker with a
+                    // bounded wait — the lock + file I/O can hang past
+                    // Unity's quit budget on a slow or sandboxed disk
+                    // (network volume on iOS background-task suspension,
+                    // Android with full storage). If we exceed 500 ms we
+                    // abandon the call; next launch's SessionRecovery
+                    // synthesises an abnormal_end. Worst case: a duplicate
+                    // session_end if the abandoned task eventually
+                    // succeeds before process kill.
+                    var writer = _writer; // capture for closure
+                    var task = System.Threading.Tasks.Task.Run(() => writer.WriteCriticalAndFinalizeSync(rec));
+                    bool ok;
+                    if (task.Wait(TimeSpan.FromMilliseconds(500)))
+                    {
+                        ok = task.Result;
+                    }
+                    else
+                    {
+                        ok = false;
+                        PlayScopeLog.Warning(
+                            "Shutdown: WriteCriticalAndFinalizeSync exceeded 500 ms timeout — " +
+                            "session_end may not have been flushed; SessionRecovery on next launch will synthesise it.");
+                    }
                     PlayScopeLog.Info(
                         $"Shutdown: session_end sync-write (end_status={endStatus}, reason={reason}, success={ok}).");
                 }

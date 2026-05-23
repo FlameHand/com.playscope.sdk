@@ -91,6 +91,20 @@ namespace PlayScopeSdk.Internal
         /// abnormal_end, and lifecycle pause so the last patch isn't lost to
         /// the window timer when the app is about to die / suspend.
         /// </summary>
+        /// <summary>
+        /// Drops any buffered patch and starts fresh — called by
+        /// PlayScopeRuntime.InitializeLocked on session rotation so the
+        /// new session never inherits state from the dead one.
+        /// </summary>
+        internal void ResetForNewSession()
+        {
+            lock (_gate)
+            {
+                _buffer = null;
+                _bufferReason = null;
+            }
+        }
+
         internal void FlushNow()
         {
             lock (_gate)

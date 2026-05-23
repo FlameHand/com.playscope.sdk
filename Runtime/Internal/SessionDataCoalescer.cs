@@ -90,6 +90,26 @@ namespace PlayScopeSdk.Internal
             }
         }
 
+        /// <summary>
+        /// Resets the coalescer for a new session. Drops any buffered patch
+        /// (the caller is expected to FlushNow first if the old session's
+        /// events must survive) and clears _initialEmitted so the next
+        /// session's first flush emits session_data_initial. Called from
+        /// PlayScopeRuntime.InitializeLocked alongside SequenceCounter.Reset()
+        /// — without it, post-rotation sessions emit session_data_patch
+        /// against a non-existent baseline and the dashboard's state view
+        /// is corrupt.
+        /// </summary>
+        internal void ResetForNewSession()
+        {
+            lock (_gate)
+            {
+                _buffer = null;
+                _bufferReason = null;
+                _initialEmitted = false;
+            }
+        }
+
         private void FlushLocked()
         {
             if (_buffer == null || _buffer.Count == 0)

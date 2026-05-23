@@ -24,9 +24,20 @@ namespace PlayScopeSdk.Internal
         {
             if (Volatile.Read(ref _count) >= SoftCap)
             {
-                Interlocked.Increment(ref _droppedSinceWarn);
-                MaybeWarnDrops();
-                return;
+                // Critical events (exceptions, session_end, ANR) MUST land
+                // even when the queue is full. Otherwise a stalled writer
+                // (disk full, AV scanner) drops the session_end record and
+                // the dashboard shows EndStatus=unknown until AbandonedSessionWorker
+                // stamps it ~10 days later. Override drop policy for IsCritical:
+                // accept the new record and grow the queue past SoftCap. The
+                // overshoot is bounded by the rate of critical events
+                // (kilobytes per session, not megabytes).
+                if (!record.IsCritical)
+                {
+                    Interlocked.Increment(ref _droppedSinceWarn);
+                    MaybeWarnDrops();
+                    return;
+                }
             }
 
             _queue.Enqueue(record);
