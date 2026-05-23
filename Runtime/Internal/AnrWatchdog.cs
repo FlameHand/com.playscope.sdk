@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using UnityEngine;
 
@@ -52,12 +53,20 @@ namespace PlayScopeSdk.Internal
         private readonly int _thresholdMs;
         private readonly EventPipeline _pipeline;
 
-        // Heartbeat slot — written by main thread Update, read by the timer
-        // worker. Long writes are atomic on 64-bit; on 32-bit we use
-        // Interlocked.Exchange / Read to avoid torn reads. Initialised to
-        // DateTime.UtcNow.Ticks when Start() runs so the first half-second
-        // before the first Update() tick doesn't false-positive.
-        private long _heartbeatTicks;
+        // Two heartbeat slots, both written from the main-thread Update tick:
+        //   * _heartbeatStopwatchTicks — Stopwatch.GetTimestamp() at the moment
+        //     of the heartbeat. ALL elapsed-time arithmetic uses this slot —
+        //     Stopwatch is hardware-monotonic and immune to NTP rewinds, DST
+        //     jumps, manual clock changes. Using DateTime.UtcNow here would
+        //     let a 30-second NTP correction during the session either
+        //     suppress all ANR detection (negative elapsed) or report a phantom
+        //     ANR on a forward jump.
+        //   * _heartbeatWallTicks — DateTime.UtcNow.Ticks. Only used to stamp
+        //     human-readable `started_at` / `recovered_at` strings in the
+        //     emitted event metadata.
+        // Interlocked.Read / Exchange on long for 32-bit safety against torn reads.
+        private long _heartbeatStopwatchTicks;
+        private long _heartbeatWallTicks;
 
         private Timer? _timer;
 
@@ -68,9 +77,11 @@ namespace PlayScopeSdk.Internal
         // Suspend flag — set when the app is backgrounded so the timer
         // callback skips its check entirely.
         private volatile bool _suspended;
-        // Ticks at the moment we noticed the stall began (heartbeat value
-        // at that point). Used to stamp anr_recovered's total_stuck_ms.
-        private long _stallStartTicks;
+        // Stopwatch / wall-clock ticks at the moment we noticed the stall began.
+        // Used to stamp anr_recovered's total_stuck_ms (from Stopwatch) and
+        // human-readable started_at (from wall clock).
+        private long _stallStartStopwatchTicks;
+        private long _stallStartWallTicks;
         // Whether we've already emitted the entry-anr event for the current
         // stall — guards against the timer firing a second time mid-stall.
         private bool _entryEventEmitted;
@@ -88,7 +99,8 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         internal void Start()
         {
-            Interlocked.Exchange(ref _heartbeatTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Exchange(ref _heartbeatStopwatchTicks, Stopwatch.GetTimestamp());
+            Interlocked.Exchange(ref _heartbeatWallTicks, DateTime.UtcNow.Ticks);
             _timer = new Timer(TimerTick, state: null,
                 dueTime: PeriodMs, period: PeriodMs);
         }
@@ -107,7 +119,8 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         internal void RecordHeartbeat()
         {
-            Interlocked.Exchange(ref _heartbeatTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Exchange(ref _heartbeatStopwatchTicks, Stopwatch.GetTimestamp());
+            Interlocked.Exchange(ref _heartbeatWallTicks, DateTime.UtcNow.Ticks);
         }
 
         /// <summary>
@@ -124,7 +137,8 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         internal void Resume()
         {
-            Interlocked.Exchange(ref _heartbeatTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Exchange(ref _heartbeatStopwatchTicks, Stopwatch.GetTimestamp());
+            Interlocked.Exchange(ref _heartbeatWallTicks, DateTime.UtcNow.Ticks);
             _suspended = false;
         }
 
@@ -135,18 +149,21 @@ namespace PlayScopeSdk.Internal
             if (_suspended) return;
             try
             {
-                var lastBeatTicks = Interlocked.Read(ref _heartbeatTicks);
-                var nowTicks      = DateTime.UtcNow.Ticks;
-                var elapsedMs     = (nowTicks - lastBeatTicks) / TimeSpan.TicksPerMillisecond;
+                var lastBeatSwTicks = Interlocked.Read(ref _heartbeatStopwatchTicks);
+                var lastBeatWallTicks = Interlocked.Read(ref _heartbeatWallTicks);
+                var nowSwTicks = Stopwatch.GetTimestamp();
+                var elapsedMs = (nowSwTicks - lastBeatSwTicks) * 1000L / Stopwatch.Frequency;
+                if (elapsedMs < 0) elapsedMs = 0;
 
                 if (!_inAnr && elapsedMs >= _thresholdMs)
                 {
                     _inAnr = true;
-                    _stallStartTicks = lastBeatTicks;
+                    _stallStartStopwatchTicks = lastBeatSwTicks;
+                    _stallStartWallTicks = lastBeatWallTicks;
                     if (!_entryEventEmitted)
                     {
                         _entryEventEmitted = true;
-                        EmitAnrEntry(elapsedMs, lastBeatTicks);
+                        EmitAnrEntry(elapsedMs, lastBeatWallTicks);
                     }
                 }
                 else if (_inAnr && elapsedMs < _thresholdMs)
@@ -154,11 +171,13 @@ namespace PlayScopeSdk.Internal
                     // Main thread recovered — heartbeat slot was updated
                     // since we last looked, which means a Update() tick
                     // landed. Emit recovery and reset latches.
-                    var totalStuckMs = (lastBeatTicks - _stallStartTicks) / TimeSpan.TicksPerMillisecond;
-                    EmitAnrRecovered(totalStuckMs, _stallStartTicks, lastBeatTicks);
+                    var totalStuckMs = (lastBeatSwTicks - _stallStartStopwatchTicks) * 1000L / Stopwatch.Frequency;
+                    if (totalStuckMs < 0) totalStuckMs = 0;
+                    EmitAnrRecovered(totalStuckMs, _stallStartWallTicks, lastBeatWallTicks);
                     _inAnr = false;
                     _entryEventEmitted = false;
-                    _stallStartTicks = 0;
+                    _stallStartStopwatchTicks = 0;
+                    _stallStartWallTicks = 0;
                 }
             }
             catch

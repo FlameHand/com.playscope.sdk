@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using PlayScopeSdk.Storage;
@@ -48,6 +49,25 @@ namespace PlayScopeSdk.Internal
                 // Step 3a: read session_id from the on-disk session.json (still holds the
                 // PRIOR session's identity — the new session hasn't been generated yet).
                 var sessionId = ReadStaleSesionId();
+                // Fallback: if session.json is unreadable / corrupt (power-kill
+                // mid-write, partial flush), scan the orphan chunks for the
+                // first session_start event and pull the session_id out of its
+                // metadata. Without this, the recovered folder ends up with
+                // name "recovered_TIMESTAMP" and CopySessionManifest copies a
+                // broken manifest — UploaderWorker.ResolveEnvelopeIdentity then
+                // dead-letters every chunk, losing ALL data from the crashed
+                // session. The chunks themselves are append-only JSONL so they
+                // survive a manifest corruption.
+                if (string.IsNullOrEmpty(sessionId))
+                {
+                    sessionId = TryScanChunksForSessionId();
+                    if (!string.IsNullOrEmpty(sessionId))
+                    {
+                        PlayScopeLog.Warning(
+                            $"SessionRecovery: session.json was unreadable; recovered session_id={sessionId} " +
+                            "from chunk metadata. Will reconstruct manifest before upload.");
+                    }
+                }
 
                 var recoveredFolder = !string.IsNullOrEmpty(sessionId)
                     ? sessionId
@@ -142,6 +162,67 @@ namespace PlayScopeSdk.Internal
             catch (Exception ex)
             {
                 PlayScopeLog.Warning($"SessionRecovery: failed to read session.json: {ex.Message}");
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Fallback path when session.json is missing or unreadable. Scans
+        /// orphan chunk_*.jsonl files for the first record with
+        /// <c>event_type == "session_start"</c> and extracts <c>session_id</c>
+        /// from its metadata. Returns null when nothing is found — caller
+        /// will then dead-letter the orphans with a synthetic folder name.
+        /// </summary>
+        private static string TryScanChunksForSessionId()
+        {
+            var chunksDir = PlayScopeDirectory.Chunks;
+            if (!Directory.Exists(chunksDir)) return null;
+            try
+            {
+                foreach (var file in Directory.GetFiles(chunksDir, "*.jsonl"))
+                {
+                    string found = TryScanFileForSessionId(file);
+                    if (!string.IsNullOrEmpty(found)) return found;
+                }
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning($"SessionRecovery: chunk scan for session_id failed: {ex.Message}");
+            }
+            return null;
+        }
+
+        private static string TryScanFileForSessionId(string filePath)
+        {
+            try
+            {
+                using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream, new System.Text.UTF8Encoding(false));
+                string line;
+                int scanned = 0;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    // Bound the per-file scan to a few KB — session_start is
+                    // typically the FIRST record, and if it isn't there in
+                    // the first ~50 records, the chunk is mid-session
+                    // continuation and won't have it.
+                    if (++scanned > 50) break;
+                    if (string.IsNullOrEmpty(line) || !line.Contains("session_start")) continue;
+                    var dto = SimpleJson.Deserialize(line);
+                    if (dto is null) continue;
+                    if (!dto.TryGetValue("event_type", out var et) || (et as string) != "session_start") continue;
+                    // session_id can live at the top level OR inside metadata
+                    // depending on how the SDK serialized the record.
+                    if (dto.TryGetValue("session_id", out var sid) && sid is string s1 && !string.IsNullOrEmpty(s1))
+                        return s1;
+                    if (dto.TryGetValue("metadata", out var meta) && meta is Dictionary<string, object> md &&
+                        md.TryGetValue("session_id", out var sid2) && sid2 is string s2 && !string.IsNullOrEmpty(s2))
+                        return s2;
+                }
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning($"SessionRecovery: TryScanFileForSessionId({filePath}) failed: {ex.Message}");
             }
             return null;
         }

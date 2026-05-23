@@ -592,8 +592,40 @@ namespace PlayScopeSdk.Internal
             return line.Substring(start, end - start);
         }
 
+        /// <summary>
+        /// JSON string escape that also handles C0 control characters,
+        /// quotes, backslash, and lone UTF-16 surrogates. The previous
+        /// minimal version only escaped \\ and \" — a session_id value
+        /// pulled from a power-kill-corrupted session.json that contained
+        /// a stray control character would produce invalid JSON that the
+        /// backend then rejected with 400 on every retry. Mirrors
+        /// EventPipeline.AppendEscapedString.
+        /// </summary>
         private static string EscapeJsonString(string s)
-            => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            var sb = new StringBuilder(s.Length + 8);
+            foreach (var c in s)
+            {
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '"':  sb.Append("\\\""); break;
+                    case '\b': sb.Append("\\b");  break;
+                    case '\f': sb.Append("\\f");  break;
+                    case '\n': sb.Append("\\n");  break;
+                    case '\r': sb.Append("\\r");  break;
+                    case '\t': sb.Append("\\t");  break;
+                    default:
+                        if (c < 0x20)
+                            sb.Append("\\u").Append(((int)c).ToString("x4"));
+                        else
+                            sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+        }
 
         // ── State file helpers ────────────────────────────────────────────────────
 

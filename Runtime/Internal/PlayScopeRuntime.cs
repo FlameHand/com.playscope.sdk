@@ -575,17 +575,32 @@ namespace PlayScopeSdk.Internal
             const int ShutdownLockWaitMs = 500;
             const int SpinSleepMs = 5;
             int waited = 0;
-            while (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
+            bool acquired = false;
+            while (true)
             {
+                if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) == 0)
+                {
+                    acquired = true;
+                    break;
+                }
                 if (waited >= ShutdownLockWaitMs)
                 {
+                    // Rotation is still in flight after 500 ms. DO NOT force
+                    // the gate — barging in would let TeardownInternal run
+                    // concurrently with InitializeLocked, leaving subsystems
+                    // half-initialised (driver GO destroyed by us, new
+                    // workers spinning up from rotation, mutual corruption).
+                    // Better to lose a session_end than to corrupt state on
+                    // the way out. The rotation's OWN finally-block will
+                    // eventually release the gate, and the OS will then kill
+                    // the process — session_end for the post-rotation
+                    // session lands on next launch's SessionRecovery as a
+                    // synthetic abnormal_end with reason=foreground_crash.
                     PlayScopeLog.Warning(
                         $"Shutdown: lifecycle lock not released within {ShutdownLockWaitMs} ms — " +
-                        "proceeding anyway, session_end may collide with in-flight rotation.");
-                    // Force the gate so we can run our shutdown — better
-                    // a possible collision than guaranteed missing session_end.
-                    Interlocked.Exchange(ref _lifecycleBusy, 1);
-                    break;
+                        "skipping teardown to avoid corrupting in-flight rotation. " +
+                        "Session_end will be synthesised by SessionRecovery on next launch.");
+                    return;
                 }
                 Thread.Sleep(SpinSleepMs);
                 waited += SpinSleepMs;
@@ -597,7 +612,7 @@ namespace PlayScopeSdk.Internal
             }
             finally
             {
-                Interlocked.Exchange(ref _lifecycleBusy, 0);
+                if (acquired) Interlocked.Exchange(ref _lifecycleBusy, 0);
             }
         }
 
