@@ -370,7 +370,7 @@ namespace PlayScopeSdk.Internal
         private static double StopwatchSecondsSince(long start)
             => (double)(Stopwatch.GetTimestamp() - start) / Stopwatch.Frequency;
 
-        private static string SerializeRecord(EventRecord r)
+        private string SerializeRecord(EventRecord r)
         {
             return r.RecordType switch
             {
@@ -381,10 +381,19 @@ namespace PlayScopeSdk.Internal
             };
         }
 
-        private static string SerializeEvent(EventRecord r)
+        private string SerializeEvent(EventRecord r)
         {
             var sb = new StringBuilder();
             sb.Append("{\"record_type\":\"event\"");
+            // Stamp session_id at the event top-level so SessionRecovery on
+            // next launch can read it back via the flat SimpleJson parser
+            // (which can't traverse nested metadata). Without this, a
+            // corrupted session.json with intact chunk files results in
+            // every chunk going to dead-letter — SessionRecovery has no
+            // path to learn the session_id. The backend's TimelineEventRecord
+            // DTO has no SessionId field so deserialization ignores it
+            // (the envelope's SessionId is authoritative).
+            Append(sb, "session_id", _session.SessionId);
             Append(sb, "event_type", r.EventType);
             Append(sb, "event_id", r.EventId);
             sb.Append(",\"sequence_num\":").Append(r.SequenceNum);
@@ -403,7 +412,7 @@ namespace PlayScopeSdk.Internal
             return sb.ToString();
         }
 
-        private static string SerializeLog(EventRecord r)
+        private string SerializeLog(EventRecord r)
         {
             var sb = new StringBuilder();
             sb.Append("{\"record_type\":\"log\"");
@@ -420,7 +429,7 @@ namespace PlayScopeSdk.Internal
             return sb.ToString();
         }
 
-        private static string SerializeMetric(EventRecord r)
+        private string SerializeMetric(EventRecord r)
         {
             var sb = new StringBuilder();
             sb.Append("{\"record_type\":\"metric\"");
