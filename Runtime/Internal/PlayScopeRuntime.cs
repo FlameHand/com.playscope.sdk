@@ -34,7 +34,15 @@ namespace PlayScopeSdk.Internal
         // on session_start so the first transition out of it carries a real
         // delta (entire startup spent in foreground, etc.).
         private static string _currentLifecycleState = "foreground";
+        // Wall-clock anchor for the metadata (so the dashboard sees an actual
+        // UTC time of state-change) AND a monotonic Stopwatch anchor for
+        // duration arithmetic. We MUST NOT compute "how long in background"
+        // from DateTime.UtcNow.Ticks — if the user changes the device clock
+        // mid-background (NTP correction, manual change, DST jump) the
+        // result is negative or wildly inflated, breaking the 5-min rotation
+        // trigger. Same lesson WriterWorker.cs already documents at the top.
         private static long _currentLifecycleStateEnteredAtTicks;
+        private static long _currentLifecycleStateEnteredAtStopwatchTicks;
 
         // Network reachability watchdog — sampled by MetricsSampler. When the
         // value changes we emit a network_change event (separate from the
@@ -223,6 +231,7 @@ namespace PlayScopeSdk.Internal
             _initialStateSet = 0;
             _currentLifecycleState = "foreground";
             _currentLifecycleStateEnteredAtTicks = DateTime.UtcNow.Ticks;
+            _currentLifecycleStateEnteredAtStopwatchTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             _firstFrameEmitted = 0;
             _firstFrameTicks = 0;
             _firstInputEmitted = 0;
@@ -806,9 +815,25 @@ namespace PlayScopeSdk.Internal
             if (nextState == _currentLifecycleState) return;
 
             var nowTicks = DateTime.UtcNow.Ticks;
-            var durationMs = _currentLifecycleStateEnteredAtTicks == 0
-                ? 0
-                : (nowTicks - _currentLifecycleStateEnteredAtTicks) / TimeSpan.TicksPerMillisecond;
+            // Duration MUST be Stopwatch-derived. Computing it from
+            // DateTime.UtcNow.Ticks lets a device-clock change between
+            // background-start and foreground produce a negative or wildly
+            // inflated delta — negative skips the rotation trigger entirely
+            // (player resumes after hours, never gets a new session, and
+            // we silently keep racking up DAU under one billing-session);
+            // forward jump rotates after a 30-second pause.
+            var nowStopwatchTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            long durationMs;
+            if (_currentLifecycleStateEnteredAtStopwatchTicks == 0)
+            {
+                durationMs = 0;
+            }
+            else
+            {
+                var deltaTicks = nowStopwatchTicks - _currentLifecycleStateEnteredAtStopwatchTicks;
+                if (deltaTicks < 0) deltaTicks = 0; // monotonic but be safe
+                durationMs = deltaTicks * 1000L / System.Diagnostics.Stopwatch.Frequency;
+            }
             var prevState = _currentLifecycleState;
 
             // Background-timeout session rotation. Transitioning from background
@@ -843,6 +868,7 @@ namespace PlayScopeSdk.Internal
             Pipeline?.EnqueueEvent("lifecycle", metadataJson: EventPipeline.DictToJson(meta));
             _currentLifecycleState = nextState;
             _currentLifecycleStateEnteredAtTicks = nowTicks;
+            _currentLifecycleStateEnteredAtStopwatchTicks = nowStopwatchTicks;
             // Mirror the new state to disk so SessionRecovery on the next
             // launch can classify an unclean death by where we were last:
             // foreground → likely crash/ANR, background → likely swipe-kill

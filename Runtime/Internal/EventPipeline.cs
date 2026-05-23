@@ -20,8 +20,15 @@ namespace PlayScopeSdk.Internal
         internal const int MaxStatePatchKeys = 64;
 
         private readonly EventQueue _queue;
-        private string _currentScreen = "";
-        private string _currentAction = "";
+        // Read on the writer worker thread, written from any thread that
+        // calls SetScreen / SetAction (typically Unity main-thread, but
+        // wrapper code may call from coroutines or background tasks). Plain
+        // reference assignment is atomic in .NET but there's no memory
+        // barrier — a write here can be invisible to the writer for several
+        // hundred ms, producing events tagged with the previous screen.
+        // Volatile fields force the necessary ordering.
+        private volatile string _currentScreen = "";
+        private volatile string _currentAction = "";
         // Optional dedup buffer for absorbable log levels (debug/info/warning).
         // Wired in by PlayScopeRuntime after construction so the pipeline stays
         // usable in tests without the buffer present. When null, every log
@@ -134,9 +141,15 @@ namespace PlayScopeSdk.Internal
 
         internal void EnqueueLog(string level, string message, string? stackTrace = null, string? metadataJson = null)
         {
-            // Truncate per spec: message 2048, stack_trace 8192
-            if (message.Length > 2048) message = message[..2048] + "...[truncated]";
-            if (stackTrace != null && stackTrace.Length > 8192) stackTrace = stackTrace[..8192] + "...[truncated]";
+            // Truncate per spec: message 2048, stack_trace 8192.
+            // Substring cuts on char index; a slice at a UTF-16 high-surrogate
+            // boundary leaves an unpaired surrogate which System.Text.Json
+            // (and most strict JSON parsers) reject. Back the cut up to the
+            // last full code point before the limit so the JSON line is
+            // always valid.
+            if (message.Length > 2048) message = SafeTruncate(message, 2048) + "...[truncated]";
+            if (stackTrace != null && stackTrace.Length > 8192)
+                stackTrace = SafeTruncate(stackTrace, 8192) + "...[truncated]";
             var r = new EventRecord
             {
                 RecordType = RecordType.Log,
@@ -264,6 +277,19 @@ namespace PlayScopeSdk.Internal
         /// character via \u00XX so the output passes strict RFC 8259
         /// parsers. Shared by key and value paths.
         /// </summary>
+        /// <summary>
+        /// Truncates to at most <paramref name="maxChars"/> chars without
+        /// landing in the middle of a UTF-16 surrogate pair. If the char at
+        /// position <c>maxChars-1</c> is a high surrogate, back up by one.
+        /// </summary>
+        private static string SafeTruncate(string s, int maxChars)
+        {
+            if (s.Length <= maxChars) return s;
+            int cut = maxChars;
+            if (cut > 0 && char.IsHighSurrogate(s[cut - 1])) cut--;
+            return s.Substring(0, cut);
+        }
+
         internal static void AppendEscapedString(StringBuilder sb, string s)
         {
             sb.Append('"');

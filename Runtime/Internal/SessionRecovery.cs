@@ -306,9 +306,16 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         private static string ExtractShortId(string sessionId)
         {
+            // MUST stay in lockstep with SessionInfo.ShortIdLength. Hard-coded
+            // 5 here pre-dated the 5→8 bump in SessionInfo (collision risk on
+            // long-lived devices) — leaving it at 5 would produce a different
+            // prefix than the one chunks are written under, breaking the
+            // orphan-rescue ownership check the moment the rescue path
+            // exercises it.
+            const int ShortIdLength = 8;
             if (string.IsNullOrEmpty(sessionId)) return "";
             var stripped = sessionId.Replace("-", "");
-            return stripped.Length >= 5 ? stripped.Substring(0, 5) : stripped;
+            return stripped.Length >= ShortIdLength ? stripped.Substring(0, ShortIdLength) : stripped;
         }
 
         /// <summary>
