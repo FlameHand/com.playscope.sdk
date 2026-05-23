@@ -37,7 +37,16 @@ namespace PlayScopeSdk.Internal
         private readonly object _gate = new();
         private Dictionary<string, object>? _buffer;
         private string? _bufferReason;
-        private int _bufferStartTick;
+        // Stopwatch-derived monotonic milliseconds. Replaces the old
+        // Environment.TickCount (int, wraps after 49.7 days) so a long-
+        // running kiosk / TV install doesn't silently disable the
+        // time-trigger flush when the counter wraps and `now - start`
+        // goes negative.
+        private long _bufferStartTick;
+
+        private static long StopwatchMs() =>
+            System.Diagnostics.Stopwatch.GetTimestamp() * 1000L
+            / System.Diagnostics.Stopwatch.Frequency;
         // Flips after the first successful flush — drives the
         // session_data_initial → session_data_patch event type choice.
         private bool _initialEmitted;
@@ -54,7 +63,7 @@ namespace PlayScopeSdk.Internal
                 {
                     _buffer = new Dictionary<string, object>();
                     _bufferReason = reason;
-                    _bufferStartTick = Environment.TickCount;
+                    _bufferStartTick = StopwatchMs();
                 }
                 if (patch != null)
                 {
@@ -68,7 +77,7 @@ namespace PlayScopeSdk.Internal
             lock (_gate)
             {
                 if (_buffer == null) return;
-                var age = Environment.TickCount - _bufferStartTick;
+                var age = StopwatchMs() - _bufferStartTick;
                 if (age >= WindowMs) FlushLocked();
             }
         }

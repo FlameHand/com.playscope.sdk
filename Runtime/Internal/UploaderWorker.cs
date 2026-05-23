@@ -272,7 +272,27 @@ namespace PlayScopeSdk.Internal
             }
             catch (Exception ex)
             {
-                PlayScopeLog.Warning($"Failed to build payload for {chunkName}: {ex.Message}");
+                // BuildGzipPayload threw something other than the foreign-
+                // short-id case (corrupt UTF-8, disk read IO error, gzip
+                // failure). Previously we returned silently here — so on
+                // every 30s poll we re-tried the same broken chunk forever
+                // without ever incrementing Attempts or scheduling a
+                // backoff. Now treat it like a retryable failure: bump
+                // Attempts, schedule the next retry with backoff, and let
+                // the 7-day TTL eventually dead-letter the file if it
+                // never recovers.
+                state.Attempts++;
+                state.LastAttemptAt = DateTime.UtcNow;
+                double buildFailBackoffSeconds = BackoffBase[Math.Min(state.Attempts - 1, BackoffBase.Length - 1)];
+                double buildFailRand;
+                lock (_jitterRng) { buildFailRand = _jitterRng.NextDouble(); }
+                double buildFailJitter = buildFailBackoffSeconds * 0.2 * (buildFailRand * 2.0 - 1.0); // ±20%
+                state.NextRetryAt = DateTime.UtcNow.AddSeconds(buildFailBackoffSeconds + buildFailJitter);
+                SaveState(stateFilePath, state);
+                _passRetried++;
+                PlayScopeLog.Warning(
+                    $"Failed to build payload for {chunkName} (attempt #{state.Attempts}): {ex.Message} " +
+                    $"— next retry at {state.NextRetryAt:o}");
                 return;
             }
 

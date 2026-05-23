@@ -36,7 +36,14 @@ namespace PlayScopeSdk.Internal
         private readonly object _gate = new();
         private Dictionary<string, object>? _buffer;
         private string? _bufferReason;
-        private int _bufferStartTick;
+        // Stopwatch-derived monotonic milliseconds — see comment in
+        // SessionDataCoalescer. Environment.TickCount (int) wraps after
+        // 49.7 days.
+        private long _bufferStartTick;
+
+        private static long StopwatchMs() =>
+            System.Diagnostics.Stopwatch.GetTimestamp() * 1000L
+            / System.Diagnostics.Stopwatch.Frequency;
 
         /// <summary>
         /// Append a patch to the buffer. Safe from any thread. The window timer
@@ -56,7 +63,7 @@ namespace PlayScopeSdk.Internal
                 {
                     _buffer = new Dictionary<string, object>();
                     _bufferReason = reason;
-                    _bufferStartTick = Environment.TickCount;
+                    _bufferStartTick = StopwatchMs();
                 }
                 if (patch != null)
                 {
@@ -74,7 +81,7 @@ namespace PlayScopeSdk.Internal
             lock (_gate)
             {
                 if (_buffer == null) return;
-                var age = Environment.TickCount - _bufferStartTick;
+                var age = StopwatchMs() - _bufferStartTick;
                 if (age >= WindowMs) FlushLocked();
             }
         }
