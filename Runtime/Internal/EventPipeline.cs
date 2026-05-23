@@ -46,12 +46,26 @@ namespace PlayScopeSdk.Internal
         internal void EnqueueEvent(string eventType, string? operationId = null, string? operationType = null,
             string? metadataJson = null, string? statePatchJson = null)
         {
-            // Enforce metadata size cap (spec: 4 KB). Oversized metadata = drop the entire event.
-            if (!string.IsNullOrEmpty(metadataJson) &&
-                Encoding.UTF8.GetByteCount(metadataJson) > MaxMetadataBytes)
+            // Enforce metadata size cap (spec: 4 KB). Oversized metadata
+            // used to drop the entire event — losing the signal that the
+            // event happened at all (and its sequence_num / screen /
+            // action / operation_id context). Replace with a tiny
+            // truncation sentinel so the event still lands; the dashboard
+            // can render a "metadata truncated" badge by reading
+            // _playscope.metadata_truncated. Sentinel is ~70 bytes and
+            // trivially fits the cap.
+            if (!string.IsNullOrEmpty(metadataJson))
             {
-                PlayScopeLog.Warning($"event dropped: metadata exceeds 4 KB (event_type={eventType}).");
-                return;
+                int originalSize = Encoding.UTF8.GetByteCount(metadataJson);
+                if (originalSize > MaxMetadataBytes)
+                {
+                    PlayScopeLog.Warning(
+                        $"event metadata exceeds 4 KB ({originalSize} bytes, event_type={eventType}). " +
+                        "Replacing metadata with truncation sentinel; event will still be emitted.");
+                    metadataJson =
+                        "{\"_playscope\":{\"metadata_truncated\":true,\"original_size_bytes\":"
+                        + originalSize + "}}";
+                }
             }
 
             // Enforce state_patch size + key-count cap (spec: 8 KB, 64 keys). On violation we
