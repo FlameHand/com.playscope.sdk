@@ -466,12 +466,24 @@ namespace PlayScopeSdk.Internal
             ResolveEnvelopeIdentity(chunkPath,
                 out var envelopeSessionId, out var envelopeSdkVersion, out var envelopeSchemaVersion);
 
+            // Defensive: backend rejects envelopes with batch_id.Length > 128 (400 invalid_batch_id).
+            // Current chunk names are 21-37 chars, so the cap is far away — but truncate-and-warn
+            // here so a future filename change doesn't silently lose data to backend rejection.
+            // Truncate (not drop): the payload matters more than the id.
+            var batchId = Path.GetFileNameWithoutExtension(chunkPath);
+            if (batchId != null && batchId.Length > 128)
+            {
+                PlayScopeLog.Warning(
+                    $"[Uploader] batch_id length exceeded 128 chars (was {batchId.Length}), truncating. chunk={chunkPath}");
+                batchId = batchId.Substring(0, 128);
+            }
+
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append("\"session_id\":\"").Append(EscapeJsonString(envelopeSessionId)).Append("\",");
             sb.Append("\"sdk_version\":\"").Append(EscapeJsonString(envelopeSdkVersion)).Append("\",");
             sb.Append("\"schema_version\":").Append(envelopeSchemaVersion).Append(",");
-            sb.Append("\"batch_id\":\"").Append(EscapeJsonString(Path.GetFileNameWithoutExtension(chunkPath))).Append("\",");
+            sb.Append("\"batch_id\":\"").Append(EscapeJsonString(batchId)).Append("\",");
             sb.Append("\"sent_at\":\"").Append(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")).Append("\",");
             sb.Append("\"events\":[").Append(string.Join(",", events)).Append("],");
             sb.Append("\"logs\":[").Append(string.Join(",", logs)).Append("],");
