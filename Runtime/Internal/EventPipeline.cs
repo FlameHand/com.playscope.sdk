@@ -99,10 +99,16 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         internal static int CountTopLevelJsonKeys(string json)
         {
+            // Counts DISTINCT top-level keys. A caller passing
+            // `{"a":1,"a":2,"a":3,...,"a":70}` shouldn't get 70 — System.Text.Json
+            // and the server JSON parser both dedupe last-write-wins, so the
+            // effective key count for cap purposes is 1.
             if (string.IsNullOrEmpty(json)) return 0;
             int depth = 0;
-            int keys = 0;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             bool inString = false;
+            int keyStringStart = -1;
+            string? lastTopLevelKey = null;
             bool keyJustClosed = false;
             for (int i = 0; i < json.Length; i++)
             {
@@ -113,20 +119,35 @@ namespace PlayScopeSdk.Internal
                     if (c == '"')
                     {
                         inString = false;
-                        // peek next non-whitespace
-                        if (depth == 1) keyJustClosed = true;
+                        if (depth == 1 && keyStringStart >= 0)
+                        {
+                            // Capture the key substring (between the opening "
+                            // and the closing " — note keyStringStart points
+                            // to char AFTER the opening quote).
+                            lastTopLevelKey = json.Substring(keyStringStart, i - keyStringStart);
+                            keyJustClosed = true;
+                        }
+                        keyStringStart = -1;
                     }
                     continue;
                 }
                 switch (c)
                 {
-                    case '"': inString = true; break;
+                    case '"':
+                        inString = true;
+                        if (depth == 1) keyStringStart = i + 1;
+                        break;
                     case '{': depth++; break;
                     case '}': depth--; keyJustClosed = false; break;
                     case '[': depth++; break;
                     case ']': depth--; break;
                     case ':':
-                        if (depth == 1 && keyJustClosed) { keys++; keyJustClosed = false; }
+                        if (depth == 1 && keyJustClosed && lastTopLevelKey != null)
+                        {
+                            seen.Add(lastTopLevelKey);
+                            keyJustClosed = false;
+                            lastTopLevelKey = null;
+                        }
                         break;
                     case ',':
                         keyJustClosed = false;
@@ -136,7 +157,7 @@ namespace PlayScopeSdk.Internal
                         break;
                 }
             }
-            return keys;
+            return seen.Count;
         }
 
         internal void EnqueueLog(string level, string message, string? stackTrace = null, string? metadataJson = null)

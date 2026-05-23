@@ -291,7 +291,32 @@ namespace PlayScopeSdk.Internal
                         $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"," +
                         $"\"metadata\":{{\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")}}}}}\n";
 
-                    File.AppendAllText(currentChunk, syntheticLine, new System.Text.UTF8Encoding(false));
+                    // If the prior process died mid-write, the existing
+                    // chunk_current.jsonl may NOT end with '\n'. Appending
+                    // the synthetic line directly would concatenate onto
+                    // the partial last line, producing one corrupt JSONL
+                    // line: the synthetic event_type is silently swallowed
+                    // by UploaderWorker.ExtractRecordType and the recovered
+                    // session stays open. Prepend a newline when the last
+                    // byte isn't already one.
+                    bool needsLeadingNewline = false;
+                    try
+                    {
+                        if (File.Exists(currentChunk))
+                        {
+                            using var fs = new FileStream(currentChunk, FileMode.Open, FileAccess.Read);
+                            if (fs.Length > 0)
+                            {
+                                fs.Seek(-1, SeekOrigin.End);
+                                int last = fs.ReadByte();
+                                needsLeadingNewline = last != '\n';
+                            }
+                        }
+                    }
+                    catch { /* best-effort; default to no prepend */ }
+
+                    var toWrite = needsLeadingNewline ? "\n" + syntheticLine : syntheticLine;
+                    File.AppendAllText(currentChunk, toWrite, new System.Text.UTF8Encoding(false));
                     Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {reason} (last lifecycle state: {lifecycleState ?? "unknown"}, intent: {intent}).");
                 }
                 catch (Exception ex)
