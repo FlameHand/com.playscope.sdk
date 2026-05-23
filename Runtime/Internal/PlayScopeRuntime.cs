@@ -137,6 +137,14 @@ namespace PlayScopeSdk.Internal
         {
             TeardownInternal(emitSessionEnd: false);
             _disabled = true;
+            // Defensive: clear the lifecycle gate so a later Initialize on
+            // the same process (e.g. user retries with corrected settings,
+            // or "Disable Domain Reload" in Editor leaves statics intact
+            // across Play Mode restarts) is not permanently dead-ended by
+            // an in-flight flag that ForceDisable interrupted. Without this,
+            // `Initialize` would see _lifecycleBusy == 1 from the prior
+            // failed run and silently no-op forever.
+            Interlocked.Exchange(ref _lifecycleBusy, 0);
             // Do NOT set _initialized — IsInitialized stays false so API guards return early.
         }
 
@@ -544,11 +552,34 @@ namespace PlayScopeSdk.Internal
             // fires, the rotation finishes first (it's still in the middle of
             // emitting session_end + spinning a new session) and Shutdown gets
             // skipped — that's the correct outcome, the new session's eventual
-            // Shutdown will fire on the OS-driven kill.
-            if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
+            // Shutdown is the last chance to emit session_end before the OS
+            // kills the process. If a rotation is mid-flight, we MUST wait
+            // for it (briefly) rather than silently skipping — the post-
+            // rotation session has no other path to emit its session_end.
+            //
+            // Spin-wait up to ShutdownLockWaitMs for the lock. Unity's
+            // Application.quitting handler does not give us an unbounded
+            // budget (typically <2 s before SIGKILL on iOS / Android), so
+            // we cap the wait at 500 ms — enough for any sane rotation
+            // to finish, short enough that we still have time to write
+            // session_end before the OS pulls the rug.
+            const int ShutdownLockWaitMs = 500;
+            const int SpinSleepMs = 5;
+            int waited = 0;
+            while (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
             {
-                PlayScopeLog.Warning("Shutdown skipped — another lifecycle op is already in flight.");
-                return;
+                if (waited >= ShutdownLockWaitMs)
+                {
+                    PlayScopeLog.Warning(
+                        $"Shutdown: lifecycle lock not released within {ShutdownLockWaitMs} ms — " +
+                        "proceeding anyway, session_end may collide with in-flight rotation.");
+                    // Force the gate so we can run our shutdown — better
+                    // a possible collision than guaranteed missing session_end.
+                    Interlocked.Exchange(ref _lifecycleBusy, 1);
+                    break;
+                }
+                Thread.Sleep(SpinSleepMs);
+                waited += SpinSleepMs;
             }
             try
             {
