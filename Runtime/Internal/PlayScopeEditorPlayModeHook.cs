@@ -1,5 +1,6 @@
 #if UNITY_EDITOR
 using UnityEditor;
+using UnityEngine;
 
 namespace PlayScopeSdk.Internal
 {
@@ -39,10 +40,20 @@ namespace PlayScopeSdk.Internal
         static PlayScopeEditorPlayModeHook()
         {
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+            // Diagnostic — use Debug.Log so it lands in Editor.log even when
+            // PlayScopeLog's min-level is bumped to Warning. Greppable prefix
+            // [PlayScope/diag] so we can isolate from the rest of the log
+            // stream. Remove these once we've confirmed the hook is wired.
+            Debug.Log("[PlayScope/diag] PlayScopeEditorPlayModeHook: static ctor — subscribed to playModeStateChanged.");
         }
 
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
         {
+            // Log EVERY transition so we can see the full sequence in Editor.log:
+            //   ExitingEditMode → EnteringPlayMode → ExitingPlayMode → EnteringEditMode
+            Debug.Log($"[PlayScope/diag] PlayScopeEditorPlayModeHook: state={state} " +
+                $"isInitialized={PlayScopeRuntime.IsInitialized} isDisabled={PlayScopeRuntime.IsDisabled}");
+
             // We need ExitingPlayMode, not ExitingEditMode or EnteringEditMode.
             //
             //   EnteringPlayMode  — user just clicked Play
@@ -60,13 +71,21 @@ namespace PlayScopeSdk.Internal
             {
                 if (PlayScopeRuntime.IsInitialized && !PlayScopeRuntime.IsDisabled)
                 {
+                    Debug.Log("[PlayScope/diag] PlayScopeEditorPlayModeHook: calling PlayScopeRuntime.Shutdown()...");
                     PlayScopeRuntime.Shutdown();
+                    Debug.Log("[PlayScope/diag] PlayScopeEditorPlayModeHook: Shutdown() returned.");
+                }
+                else
+                {
+                    Debug.Log("[PlayScope/diag] PlayScopeEditorPlayModeHook: SKIPPING Shutdown — " +
+                        $"IsInitialized={PlayScopeRuntime.IsInitialized}, IsDisabled={PlayScopeRuntime.IsDisabled}.");
                 }
             }
             catch (System.Exception ex)
             {
                 // Never let an Editor-side hook throw — would block the
                 // Editor's play-mode transition itself.
+                Debug.LogWarning($"[PlayScope/diag] PlayScopeEditorPlayModeHook: Shutdown threw — {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 PlayScopeLog.Warning("PlayScopeEditorPlayModeHook: Shutdown threw", ex);
             }
         }

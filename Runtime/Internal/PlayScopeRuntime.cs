@@ -568,6 +568,7 @@ namespace PlayScopeSdk.Internal
         // Called by PlayScopeMonoBehaviour on application quit / Application.quitting
         internal static void Shutdown()
         {
+            Debug.Log($"[PlayScope/diag] Shutdown() entry — _initialized={_initialized} _disabled={_disabled} _lifecycleBusy={_lifecycleBusy}");
             // Bracket the teardown with the same lifecycle lock as Initialize /
             // PerformRotation. If a rotation is mid-flight when Application.quitting
             // fires, the rotation finishes first (it's still in the middle of
@@ -617,10 +618,16 @@ namespace PlayScopeSdk.Internal
                 Thread.Sleep(SpinSleepMs);
                 waited += SpinSleepMs;
             }
+            Debug.Log($"[PlayScope/diag] Shutdown() lock acquired after {waited} ms — _initialized={_initialized} _disabled={_disabled}");
             try
             {
-                if (!_initialized || _disabled) return;
+                if (!_initialized || _disabled)
+                {
+                    Debug.Log($"[PlayScope/diag] Shutdown() early-return — _initialized={_initialized} _disabled={_disabled} (no session_end will be emitted)");
+                    return;
+                }
                 TeardownInternal(emitSessionEnd: true, endStatus: "normal", reason: "normal");
+                Debug.Log("[PlayScope/diag] Shutdown() TeardownInternal returned.");
             }
             finally
             {
@@ -702,6 +709,7 @@ namespace PlayScopeSdk.Internal
             // unchanged.
             if (emitSessionEnd)
             {
+                Debug.Log($"[PlayScope/diag] TeardownInternal: emitSessionEnd=true endStatus={endStatus} reason={reason} writerIsNull={_writer == null}");
                 if (_writer != null)
                 {
                     var rec = new EventRecord
@@ -739,6 +747,7 @@ namespace PlayScopeSdk.Internal
                     }
                     PlayScopeLog.Info(
                         $"Shutdown: session_end sync-write (end_status={endStatus}, reason={reason}, success={ok}).");
+                    Debug.Log($"[PlayScope/diag] TeardownInternal: WriteCriticalAndFinalizeSync ok={ok}");
                 }
                 else
                 {
@@ -805,6 +814,7 @@ namespace PlayScopeSdk.Internal
             try { SessionFiles.DeleteLifecycleState(); } catch { /* best-effort */ }
             _initialized = false;
             PlayScopeLog.Info("Shutdown complete.");
+            Debug.Log("[PlayScope/diag] Shutdown complete — session.lock + session.lifecycle deleted, _initialized=false.");
         }
 
         // Runtime check beats the compile-time defines because UNITY_ANDROID /
