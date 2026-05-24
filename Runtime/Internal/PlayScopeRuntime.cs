@@ -565,10 +565,16 @@ namespace PlayScopeSdk.Internal
             PlayScopeLog.Info($"Initialized. session_id={CurrentSession.SessionId}, sdk_user_id={Device.SdkUserId}");
         }
 
-        // Called by PlayScopeMonoBehaviour on application quit / Application.quitting
-        internal static void Shutdown()
+        // Called by PlayScopeMonoBehaviour on application quit / Application.quitting.
+        // Default zero drain = mobile path (no extra time spent waiting for HTTP
+        // before _uploader.Stop). Editor playmode hook passes a generous timeout
+        // so the session_end chunk that WriteCriticalAndFinalizeSync just produced
+        // actually ships before the SDK is torn down — without it the chunk sits
+        // on disk until the NEXT play session's SessionRecovery picks it up, and
+        // the dashboard shows the just-finished session as "ongoing".
+        internal static void Shutdown(int uploadDrainTimeoutMs = 0)
         {
-            Debug.Log($"[PlayScope/diag] Shutdown() entry — _initialized={_initialized} _disabled={_disabled} _lifecycleBusy={_lifecycleBusy}");
+            Debug.Log($"[PlayScope/diag] Shutdown(uploadDrainTimeoutMs={uploadDrainTimeoutMs}) entry — _initialized={_initialized} _disabled={_disabled} _lifecycleBusy={_lifecycleBusy}");
             // Bracket the teardown with the same lifecycle lock as Initialize /
             // PerformRotation. If a rotation is mid-flight when Application.quitting
             // fires, the rotation finishes first (it's still in the middle of
@@ -626,7 +632,8 @@ namespace PlayScopeSdk.Internal
                     Debug.Log($"[PlayScope/diag] Shutdown() early-return — _initialized={_initialized} _disabled={_disabled} (no session_end will be emitted)");
                     return;
                 }
-                TeardownInternal(emitSessionEnd: true, endStatus: "normal", reason: "normal");
+                TeardownInternal(emitSessionEnd: true, endStatus: "normal", reason: "normal",
+                    uploadDrainTimeoutMs: uploadDrainTimeoutMs);
                 Debug.Log("[PlayScope/diag] Shutdown() TeardownInternal returned.");
             }
             finally
@@ -655,7 +662,19 @@ namespace PlayScopeSdk.Internal
         /// <c>unknown</c> (recovered, lifecycle file missing — pessimistic
         /// fallback). Backend uses this for the corrected CFS% formula that
         /// excludes swipe-kills from the crash count.</param>
-        private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal", string reason = "normal")
+        /// <param name="uploadDrainTimeoutMs">When &gt; 0, after the writer is
+        /// stopped and the session_end chunk is in the upload queue, run a
+        /// synchronous <see cref="UploaderWorker.DrainPendingBlocking"/> with this
+        /// budget BEFORE disposing the uploader. Zero (the mobile default) keeps
+        /// the legacy behaviour: TriggerInstantUpload + Stop and rely on the
+        /// post-cancel one-shot ProcessQueueAsync pass. The drain is intended for
+        /// the editor stop-button path, where the player loop is dying and
+        /// <see cref="Cysharp.Threading.Tasks.UniTask.Yield"/> would never resume —
+        /// so the async path's final pass never actually uploads the session_end
+        /// chunk and the dashboard shows the just-finished session as
+        /// "ongoing".</param>
+        private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal", string reason = "normal",
+            int uploadDrainTimeoutMs = 0)
         {
             // Unsubscribe Unity log capture (idempotent guard)
             if (_logCaptureSubscribed)
@@ -771,6 +790,29 @@ namespace PlayScopeSdk.Internal
             }
             _writer?.Stop();
             _writer = null;
+
+            // Editor-only: synchronously drain the upload queue before disposing
+            // the uploader. The async run-loop path (TriggerInstantUpload + Stop +
+            // one trailing ProcessQueueAsync) depends on the player loop being
+            // alive — inside ExitingPlayMode it is shutting down and the trailing
+            // pass never gets a chance to ship the just-finalised session_end
+            // chunk. DrainPendingBlocking uses UnityWebRequest with Thread.Sleep
+            // polling, which works without the player loop. Skipped (drainMs=0)
+            // on the mobile Application.quitting path so the existing ~2 s quit
+            // budget on iOS/Android is not encroached on by HTTP I/O.
+            if (uploadDrainTimeoutMs > 0 && _uploader != null)
+            {
+                try
+                {
+                    var drainStart = DateTime.UtcNow;
+                    int shipped = _uploader.DrainPendingBlocking(TimeSpan.FromMilliseconds(uploadDrainTimeoutMs));
+                    Debug.Log($"[PlayScope/diag] TeardownInternal: DrainPendingBlocking shipped={shipped} elapsedMs={(int)(DateTime.UtcNow - drainStart).TotalMilliseconds}");
+                }
+                catch (Exception ex)
+                {
+                    PlayScopeLog.Warning("Shutdown: DrainPendingBlocking threw", ex);
+                }
+            }
 
             // After writer finalizes the session_end chunk it lands in UploadQueue —
             // signal the uploader to flush immediately. The uploader's RunAsync

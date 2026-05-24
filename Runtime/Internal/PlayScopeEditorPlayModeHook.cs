@@ -71,8 +71,17 @@ namespace PlayScopeSdk.Internal
             {
                 if (PlayScopeRuntime.IsInitialized && !PlayScopeRuntime.IsDisabled)
                 {
-                    Debug.Log("[PlayScope/diag] PlayScopeEditorPlayModeHook: calling PlayScopeRuntime.Shutdown()...");
-                    PlayScopeRuntime.Shutdown();
+                    Debug.Log("[PlayScope/diag] PlayScopeEditorPlayModeHook: calling PlayScopeRuntime.Shutdown(drain=10s)...");
+                    // 10 s upload-drain budget. We're not under Unity's ~2 s
+                    // mobile quit deadline here — the editor will happily wait.
+                    // Without this drain, the chunk that WriteCriticalAndFinalizeSync
+                    // just produced (containing session_end) cannot ship: the
+                    // uploader's async loop relies on UniTask.Yield, which never
+                    // resumes once the player loop is in ExitingPlayMode. Result
+                    // before this drain: every editor session showed as "ongoing"
+                    // in the dashboard until *another* play session triggered
+                    // SessionRecovery to ship the previous one's session_end.
+                    PlayScopeRuntime.Shutdown(uploadDrainTimeoutMs: 10000);
                     Debug.Log("[PlayScope/diag] PlayScopeEditorPlayModeHook: Shutdown() returned.");
                 }
                 else

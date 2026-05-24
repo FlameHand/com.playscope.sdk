@@ -258,8 +258,8 @@ namespace PlayScopeSdk.Internal
                 {
                     _passRescued++;
                     PlayScopeLog.Info(
-                        $"Rescued orphan chunk '{chunkName}' to {rescueDest}. " +
-                        "It will upload under its original session_id on the next pass.");
+                        $"Rescued orphan chunk '{chunkName}' to {rescueDest} " +
+                        "and re-enqueued under its original session_id for the next pass.");
                     return;
                 }
 
@@ -411,6 +411,183 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Warning($"HTTP {httpStatus} for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
             else
                 PlayScopeLog.Warning($"Network error for {chunkName}, retry #{state.Attempts} at {nextRetry:o}");
+        }
+
+        // ── Blocking drain (Editor stop-button only) ─────────────────────────────
+
+        /// <summary>
+        /// Synchronous queue drain used when there is no functioning player loop to
+        /// pump the regular async <see cref="RunAsync"/> path — specifically the
+        /// Unity Editor's <c>ExitingPlayMode</c> transition. Walks the in-memory
+        /// queue plus any retryable state-file paths, uploads each chunk over a
+        /// directly-polled <see cref="UnityWebRequest"/>, and applies the same
+        /// success bookkeeping as the async path (state file, .uploaded marker,
+        /// chunk delete).
+        ///
+        /// <para>
+        /// Why not just await the existing async pass: <see cref="UniTask.Yield"/>
+        /// requires the Unity player loop to keep ticking. Inside
+        /// <c>ExitingPlayMode</c> the player loop is shutting down, so the await
+        /// never resumes and the session_end chunk that <see cref="WriterWorker.WriteCriticalAndFinalizeSync"/>
+        /// just finalised never gets uploaded. <see cref="UnityWebRequest"/>'s
+        /// native networking does NOT depend on the player loop — its
+        /// <c>isDone</c> flag flips from the engine HTTP thread regardless — so a
+        /// plain <c>while (!op.isDone) Thread.Sleep(20)</c> works in this context.
+        /// </para>
+        ///
+        /// <para>
+        /// <paramref name="totalTimeout"/> is a hard budget across ALL chunks in the
+        /// queue (not per-chunk). When it expires, any remaining chunks stay on
+        /// disk and are picked up by <see cref="SessionRecovery"/> on the next
+        /// launch — same fallback as the regular async path.
+        /// </para>
+        ///
+        /// <para>
+        /// Returns the count of successful uploads. Intended for instrumentation;
+        /// callers don't need to act on a partial drain because the next-launch
+        /// recovery path covers the gap.
+        /// </para>
+        /// </summary>
+        internal int DrainPendingBlocking(TimeSpan totalTimeout)
+        {
+            var deadline = DateTime.UtcNow + totalTimeout;
+
+            // Same path sources as ProcessQueueAsync — keep the two in lock-step
+            // so a chunk that the async path would have uploaded is also visible
+            // to this drain.
+            var paths = new List<string>();
+            while (_queue.TryDequeue(out var p)) paths.Add(p!);
+            GatherRetryablePaths(paths);
+            if (paths.Count == 0) return 0;
+
+            PlayScopeLog.Info($"UploaderWorker: blocking drain starting with {paths.Count} chunk(s), budget {totalTimeout.TotalSeconds:F1}s.");
+
+            int uploaded = 0;
+            var endpoint = (_context.UploadEndpoint?.TrimEnd('/') ?? "https://api.playscope.dev") + "/v1/ingest";
+
+            foreach (var chunkPath in paths)
+            {
+                if (DateTime.UtcNow >= deadline) break;
+                if (!File.Exists(chunkPath)) continue;
+
+                var chunkName = Path.GetFileName(chunkPath);
+                var stateFilePath = Path.Combine(PlayScopeDirectory.UploadQueue, chunkName + ".state.json");
+                var state = LoadState(stateFilePath) ?? new UploadState { ChunkId = chunkName, CreatedAt = DateTime.UtcNow };
+                if (!state.CreatedAt.HasValue) state.CreatedAt = DateTime.UtcNow;
+
+                byte[] payload;
+                try
+                {
+                    payload = BuildGzipPayload(chunkPath);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // Foreign short-id → run the same rescue path the async loop
+                    // uses. After rescue the chunk lives under completed_sessions/
+                    // and is enqueued (post-Fix-A) — but THIS drain pass already
+                    // captured its paths list, so the rescued chunk will only be
+                    // visible to the NEXT drain. In editor we run only one drain
+                    // per Stop, so the rescued chunk waits for the next launch's
+                    // SessionRecovery — same outcome as before Fix-A for this
+                    // narrow edge case.
+                    if (TryRescueOrphanChunk(chunkPath, stateFilePath, out var rescueDest))
+                    {
+                        PlayScopeLog.Info($"DrainPendingBlocking: rescued '{chunkName}' to {rescueDest}.");
+                        continue;
+                    }
+                    PlayScopeLog.Warning($"DrainPendingBlocking: orphan chunk {chunkName}: {ex.Message} — moving to dead letter.");
+                    MoveToDeadLetter(chunkPath, stateFilePath);
+                    continue;
+                }
+                catch (Exception ex)
+                {
+                    PlayScopeLog.Warning($"DrainPendingBlocking: build payload failed for {chunkName}: {ex.Message}");
+                    continue;
+                }
+
+                var perChunkBudget = deadline - DateTime.UtcNow;
+                if (perChunkBudget <= TimeSpan.Zero) break;
+
+                state.Attempts++;
+                state.LastAttemptAt = DateTime.UtcNow;
+                SaveState(stateFilePath, state);
+
+                int httpStatus;
+                try
+                {
+                    httpStatus = SendRequestBlocking(endpoint, payload, perChunkBudget);
+                }
+                catch (Exception ex)
+                {
+                    PlayScopeLog.Warning($"DrainPendingBlocking: network error for {chunkName}: {ex.Message} — will retry next launch");
+                    continue;
+                }
+
+                if (httpStatus >= 200 && httpStatus < 300)
+                {
+                    // Mirror UploadChunkAsync's two-phase success bookkeeping: durable
+                    // signals first (state.IsUploaded + .uploaded marker), then the
+                    // chunk delete. Keeps SessionRecovery on the next launch from
+                    // re-uploading a chunk we already shipped.
+                    state.IsUploaded = true;
+                    SaveState(stateFilePath, state);
+                    bool markerWritten = false;
+                    try { File.WriteAllText(chunkPath + ".uploaded", "1"); markerWritten = true; }
+                    catch (Exception ex) { PlayScopeLog.Warning($"DrainPendingBlocking: marker write failed for {chunkName}: {ex.Message}"); }
+                    TryDeleteFile(chunkPath);
+                    if (markerWritten && !File.Exists(chunkPath)) TryDeleteFile(chunkPath + ".uploaded");
+                    TryDeleteFile(stateFilePath);
+                    uploaded++;
+                    PlayScopeLog.Info($"DrainPendingBlocking: uploaded {chunkName} → HTTP {httpStatus}");
+                }
+                else
+                {
+                    PlayScopeLog.Warning($"DrainPendingBlocking: {chunkName} → HTTP {httpStatus} — will retry next launch");
+                }
+            }
+
+            PlayScopeLog.Info($"UploaderWorker: blocking drain done. uploaded={uploaded}/{paths.Count} elapsed={(DateTime.UtcNow - (deadline - totalTimeout)).TotalSeconds:F1}s.");
+            return uploaded;
+        }
+
+        /// <summary>
+        /// Synchronous variant of <see cref="SendRequestAsync"/>. Same headers and
+        /// success/failure semantics, but polls <c>op.isDone</c> with
+        /// <see cref="Thread.Sleep"/> instead of <c>await UniTask.Yield()</c> so it
+        /// works without a ticking player loop. Throws <see cref="TimeoutException"/>
+        /// when the per-chunk budget runs out.
+        /// </summary>
+        private int SendRequestBlocking(string url, byte[] gzipBody, TimeSpan timeout)
+        {
+            using var request = new UnityWebRequest(url, "POST");
+            request.uploadHandler = new UploadHandlerRaw(gzipBody);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.SetRequestHeader("Content-Encoding", "gzip");
+            request.SetRequestHeader("Authorization", "Bearer " + _context.SdkKey);
+
+            var op = request.SendWebRequest();
+            var deadline = DateTime.UtcNow + timeout;
+            while (!op.isDone && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(20);
+            }
+
+            if (!op.isDone)
+            {
+                try { request.Abort(); } catch { /* best-effort */ }
+                throw new TimeoutException($"upload exceeded {timeout.TotalSeconds:F1}s");
+            }
+
+#if UNITY_2020_1_OR_NEWER
+            if (request.result == UnityWebRequest.Result.ConnectionError ||
+                request.result == UnityWebRequest.Result.DataProcessingError)
+                throw new Exception(request.error);
+#else
+            if (request.isNetworkError)
+                throw new Exception(request.error);
+#endif
+            return (int)request.responseCode;
         }
 
         // ── HTTP ──────────────────────────────────────────────────────────────────
@@ -689,12 +866,26 @@ namespace PlayScopeSdk.Internal
         /// Last-chance rescue for a chunk with foreign short-id that SessionRecovery
         /// failed to relocate. Scans <c>completed_sessions/*/session.json</c> for a
         /// manifest whose session_id starts with the chunk's short-id; if found, moves
-        /// the chunk INTO that folder so the next upload pass attributes it correctly
-        /// via the existing completed_sessions code path. Best-effort — returns false
-        /// (and leaves the chunk untouched) if no matching manifest exists or any IO
-        /// step fails. The caller falls back to dead-letter on false.
+        /// the chunk INTO that folder and ENQUEUES the new path so the next
+        /// ProcessQueueAsync pass picks it up under the correct envelope identity.
+        /// Best-effort — returns false (and leaves the chunk untouched) if no matching
+        /// manifest exists or any IO step fails. The caller falls back to dead-letter
+        /// on false.
+        ///
+        /// <para>
+        /// Instance (not static) so it can re-enqueue via <see cref="_queue"/>. Until
+        /// 2026-05-25 this was static and only moved the file — the
+        /// "upload under its original session_id on the next pass" promise in the
+        /// previous comment was a lie: <see cref="ProcessQueueAsync"/>'s path sources
+        /// are <c>_queue.TryDequeue</c> and <c>GatherRetryablePaths</c> (which only
+        /// scans the upload-queue dir, NOT completed_sessions). Rescued chunks
+        /// containing session_end stayed stranded until *another* session start
+        /// happened to trigger <c>SessionRecovery.EnqueueCompletedSessions</c> —
+        /// in the editor that meant the most recent session's session_end never
+        /// reached the dashboard and the session showed as "ongoing" indefinitely.
+        /// </para>
         /// </summary>
-        private static bool TryRescueOrphanChunk(string chunkPath, string stateFilePath, out string destPath)
+        private bool TryRescueOrphanChunk(string chunkPath, string stateFilePath, out string destPath)
         {
             destPath = "";
             try
@@ -753,6 +944,13 @@ namespace PlayScopeSdk.Internal
                     // state on the next attempt. Leaving the stale one around would
                     // mis-anchor the retry TTL.
                     TryDeleteFile(stateFilePath);
+                    // Re-enqueue under the new path so the very next pass uploads it
+                    // (without this, the rescued chunk waited for another session
+                    // start to run SessionRecovery.EnqueueCompletedSessions — which
+                    // in the editor "play two sessions then close" scenario meant
+                    // every session_end stayed on disk forever and the dashboard
+                    // stuck the session at "ongoing").
+                    _queue.Enqueue(dest);
                     destPath = dest;
                     return true;
                 }
