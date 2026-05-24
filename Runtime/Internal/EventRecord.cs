@@ -6,9 +6,12 @@ namespace PlayScopeSdk.Internal
     internal enum RecordType { Event, Log, Metric }
 
     // Indicates whether this record triggers critical flush. Critical records
-    // finalize the current chunk immediately (WriterWorker calls
-    // OnCriticalChunkFinalized → instant upload) so the signal lands
-    // server-side even if the process dies seconds later. anr/anr_recovered
+    // finalize the current chunk immediately (the WriterWorker run-loop calls
+    // FinalizeChunk for them right away; non-critical records flush at the
+    // size / time threshold). The instant-upload wake is fired from inside
+    // FinalizeChunkInternal itself for every finalization path, so the
+    // signal lands server-side even if the process dies seconds later.
+    // anr/anr_recovered
     // are critical for the same reason errors are: if the OS kills the app
     // during the freeze the anr_recovered event never comes and we want at
     // least the anr entry event already on the wire.

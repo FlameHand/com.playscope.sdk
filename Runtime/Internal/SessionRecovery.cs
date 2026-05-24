@@ -286,10 +286,29 @@ namespace PlayScopeSdk.Internal
                               _ => "unknown",
                           };
 
+                    // Player swipes the app from recents OR OS evicts a
+                    // backgrounded process to reclaim memory — both are the
+                    // normal way a mobile session ends. Lumping them under
+                    // "abnormal" floods the dashboard with red on every
+                    // session and drags Crash-Free Sessions% down to ~zero.
+                    // Only foreground death (likely crash / ANR) and the
+                    // unknown fallback (lifecycle file missing — pessimistic)
+                    // get the abnormal classification.
+                    //
+                    // The event_type drives backend's EndStatus directly
+                    // (IngestionService maps session_end→normal,
+                    // session_abnormal_end→abnormal), so flipping the event
+                    // name is sufficient. We also stamp end_status into
+                    // metadata so any consumer reading the raw event line
+                    // gets the same answer without a second mapping table.
+                    var isNormalEnd = reason is "user_close" or "background_kill";
+                    var eventType = isNormalEnd ? "session_end" : "session_abnormal_end";
+                    var endStatus = isNormalEnd ? "normal" : "abnormal";
+
                     var syntheticLine =
-                        $"{{\"record_type\":\"event\",\"event_type\":\"session_abnormal_end\"," +
+                        $"{{\"record_type\":\"event\",\"event_type\":\"{eventType}\"," +
                         $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"," +
-                        $"\"metadata\":{{\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")}}}}}\n";
+                        $"\"metadata\":{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")},\"synthesized_by\":\"session_recovery\"}}}}\n";
 
                     // If the prior process died mid-write, the existing
                     // chunk_current.jsonl may NOT end with '\n'. Appending
@@ -317,7 +336,7 @@ namespace PlayScopeSdk.Internal
 
                     var toWrite = needsLeadingNewline ? "\n" + syntheticLine : syntheticLine;
                     File.AppendAllText(currentChunk, toWrite, new System.Text.UTF8Encoding(false));
-                    Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {reason} (last lifecycle state: {lifecycleState ?? "unknown"}, intent: {intent}).");
+                    Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {endStatus}/{reason} (last lifecycle state: {lifecycleState ?? "unknown"}, intent: {intent}).");
                 }
                 catch (Exception ex)
                 {
@@ -376,12 +395,30 @@ namespace PlayScopeSdk.Internal
             // UploaderWorker uses for ownership checks.
             if (File.Exists(currentChunk))
             {
-                var shortId = ExtractShortId(sessionId);
-                var renamedName = !string.IsNullOrEmpty(shortId)
-                    ? $"chunk_{shortId}_recovered.jsonl"
-                    : "chunk_current_recovered.jsonl";
-                var destName = Path.Combine(destDir, renamedName);
-                TryMoveFile(currentChunk, destName);
+                // Skip renaming when chunk_current ended up empty — happens if
+                // FlushImmediate finalized everything cleanly into chunk_NNNNNN
+                // before the kill AND the synthetic-event append step above
+                // either was skipped (sessionEndFound=true) or silently threw
+                // (catch swallowed). Without this guard we'd create a 0-byte
+                // chunk_XX_recovered.jsonl, upload it as an empty batch, and
+                // pollute IngestBatches with a row that carries no payload.
+                bool isEmpty = false;
+                try { isEmpty = new FileInfo(currentChunk).Length == 0; }
+                catch { /* size unknown — fall through and try to move */ }
+
+                if (isEmpty)
+                {
+                    try { File.Delete(currentChunk); } catch { /* best-effort */ }
+                }
+                else
+                {
+                    var shortId = ExtractShortId(sessionId);
+                    var renamedName = !string.IsNullOrEmpty(shortId)
+                        ? $"chunk_{shortId}_recovered.jsonl"
+                        : "chunk_current_recovered.jsonl";
+                    var destName = Path.Combine(destDir, renamedName);
+                    TryMoveFile(currentChunk, destName);
+                }
             }
 
             // Move all other .jsonl files

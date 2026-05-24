@@ -345,8 +345,17 @@ namespace PlayScopeSdk.Internal
                 //      chunk + the now-redundant marker + the state file.
                 state.IsUploaded = true;
                 SaveState(stateFilePath, state);
-                var sizeKB = (long)0;
-                try { sizeKB = new FileInfo(chunkPath).Length / 1024; } catch { /* best-effort */ }
+                long sizeBytes = 0;
+                try { sizeBytes = new FileInfo(chunkPath).Length; } catch { /* best-effort */ }
+                // Show bytes when <1 KB. The old "(0 KB)" rounding was
+                // mistaken for "empty chunk" during debugging because a
+                // synthetic session_end event line is typically ~300-500
+                // bytes — it carries real signal but looked like garbage
+                // in the log. Threshold of 1024 bytes keeps the existing
+                // "(N KB)" output for any normal chunk.
+                var sizeLabel = sizeBytes >= 1024
+                    ? $"{sizeBytes / 1024} KB"
+                    : $"{sizeBytes} B";
                 bool markerWritten = false;
                 try
                 {
@@ -370,7 +379,7 @@ namespace PlayScopeSdk.Internal
                 // Per-chunk Info — visible when MinLogLevel=Info. Gives an
                 // explicit "the upload pipeline actually works" signal
                 // during integration / debugging. Suppressed at Warning+.
-                PlayScopeLog.Info($"Uploaded {chunkName} ({sizeKB} KB) → HTTP {httpStatus}");
+                PlayScopeLog.Info($"Uploaded {chunkName} ({sizeLabel}) → HTTP {httpStatus}");
                 return;
             }
 

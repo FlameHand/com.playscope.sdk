@@ -348,8 +348,11 @@ namespace PlayScopeSdk.Internal
             Pipeline.SetLogDedupBuffer(LogDedupBuffer);
             _writer = new WriterWorker(Queue, UploadQueue, CurrentSession);
             _uploader = new UploaderWorker(context, CurrentSession, UploadQueue);
-            // When the writer finalizes a chunk due to a critical event, wake the uploader immediately
-            _writer.OnCriticalChunkFinalized = () => _uploader?.TriggerInstantUpload();
+            // Wake the uploader the moment any chunk lands in the queue — no
+            // longer limited to critical-event finalizations. Covers pause /
+            // shutdown / size-split paths so an in-session chunk never sits
+            // on disk for ~30 s waiting on the polling tick.
+            _writer.OnChunkFinalized = () => _uploader?.TriggerInstantUpload();
             _writer.Start();
 
             _uploader.Start();

@@ -36,10 +36,16 @@ namespace PlayScopeSdk.Internal
         private const long BatchSplitBytes = 1_048_576; // 1 MB
 
         /// <summary>
-        /// Optional callback invoked whenever a chunk is finalized due to a critical record.
-        /// Used by PlayScopeRuntime to trigger an instant upload cycle.
+        /// Optional callback invoked whenever a chunk is finalized — by a
+        /// critical record, by a 1 MB size split, by FlushImmediate on
+        /// background, or by DrainAndFinalize on shutdown. PlayScopeRuntime
+        /// wires this to <see cref="UploaderWorker.TriggerInstantUpload"/> so
+        /// the uploader wakes immediately instead of sleeping out the
+        /// remainder of its 30 s polling window. Idempotent on the uploader
+        /// side (semaphore release only if count is 0) so firing on every
+        /// finalize is safe.
         /// </summary>
-        internal Action? OnCriticalChunkFinalized;
+        internal Action? OnChunkFinalized;
 
         internal WriterWorker(EventQueue queue, UploadQueue uploadQueue, SessionInfo session)
         {
@@ -232,7 +238,9 @@ namespace PlayScopeSdk.Internal
                 {
                     FinalizeChunk();
                     StorageQuotaManager.EnforceQuota();
-                    OnCriticalChunkFinalized?.Invoke();
+                    // Wake-up signal is fired from inside FinalizeChunkInternal
+                    // now (covers FlushImmediate / DrainAndFinalize /
+                    // size-split paths too), so we don't fire it again here.
                 }
             }
         }
@@ -325,11 +333,13 @@ namespace PlayScopeSdk.Internal
             _chunkCounter++;
             var finalName = Path.Combine(PlayScopeDirectory.Chunks,
                 $"chunk_{_session.SessionShortId}_{_chunkCounter:D6}.jsonl");
+            bool enqueued = false;
             try
             {
                 File.Move(currentPath, finalName);
                 _uploadQueue.Enqueue(finalName);
                 StorageQuotaManager.NotifyChunkFinalized(finalName);
+                enqueued = true;
             }
             catch (Exception ex)
             {
@@ -337,6 +347,22 @@ namespace PlayScopeSdk.Internal
             }
             EnsureCurrentChunk();
             _currentChunkSize = 0;
+
+            // Wake the uploader the instant any chunk lands in the queue,
+            // not at the next 30 s poll. The old behaviour meant a
+            // FlushImmediate-on-background that produced a real chunk could
+            // wait up to 30 s on the uploader's WaitAsync — and if the user
+            // swipe-killed the app within those 30 s, the chunk shipped only
+            // on the NEXT launch via SessionRecovery. With this hook every
+            // finalization (size-split / pause / quit / critical-event)
+            // triggers an immediate upload attempt. Safe to fire on every
+            // path: UploaderWorker.TriggerInstantUpload is a no-op when a
+            // pass is already queued.
+            if (enqueued)
+            {
+                try { OnChunkFinalized?.Invoke(); }
+                catch (Exception ex) { PlayScopeLog.Warning("OnChunkFinalized handler threw", ex); }
+            }
         }
 
         private void EnsureCurrentChunk()
