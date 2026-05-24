@@ -268,8 +268,27 @@ namespace PlayScopeSdk.Internal
                 //   unknown          → counts as crashed (legacy / lifecycle file missing — pessimistic so we don't hide real crashes)
                 try
                 {
-                    var heartbeat = ReadLastHeartbeat(PlayScopeDirectory.SessionHb);
-                    var timestamp = heartbeat ?? DateTime.UtcNow.ToString("o");
+                    // Timestamp for the synthetic session_end:
+                    //
+                    // Heartbeat is initialised to session-start time inside
+                    // WriteNewSession and only refreshed every 30s by
+                    // HeartbeatWorker. For any session that died inside that
+                    // first heartbeat window the on-disk value is EQUAL to
+                    // session-start to the microsecond — the backend then
+                    // set EndedAt = StartedAt and the dashboard showed
+                    // Duration=0s on every short session (reproduced
+                    // 2026-05-24 on 3/3 swipe-kill tests).
+                    //
+                    // DateTime.UtcNow at recovery time is the moment the NEW
+                    // session is about to start — by definition strictly
+                    // greater than when the OLD session ended. Using it as
+                    // the synthetic end timestamp overestimates the actual
+                    // end-of-play by the recovery latency (a few seconds for
+                    // immediate relaunch, longer if the player waited), which
+                    // is acceptable: average session is minutes, the few-
+                    // second tail is statistical noise. Always-correct
+                    // Duration > 0 is worth the tiny overestimate.
+                    var timestamp = DateTime.UtcNow.ToString("o");
                     var safeSessionId = sessionId ?? "";
 
                     var (lifecycleState, _, intent) = Core.Session.SessionFiles.TryReadLifecycleState();
@@ -305,8 +324,28 @@ namespace PlayScopeSdk.Internal
                     var eventType = isNormalEnd ? "session_end" : "session_abnormal_end";
                     var endStatus = isNormalEnd ? "normal" : "abnormal";
 
+                    // sequence_num MUST sort strictly after every real event
+                    // the session emitted; without an explicit value the JSON
+                    // omits the field, the backend DTO defaults to 0, and the
+                    // synthetic session_end ties with the real session_start
+                    // (also sequence_num=0). The ClickHouse timeline view
+                    // orders by sequence_num ASC and the tie placed the
+                    // synthetic FIRST, so the dashboard rendered session_end
+                    // before session_start. Backend caps sequence_num at
+                    // int.MaxValue (rejects anything larger), and the per-
+                    // session event cap is 10 000 — int.MaxValue - 1 sits
+                    // comfortably above any real event but inside the
+                    // accepted range. Mirrors the AbandonedSessionWorker
+                    // strategy of using a high baseSeq for synthetic rows.
+                    const long SyntheticSequenceNum = int.MaxValue - 1;
+                    // event_id was previously omitted → backend stored "" and
+                    // any dashboard / agent-support query that joins / dedups
+                    // on event_id treated every synthetic event as colliding.
+                    var eventId = Guid.NewGuid().ToString("N");
+
                     var syntheticLine =
                         $"{{\"record_type\":\"event\",\"event_type\":\"{eventType}\"," +
+                        $"\"event_id\":\"{eventId}\",\"sequence_num\":{SyntheticSequenceNum}," +
                         $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"," +
                         $"\"metadata\":{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")},\"synthesized_by\":\"session_recovery\"}}}}\n";
 
