@@ -56,35 +56,11 @@ namespace PlayScopeSdk.Internal
         // back).
         private static long _lastBackgroundStartTicks;
 
-        // Pipeline-wide write gate. Flipped to FALSE the moment a rotation
-        // is scheduled in RecordLifecycle, restored to TRUE once
-        // PerformRotation has finished tearing down the old session and
-        // re-initialised. Closes the ~1-frame race window between
-        // OnApplicationPause(false) and the next MonoBehaviour.Update tick
-        // where Application.lowMemory + wrapper Update code can fire and
-        // get their events stamped into the dead-old session — observed
-        // bug repro 2026-05-25: memory_warning + operation_start landed in
-        // a session that was about to be closed with end_reason=
-        // background_timeout, distorting both its event count and its
-        // duration.
-        //
-        // EventPipeline.Enqueue* checks this; reads on every event hot
-        // path so it's volatile, not behind a lock.
-        //
-        // CRITICAL: session_start and session_end MUST bypass this gate —
-        // they are part of the session lifecycle CONTRACT, not analytics.
-        // session_end already bypasses (TeardownInternal builds the record
-        // and hands it to WriterWorker.WriteCriticalAndFinalizeSync, not
-        // Pipeline). session_start does the same — see EmitSessionStart
-        // below. Repro of the previous regression: when this gate stayed
-        // closed across PerformRotation→InitializeLocked, the rotated
-        // session's session_start fell through Pipeline.EnqueueEvent's
-        // early return and the dashboard showed the new session with
-        // empty AppVersion / Platform / DeviceModel / OsVersion (observed
-        // 2026-05-25, session 2350f692-9a52-437b-86a8-7ae1d10c5d7d).
-        // Reset alongside the rest of session-scoped state in
-        // InitializeLocked so any Initialize path (rotation, test runner,
-        // Editor with disabled domain reload) starts coherent.
+        // Pipeline write gate, closed by RecordLifecycle for the rotation
+        // race window so wrapper events can't land in the doomed old session.
+        // session_start / session_end bypass it via direct WriterWorker writes
+        // — they're contract, not analytics. Volatile: hot-path read in
+        // EventPipeline.Enqueue*.
         internal static volatile bool _acceptingEvents = true;
 
         // Network reachability watchdog — sampled by MetricsSampler. When the
@@ -283,14 +259,8 @@ namespace PlayScopeSdk.Internal
             // RotateSession ran AND the MonoBehaviour managed to schedule a
             // SECOND rotation in the same frame (impossible today, defensive).
             _pendingRotation = false;
-            // Re-open the Pipeline write gate. RecordLifecycle closes it the
-            // moment a rotation is scheduled; PerformRotation's finally block
-            // already restores it on the normal path, but resetting it here
-            // makes EVERY Initialize entry — first-ever, rotation, test
-            // runner re-init, ForceDisable→retry — start with a coherent
-            // gate. Without this, an InitializeLocked that throws midway
-            // (before PerformRotation's finally runs) would strand the SDK
-            // silently dropping every event forever.
+            // Reset so an Initialize after a thrown rotation can't strand
+            // the gate closed.
             _acceptingEvents = true;
             SequenceCounter.Reset();
             // Reset coalescer state — both are static singletons that survive
@@ -492,42 +462,11 @@ namespace PlayScopeSdk.Internal
             // so the ordering here is intentional.
             _initialized = true;
 
-            // session_start emission — DIRECT WRITE, bypassing Pipeline.
-            //
-            // session_start is part of the session-lifecycle CONTRACT, not
-            // analytics: without it the backend's Session row has no
-            // AppVersion / Platform / DeviceModel / OsVersion / SdkUserId,
-            // and the dashboard renders the session as a blank stub. The
-            // matching session_end already takes the direct-write path
-            // (TeardownInternal → WriterWorker.WriteCriticalAndFinalizeSync)
-            // for the same reason. Symmetric treatment here makes both
-            // ends of the contract indestructible to gate / pipeline
-            // changes — a regression where Pipeline.EnqueueEvent silently
-            // drops the call (e.g. _acceptingEvents stuck closed, queue
-            // not yet wired, Pipeline null after partial init) cannot
-            // lose session_start.
-            //
-            // Concrete repro that drove this design: 2026-05-25 background
-            // rotation closed _acceptingEvents in RecordLifecycle and
-            // PerformRotation reopened it only AFTER InitializeLocked
-            // returned. The rotated session's session_start fell through
-            // EventPipeline.EnqueueEvent's early-return on line 57; the
-            // dashboard showed empty metadata for session
-            // 2350f692-9a52-437b-86a8-7ae1d10c5d7d.
-            //
-            // is_editor / is_development_build are *intrinsic* to where the
-            // SDK is running and we set them ourselves — no user override.
-            // The dashboard slices on these to keep developer play-mode noise
-            // out of production CFS% / crash-free calculations. Without an
-            // explicit flag, an Editor crash spike during dev would silently
-            // drag the customer's reported crash-free user number down.
-            //
-            // environment is a *labelled* string the user can override via
-            // PlayScopeContext.Metadata for staging / canary / etc.; if not
-            // overridden we derive it from Debug.isDebugBuild so default
-            // behaviour matches what people actually mean (developers
-            // shouldn't have to remember to set environment="development"
-            // every time they hit Build).
+            // is_editor / is_development_build are intrinsic — set by us, no
+            // user override. Dashboard slices on them to keep editor / dev-build
+            // noise out of customer-facing CFS% aggregates.
+            // environment is user-overridable via PlayScopeContext.Metadata;
+            // default derived from Debug.isDebugBuild.
             bool isEditor           = UnityEngine.Application.isEditor;
             bool isDevelopmentBuild = UnityEngine.Debug.isDebugBuild;
 
@@ -554,44 +493,17 @@ namespace PlayScopeSdk.Internal
                 ["device_model"] = UnityEngine.SystemInfo.deviceModel,
                 ["os_version"] = UnityEngine.SystemInfo.operatingSystem,
                 ["sdk_version"] = SdkVersion,
-                // sdk_user_id duplicated into session_start metadata so the
-                // backend's resolvedSdkUserId fallback chain (existing-row
-                // SdkUserId → this batch's session_start metadata → empty)
-                // has a value to use for the first-batch INSERT path. The
-                // Pipeline emission stamped this implicitly via the envelope;
-                // the direct-write path doesn't go through the envelope
-                // builder so we put it in metadata explicitly. Both paths
-                // converge to the same backend column.
+                // Direct-write path skips envelope sdk_user_id stamping — include here.
                 ["sdk_user_id"] = Device.SdkUserId,
-                // Verification flag for the native lifecycle hook (Java
-                // ActivityLifecycleCallbacks on Android / WillTerminate
-                // observer on iOS). Stamped here so the dashboard can
-                // tell at a glance whether the hook landed in the build
-                // without needing adb logcat / Console.app access. When
-                // false, lifecycle_hook_error carries the reason
-                // (class_not_found / dllimport_not_found / install_exception).
+                // false → lifecycle_hook_error below carries the reason.
                 ["lifecycle_hook_installed"] = NativeLifecycleBridge.IsInstalled,
             };
             if (!NativeLifecycleBridge.IsInstalled && !string.IsNullOrEmpty(NativeLifecycleBridge.LastError))
                 sessionMeta["lifecycle_hook_error"] = NativeLifecycleBridge.LastError;
 
-            // Direct-write path. Build EventRecord ourselves (mirroring
-            // TeardownInternal's session_end) and hand it to the writer's
-            // synchronous sink. Finalizing the chunk immediately means
-            // session_start uploads ASAP — backend gets metadata within
-            // seconds of session start, so even a session that dies in
-            // the first few hundred ms (low-memory background kill on the
-            // very first frame) leaves a populated Session row instead of
-            // a blank stub. One extra tiny chunk per session is a fair
-            // trade for that.
-            //
-            // _writer was created in Step 6/7 above and is non-null on
-            // every path that reaches this line (any earlier failure
-            // returns from InitializeLocked before _initialized=true).
-            // Sync call is acceptable here: Initialize is already doing
-            // serial disk work (session.json, lifecycle file), the user
-            // has invoked it expecting a brief initialisation cost, and
-            // there is no quitting-budget concern like in TeardownInternal.
+            // Symmetric with session_end in TeardownInternal — direct-write
+            // bypasses Pipeline so the gate / null-Pipeline / queue-not-wired
+            // can't lose the lifecycle marker.
             if (_writer != null)
             {
                 var sessionStartRec = new EventRecord
@@ -604,40 +516,19 @@ namespace PlayScopeSdk.Internal
                     MetadataJson = EventPipeline.DictToJson(sessionMeta),
                     IsCritical = true,
                 };
-                bool ok = _writer.WriteCriticalAndFinalizeSync(sessionStartRec);
-                if (!ok)
+                if (!_writer.WriteCriticalAndFinalizeSync(sessionStartRec))
                 {
-                    PlayScopeLog.Warning(
-                        "session_start direct-write failed — Session row metadata will be empty " +
-                        "until a subsequent batch carrying late-arriving metadata enriches it " +
-                        "(currently no such path exists from the SDK side).");
+                    PlayScopeLog.Warning("session_start direct-write failed — Session row metadata will be empty.");
                 }
             }
             else
             {
-                PlayScopeLog.Warning(
-                    "session_start skipped — WriterWorker is null at end of InitializeLocked. " +
-                    "This is an unreachable branch; if you see this, the init order has regressed.");
+                PlayScopeLog.Warning("session_start skipped — WriterWorker null after init (unreachable).");
             }
 
-            // app_update_detected — compare Application.version with the value
-            // PlayerPrefs remembered last time the app ran. We emit only on a
-            // real version change (first-ever install is silent — there's no
-            // "previous" to compare against and pretending otherwise would
-            // pollute the dashboard with a synthetic update for every fresh
-            // install). Persist FIRST then emit so a save failure can't
-            // double-emit on the next launch.
-            //
-            // Note: this still goes through Pipeline.EnqueueEvent and is
-            // therefore gated by _acceptingEvents. After the gate-reset
-            // fix above the gate is OPEN by this line, so the emission
-            // lands. The reason it's not promoted to the direct-write
-            // path (like session_start) is that app_update_detected is
-            // analytics, not contract — losing one on a rare race won't
-            // corrupt any dashboard view, just drops a single timeline
-            // row. If we later observe drops in practice, this is a
-            // straightforward follow-up: build EventRecord here and
-            // hand to _writer.WriteCriticalAndFinalizeSync.
+            // app_update_detected — emit only on a real version change.
+            // First-ever install is silent (no prior version to compare).
+            // Persist BEFORE emit so a save failure can't double-emit next launch.
             try
             {
                 var currentVersion = UnityEngine.Application.version ?? "";
@@ -645,10 +536,6 @@ namespace PlayScopeSdk.Internal
                 var versionChanged = lastSeenVersion != currentVersion;
                 if (versionChanged)
                 {
-                    // Persist the new value BEFORE emitting. If the save throws
-                    // here, the catch suppresses the emit too — better to skip
-                    // one update event than to repeat it on every launch until
-                    // PlayerPrefs recovers.
                     UnityEngine.PlayerPrefs.SetString(LastSeenAppVersionPrefKey, currentVersion);
                     UnityEngine.PlayerPrefs.Save();
                     if (!string.IsNullOrEmpty(lastSeenVersion))
