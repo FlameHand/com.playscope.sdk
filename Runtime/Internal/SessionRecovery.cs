@@ -268,27 +268,18 @@ namespace PlayScopeSdk.Internal
                 //   unknown          → counts as crashed (legacy / lifecycle file missing — pessimistic so we don't hide real crashes)
                 try
                 {
-                    // Timestamp for the synthetic session_end:
-                    //
-                    // Heartbeat is initialised to session-start time inside
-                    // WriteNewSession and only refreshed every 30s by
-                    // HeartbeatWorker. For any session that died inside that
-                    // first heartbeat window the on-disk value is EQUAL to
-                    // session-start to the microsecond — the backend then
-                    // set EndedAt = StartedAt and the dashboard showed
-                    // Duration=0s on every short session (reproduced
-                    // 2026-05-24 on 3/3 swipe-kill tests).
-                    //
-                    // DateTime.UtcNow at recovery time is the moment the NEW
-                    // session is about to start — by definition strictly
-                    // greater than when the OLD session ended. Using it as
-                    // the synthetic end timestamp overestimates the actual
-                    // end-of-play by the recovery latency (a few seconds for
-                    // immediate relaunch, longer if the player waited), which
-                    // is acceptable: average session is minutes, the few-
-                    // second tail is statistical noise. Always-correct
-                    // Duration > 0 is worth the tiny overestimate.
-                    var timestamp = DateTime.UtcNow.ToString("o");
+                    // End timestamp = max timestamp seen in chunks + 10 ms.
+                    // Approximates the moment the SDK actually died (last
+                    // record it managed to flush). Falls back to UtcNow only
+                    // when chunks are unreadable / empty — with session_start
+                    // now direct-written via WriteCriticalAndFinalizeSync,
+                    // chunks always contain at least one record.
+                    var maxOnDisk = ScanChunksForMaxTimestamp(chunksDir);
+                    var endTs = maxOnDisk.HasValue
+                        ? maxOnDisk.Value.AddMilliseconds(10)
+                        : DateTime.UtcNow;
+                    if (endTs.Kind != DateTimeKind.Utc) endTs = endTs.ToUniversalTime();
+                    var timestamp = endTs.ToString("o");
                     var safeSessionId = sessionId ?? "";
 
                     var (lifecycleState, _, intent) = Core.Session.SessionFiles.TryReadLifecycleState();
@@ -700,6 +691,66 @@ namespace PlayScopeSdk.Internal
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Returns the latest <c>"timestamp":"…"</c> value found across every
+        /// .jsonl in <paramref name="chunksDir"/>, including chunk_current.
+        /// Used by the synthetic session_end so EndedAt approximates the
+        /// moment the SDK actually died, not the moment recovery ran on the
+        /// next launch. Streaming line-by-line; substring extraction without
+        /// full JSON parse — cheap.
+        /// </summary>
+        private static DateTime? ScanChunksForMaxTimestamp(string chunksDir)
+        {
+            if (!Directory.Exists(chunksDir)) return null;
+            DateTime? max = null;
+            string[] files;
+            try { files = Directory.GetFiles(chunksDir, "*.jsonl"); }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] SessionRecovery: error listing chunks for ts scan: {ex.Message}");
+                return null;
+            }
+            foreach (var file in files)
+            {
+                var fileMax = ScanFileForMaxTimestamp(file);
+                if (fileMax.HasValue && (!max.HasValue || fileMax.Value > max.Value))
+                    max = fileMax;
+            }
+            return max;
+        }
+
+        private static DateTime? ScanFileForMaxTimestamp(string filePath)
+        {
+            const string TIMESTAMP_MARKER = "\"timestamp\":\"";
+            DateTime? max = null;
+            try
+            {
+                using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream, new System.Text.UTF8Encoding(false));
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (string.IsNullOrEmpty(line)) continue;
+                    int idx = line.IndexOf(TIMESTAMP_MARKER, StringComparison.Ordinal);
+                    if (idx < 0) continue;
+                    int valueStart = idx + TIMESTAMP_MARKER.Length;
+                    int valueEnd = line.IndexOf('"', valueStart);
+                    if (valueEnd <= valueStart) continue;
+                    var tsStr = line.Substring(valueStart, valueEnd - valueStart);
+                    if (DateTime.TryParse(tsStr, null,
+                            System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
+                    {
+                        if (!max.HasValue || ts > max.Value) max = ts;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] SessionRecovery: error reading timestamps from '{filePath}': {ex.Message}");
+            }
+            return max;
         }
 
         /// <summary>
