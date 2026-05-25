@@ -43,6 +43,34 @@ namespace PlayScopeSdk.Internal
         // trigger. Same lesson WriterWorker.cs already documents at the top.
         private static long _currentLifecycleStateEnteredAtTicks;
         private static long _currentLifecycleStateEnteredAtStopwatchTicks;
+        // Captures `DateTime.UtcNow.Ticks` at the most recent transition INTO
+        // the "background" state. Survives the foreground transition that
+        // schedules a rotation — RecordLifecycle's existing
+        // _currentLifecycleStateEnteredAtTicks gets overwritten with the
+        // foreground-return time at scheduling, so this separate field is
+        // the only place that still remembers when the player actually
+        // backgrounded. PerformRotation backdates session_end to this
+        // timestamp so the old session's duration reflects pure foreground
+        // engagement (~minutes) instead of foreground + 30+ minutes of
+        // sleep (the time the OS held the process before the user came
+        // back).
+        private static long _lastBackgroundStartTicks;
+
+        // Pipeline-wide write gate. Flipped to FALSE the moment a rotation
+        // is scheduled in RecordLifecycle, restored to TRUE once
+        // PerformRotation has finished tearing down the old session and
+        // re-initialised. Closes the ~1-frame race window between
+        // OnApplicationPause(false) and the next MonoBehaviour.Update tick
+        // where Application.lowMemory + wrapper Update code can fire and
+        // get their events stamped into the dead-old session — observed
+        // bug repro 2026-05-25: memory_warning + operation_start landed in
+        // a session that was about to be closed with end_reason=
+        // background_timeout, distorting both its event count and its
+        // duration.
+        //
+        // EventPipeline.Enqueue* checks this; reads on every event hot
+        // path so it's volatile, not behind a lock.
+        internal static volatile bool _acceptingEvents = true;
 
         // Network reachability watchdog — sampled by MetricsSampler. When the
         // value changes we emit a network_change event (separate from the
@@ -655,7 +683,14 @@ namespace PlayScopeSdk.Internal
         /// <c>unknown</c> (recovered, lifecycle file missing — pessimistic
         /// fallback). Backend uses this for the corrected CFS% formula that
         /// excludes swipe-kills from the crash count.</param>
-        private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal", string reason = "normal")
+        /// <param name="endTimestampOverride">When non-null, the emitted
+        /// session_end record carries this UTC time instead of
+        /// <c>DateTime.UtcNow</c>. Used by PerformRotation to backdate the
+        /// old session's end to <c>_lastBackgroundStartTicks</c> so the
+        /// dashboard's duration reflects pure foreground engagement
+        /// rather than foreground + sleep time.</param>
+        private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal", string reason = "normal",
+            DateTime? endTimestampOverride = null)
         {
             // Unsubscribe Unity log capture (idempotent guard)
             if (_logCaptureSubscribed)
@@ -712,13 +747,21 @@ namespace PlayScopeSdk.Internal
                 Debug.Log($"[PlayScope/diag] TeardownInternal: emitSessionEnd=true endStatus={endStatus} reason={reason} writerIsNull={_writer == null}");
                 if (_writer != null)
                 {
+                    // Backdate session_end to the supplied override when the
+                    // caller is doing a background-timeout rotation — the
+                    // session "really" ended when the player backgrounded
+                    // the app, not when we finally got CPU back to notice.
+                    // For normal shutdown / forced disable, override is
+                    // null and we keep the now-timestamp.
+                    var endTs = endTimestampOverride ?? DateTime.UtcNow;
+                    if (endTs.Kind != DateTimeKind.Utc) endTs = endTs.ToUniversalTime();
                     var rec = new EventRecord
                     {
                         RecordType = RecordType.Event,
                         EventType = "session_end",
                         EventId = UlidGenerator.NewEventId(),
                         SequenceNum = SequenceCounter.Next(),
-                        Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                        Timestamp = endTs.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
                         MetadataJson = $"{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\"}}",
                         IsCritical = true,
                     };
@@ -913,6 +956,15 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Info(
                     $"Background timeout ({durationMs} ms ≥ {BackgroundSessionTimeoutMs} ms) — " +
                     "scheduling session rotation.");
+                // FIRST close the pipeline so nothing else lands in the
+                // doomed session between now and PerformRotation. Without
+                // this, Application.lowMemory firing in the same frame as
+                // the resume — and wrapper code running during this
+                // Update tick — both happily enqueued into the old
+                // session, distorting its event count and (because
+                // session_end took the now-timestamp) its duration.
+                // Restored to true at the end of PerformRotation.
+                _acceptingEvents = false;
                 // CRITICAL: advance the lifecycle state BEFORE setting the
                 // pending-rotation flag. If the rotation later fails (lock
                 // contention, transient init exception), the next
@@ -941,6 +993,16 @@ namespace PlayScopeSdk.Internal
             _currentLifecycleState = nextState;
             _currentLifecycleStateEnteredAtTicks = nowTicks;
             _currentLifecycleStateEnteredAtStopwatchTicks = nowStopwatchTicks;
+            // Capture the wall-clock moment we entered background so
+            // PerformRotation can backdate session_end to here on a
+            // background-timeout — the canonical
+            // _currentLifecycleStateEnteredAtTicks gets overwritten with
+            // the foreground-return ticks at scheduling time, so a separate
+            // field is the only place this survives.
+            if (nextState == "background")
+            {
+                _lastBackgroundStartTicks = nowTicks;
+            }
             // Mirror the new state to disk so SessionRecovery on the next
             // launch can classify an unclean death by where we were last:
             // foreground → likely crash/ANR, background → likely swipe-kill
@@ -1002,22 +1064,40 @@ namespace PlayScopeSdk.Internal
             try
             {
                 if (!_initialized || _disabled) return;
+                // Captured background_start moment is the "real" end of the
+                // old session — the player put the app to sleep here, the
+                // 30+ minutes that followed are OS-held suspension, not
+                // gameplay. Falls through to DateTime.UtcNow inside
+                // TeardownInternal when the captured value is 0 (we got
+                // here without ever transitioning to background — unusual,
+                // but defensive).
+                DateTime? backdatedEnd = _lastBackgroundStartTicks > 0
+                    ? new DateTime(_lastBackgroundStartTicks, DateTimeKind.Utc)
+                    : (DateTime?)null;
                 var ctx = _context;
                 if (ctx == null)
                 {
                     PlayScopeLog.Warning(
                         "PerformRotation called but no stored context — cannot re-initialize. " +
                         "Falling back to clean shutdown.");
-                    TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
+                    TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout",
+                        endTimestampOverride: backdatedEnd);
                     return;
                 }
-                TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout");
+                TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout",
+                    endTimestampOverride: backdatedEnd);
                 // Bypass the Initialize() admission gate — we already hold
                 // the lifecycle lock for the whole rotation.
                 InitializeLocked(ctx);
             }
             finally
             {
+                // Re-open the pipeline gate. From this point any new event
+                // (which will now arrive in the freshly-initialised session)
+                // is accepted again. Even if InitializeLocked threw, we
+                // restore the gate — otherwise a partially-init'd SDK would
+                // silently swallow every subsequent event forever.
+                _acceptingEvents = true;
                 Interlocked.Exchange(ref _lifecycleBusy, 0);
             }
         }

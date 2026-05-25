@@ -46,6 +46,16 @@ namespace PlayScopeSdk.Internal
         internal void EnqueueEvent(string eventType, string? operationId = null, string? operationType = null,
             string? metadataJson = null, string? statePatchJson = null)
         {
+            // Pipeline write gate — flipped to false during the rotation
+            // race window so memory_warning / wrapper operation_start /
+            // anything else firing between OnApplicationPause(false) and
+            // PerformRotation can't stamp itself into the doomed old
+            // session. Silently drop — caller doesn't care; the matching
+            // session_end (with the backdated timestamp) closes the old
+            // session cleanly and the new session is about to open. The
+            // gate is closed for ~1 frame at most.
+            if (!PlayScopeRuntime._acceptingEvents) return;
+
             // Enforce metadata size cap (spec: 4 KB). Oversized metadata
             // used to drop the entire event — losing the signal that the
             // event happened at all (and its sequence_num / screen /
@@ -176,6 +186,14 @@ namespace PlayScopeSdk.Internal
 
         internal void EnqueueLog(string level, string message, string? stackTrace = null, string? metadataJson = null)
         {
+            // Pipeline write gate (see comment in EnqueueEvent). Drops
+            // every log level — including error/exception — during the
+            // rotation window. That's intentional: anything happening in
+            // that ~1-frame window is "about to be in the new session"
+            // already; dropping it keeps the doomed old session free of
+            // post-mortem noise.
+            if (!PlayScopeRuntime._acceptingEvents) return;
+
             // Truncate per spec: message 2048, stack_trace 8192.
             // Substring cuts on char index; a slice at a UTF-16 high-surrogate
             // boundary leaves an unpaired surrogate which System.Text.Json
@@ -217,6 +235,9 @@ namespace PlayScopeSdk.Internal
 
         internal void EnqueueMetric(string metricType, double value)
         {
+            // Pipeline write gate (see comment in EnqueueEvent).
+            if (!PlayScopeRuntime._acceptingEvents) return;
+
             // Drop NaN / ±Infinity at the door. The backend's MetricRecord
             // DTO is non-nullable `double` and System.Text.Json refuses to
             // deserialize JSON `null` into it → the whole envelope is
