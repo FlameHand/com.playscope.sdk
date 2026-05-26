@@ -470,6 +470,18 @@ namespace PlayScopeSdk.Internal
             bool isEditor           = UnityEngine.Application.isEditor;
             bool isDevelopmentBuild = UnityEngine.Debug.isDebugBuild;
 
+            int systemMemoryMb;
+            try
+            {
+                int reported = UnityEngine.SystemInfo.systemMemorySize;
+                systemMemoryMb = reported > 0 ? reported : 0;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("Failed to read SystemInfo.systemMemorySize for session_start", ex);
+                systemMemoryMb = 0;
+            }
+
             string env;
             if (context.Metadata != null &&
                 context.Metadata.TryGetValue("environment", out var envVal) &&
@@ -492,6 +504,7 @@ namespace PlayScopeSdk.Internal
                 ["platform"] = GetPlatformString(),
                 ["device_model"] = UnityEngine.SystemInfo.deviceModel,
                 ["os_version"] = UnityEngine.SystemInfo.operatingSystem,
+                ["system_memory_mb"] = systemMemoryMb,
                 ["sdk_version"] = SdkVersion,
                 // Direct-write path skips envelope sdk_user_id stamping — include here.
                 ["sdk_user_id"] = Device.SdkUserId,
