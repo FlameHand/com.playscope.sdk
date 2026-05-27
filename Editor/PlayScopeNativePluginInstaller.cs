@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEngine;
@@ -11,11 +12,12 @@ using UpmPackageInfo = UnityEditor.PackageManager.PackageInfo;
 namespace PlayScopeSdk.Editor
 {
     /// <summary>
-    /// Copies the SDK's bundled native plugins
-    /// (<c>Plugins/Android/PlayScopeLifecycle.java</c>,
-    /// <c>Plugins/iOS/PlayScopeLifecycle.mm</c>) out of the read-only UPM
-    /// package and into <c>Assets/Plugins/PlayScope/</c> in the consumer's
-    /// project on every domain reload.
+    /// Copies every native plugin shipped under the package's
+    /// <c>Plugins/Android/</c> and <c>Plugins/iOS/</c> top-level folders
+    /// into the consumer's <c>Assets/Plugins/{Android,iOS}/</c>. Adding a
+    /// new native file to the SDK is zero-touch: drop it in
+    /// <c>Plugins/{Android,iOS}/</c>, the installer picks it up on the
+    /// next domain reload.
     ///
     /// <para>
     /// Why this is needed: native (Java / Obj-C) files shipped inside a
@@ -34,16 +36,17 @@ namespace PlayScopeSdk.Editor
     /// Workaround: ship the native files inside the package as the source
     /// of truth (disabled-everywhere via the package's own <c>.meta</c> so
     /// Unity doesn't try to compile them in-place), and let this installer
-    /// mirror them into <c>Assets/Plugins/PlayScope/</c> where the
+    /// mirror them into <c>Assets/Plugins/{Android,iOS}/</c> where the
     /// consumer-owned <c>.meta</c> reliably applies PluginImporter
-    /// settings — Android-only for the <c>.java</c>, iOS-only for the
-    /// <c>.mm</c>.
+    /// settings.
     /// </para>
     /// <para>
-    /// Idempotent. Re-copies only when the source bytes differ from the
-    /// installed copy (catches SDK upgrades that bring a new helper
-    /// version). User can force-reinstall via <c>PlayScope ▸ Reinstall
-    /// Native Plugins</c>.
+    /// Idempotent. The silent on-load sync re-copies only when the source
+    /// bytes differ from the installed copy (catches SDK upgrades that
+    /// bring a new helper version). The menu path
+    /// <c>PlayScope ▸ Reinstall Native Plugins</c> force-overwrites every
+    /// file regardless of byte-equality — "I clicked reinstall, give me
+    /// fresh copies" semantics.
     /// </para>
     /// </summary>
     [InitializeOnLoad]
@@ -52,17 +55,12 @@ namespace PlayScopeSdk.Editor
         // CANONICAL Unity native plugin locations. Anything under
         // Assets/Plugins/Android/ ends up in the Android Gradle Library
         // module; anything under Assets/Plugins/iOS/ ends up linked into
-        // the generated Xcode project. Sub-folders under these (e.g.
-        // Assets/Plugins/Android/PlayScope/) are scanned recursively by
-        // Unity's build pipeline, BUT putting files at the canonical root
-        // is the safest path — works on every Unity 2019+ version we
-        // care about. Earlier attempt used Assets/Plugins/PlayScope/...
-        // which was off the well-trodden path and risked Unity's Gradle
-        // step missing the .java entirely.
-        private const string AndroidDestDir = "Assets/Plugins/Android";
-        private const string IosDestDir = "Assets/Plugins/iOS";
-        private const string AndroidFile = "PlayScopeLifecycle.java";
-        private const string IosFile = "PlayScopeLifecycle.mm";
+        // the generated Xcode project.
+        private static readonly (string SrcSubdir, string DstDir, BuildTarget Platform)[] PLATFORM_DIRS =
+        {
+            ("Plugins/Android", "Assets/Plugins/Android", BuildTarget.Android),
+            ("Plugins/iOS",     "Assets/Plugins/iOS",     BuildTarget.iOS),
+        };
 
         static PlayScopeNativePluginInstaller()
         {
@@ -75,25 +73,33 @@ namespace PlayScopeSdk.Editor
         [MenuItem("PlayScope/Reinstall Native Plugins")]
         private static void ReinstallMenu()
         {
-            var copied = SyncCore(verbose: true);
-            EditorUtility.DisplayDialog(
-                "PlayScope — Native Plugins",
-                copied > 0
-                    ? $"Installed / updated {copied} native plugin file(s):\n" +
-                      $"  • {AndroidDestDir}/{AndroidFile}\n" +
-                      $"  • {IosDestDir}/{IosFile}\n\n" +
-                      "Rebuild your Android / iOS player for the new files to take effect."
-                    : "Native plugins are already up to date.\n\n" +
-                      "If you're still seeing ClassNotFoundException for " +
-                      "com.playscope.sdk.PlayScopeLifecycle at runtime, check " +
-                      "the PluginImporter Inspector on " +
-                      $"{AndroidDestDir}/{AndroidFile}.",
-                "OK");
+            var result = SyncCore(verbose: true, forceOverwrite: true);
+            string message;
+            if (result.Count > 0)
+            {
+                var listBuilder = new System.Text.StringBuilder();
+                foreach (var name in result.Names)
+                {
+                    listBuilder.Append("  • ").Append(name).Append('\n');
+                }
+                message =
+                    $"Installed / updated {result.Count} native plugin file(s):\n" +
+                    listBuilder +
+                    "\nRebuild your Android / iOS player for the new files to take effect.";
+            }
+            else
+            {
+                message =
+                    "No native plugin files found in the SDK package — nothing to install.\n\n" +
+                    "If you expected files to be copied, check that the package " +
+                    "ships Plugins/Android/ or Plugins/iOS/ folders.";
+            }
+            EditorUtility.DisplayDialog("PlayScope — Native Plugins", message, "OK");
         }
 
         private static void SyncSilently()
         {
-            try { SyncCore(verbose: false); }
+            try { SyncCore(verbose: false, forceOverwrite: false); }
             catch (Exception ex)
             {
                 Debug.LogWarning(
@@ -102,35 +108,66 @@ namespace PlayScopeSdk.Editor
             }
         }
 
-        /// <summary>
-        /// Returns the number of files newly written / overwritten.
-        /// </summary>
-        private static int SyncCore(bool verbose)
+        private readonly struct SyncResult
         {
+            public readonly int Count;
+            public readonly List<string> Names;
+            public SyncResult(int count, List<string> names) { Count = count; Names = names; }
+        }
+
+        private static SyncResult SyncCore(bool verbose, bool forceOverwrite)
+        {
+            var installedNames = new List<string>();
             var pkgDir = ResolvePackageDir();
             if (string.IsNullOrEmpty(pkgDir))
             {
                 if (verbose)
+                {
                     Debug.LogWarning("[PlayScope] Couldn't resolve SDK package path — native plugins not installed.");
-                return 0;
+                }
+                return new SyncResult(0, installedNames);
             }
 
             int total = 0;
-            total += SyncFile(
-                src: Path.Combine(pkgDir, "Plugins", "Android", AndroidFile),
-                dstDir: AndroidDestDir,
-                fileName: AndroidFile,
-                platform: BuildTarget.Android,
-                verbose: verbose);
-            total += SyncFile(
-                src: Path.Combine(pkgDir, "Plugins", "iOS", IosFile),
-                dstDir: IosDestDir,
-                fileName: IosFile,
-                platform: BuildTarget.iOS,
-                verbose: verbose);
+            foreach (var entry in PLATFORM_DIRS)
+            {
+                var srcDir = Path.Combine(pkgDir, entry.SrcSubdir);
+                if (!Directory.Exists(srcDir))
+                {
+                    continue;
+                }
 
-            if (total > 0) AssetDatabase.Refresh();
-            return total;
+                // Top-level only — frameworks/aar that live in subdirectories
+                // are out of scope for this installer.
+                var files = Directory.GetFiles(srcDir);
+                foreach (var srcFile in files)
+                {
+                    var fileName = Path.GetFileName(srcFile);
+                    if (fileName.StartsWith("."))
+                    {
+                        continue;
+                    }
+                    if (fileName.EndsWith(".meta"))
+                    {
+                        // Consumer-side .meta files are generated fresh by Unity;
+                        // copying ours would create GUID conflicts.
+                        continue;
+                    }
+
+                    int copied = SyncFile(srcFile, entry.DstDir, fileName, entry.Platform, verbose, forceOverwrite);
+                    if (copied > 0)
+                    {
+                        installedNames.Add($"{entry.DstDir}/{fileName}");
+                        total += copied;
+                    }
+                }
+            }
+
+            if (total > 0)
+            {
+                AssetDatabase.Refresh();
+            }
+            return new SyncResult(total, installedNames);
         }
 
         /// <summary>
@@ -151,28 +188,35 @@ namespace PlayScopeSdk.Editor
         }
 
         private static int SyncFile(
-            string src, string dstDir, string fileName, BuildTarget platform, bool verbose)
+            string src, string dstDir, string fileName, BuildTarget platform, bool verbose, bool forceOverwrite)
         {
             if (!File.Exists(src))
             {
                 if (verbose)
+                {
                     Debug.LogWarning($"[PlayScope] Native plugin source missing: {src}");
+                }
                 return 0;
             }
 
             Directory.CreateDirectory(dstDir);
             var dst = Path.Combine(dstDir, fileName);
 
-            // Compare byte-for-byte. We're only ever syncing two ~5 KB
-            // source files; cost is negligible vs. the cost of a wrong
-            // overwrite breaking the consumer's Editor settings.
+            // Compare byte-for-byte unless forceOverwrite is on (menu path).
+            // The files are a few KB each; cost is negligible vs. the cost
+            // of a wrong overwrite breaking the consumer's Editor settings.
             var srcBytes = File.ReadAllBytes(src);
-            var changed = !File.Exists(dst) || !ByteArraysEqual(srcBytes, File.ReadAllBytes(dst));
-            if (!changed) return 0;
+            var changed = forceOverwrite || !File.Exists(dst) || !ByteArraysEqual(srcBytes, File.ReadAllBytes(dst));
+            if (!changed)
+            {
+                return 0;
+            }
 
             File.WriteAllBytes(dst, srcBytes);
             if (verbose)
+            {
                 Debug.Log($"[PlayScope] Installed native plugin: {dst}");
+            }
 
             // Pull the file into the AssetDatabase so PluginImporter exists
             // for it, then set the right platform compatibility. Unity's
@@ -200,8 +244,17 @@ namespace PlayScopeSdk.Editor
 
         private static bool ByteArraysEqual(byte[] a, byte[] b)
         {
-            if (a.Length != b.Length) return false;
-            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            if (a.Length != b.Length)
+            {
+                return false;
+            }
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (a[i] != b[i])
+                {
+                    return false;
+                }
+            }
             return true;
         }
     }

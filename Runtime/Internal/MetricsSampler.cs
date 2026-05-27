@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.Profiling;
 
@@ -51,6 +53,16 @@ namespace PlayScopeSdk.Internal
         // rate that's meaningful on its own (vs the cumulative value
         // which only matters as a derivative).
         private long _lastTotalAllocatedBytes = -1;
+
+        // UnityEngine.Device.SystemInfo.thermalStatus exists from 2023.1+.
+        // On 2021.3 (our floor) the type isn't present, so we resolve via
+        // reflection at first sample and cache the PropertyInfo. Null
+        // means "API unavailable on this Unity" → we emit THERMAL_NOT_SUPPORTED.
+        private PropertyInfo _thermalStatusProperty;
+        private bool _thermalReflectionResolved;
+        // Matches the UnityEngine.ThermalStatus.NotSupported enum value on
+        // newer Unity versions; the dashboard treats 7 as "unknown".
+        private const int THERMAL_NOT_SUPPORTED = 7;
 
         private const float FpsInterval = 1f;
         private const float MemInterval = 5f;
@@ -123,13 +135,14 @@ namespace PlayScopeSdk.Internal
                 _memTimer = 0;
             }
 
-            // Battery — 30s
+            // Battery + thermal + charging + disk + system RAM — 30s.
+            // All five share the same slot: they're slow-moving device-
+            // state signals where 30 s resolution is plenty and a single
+            // tick keeps the timer count small.
             _batteryTimer += dt;
             if (_batteryTimer >= BatteryInterval)
             {
-                var battery = SystemInfo.batteryLevel;
-                if (battery >= 0f) // -1 = unsupported, discard
-                    _pipeline.EnqueueMetric("battery_level", battery * 100.0);
+                EmitSlowDeviceMetrics();
                 _batteryTimer = 0;
             }
 
@@ -184,6 +197,94 @@ namespace PlayScopeSdk.Internal
                 if (_frameTimesMs[i] > DroppedFrameThresholdMs) dropped++;
             }
             _pipeline.EnqueueMetric("dropped_frames_count", dropped);
+        }
+
+        private void EmitSlowDeviceMetrics()
+        {
+            try
+            {
+                var battery = SystemInfo.batteryLevel;
+                if (battery >= 0f)
+                {
+                    _pipeline.EnqueueMetric("battery_level", battery * 100.0);
+                }
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("MetricsSampler: battery_level read failed: " + ex.Message);
+            }
+
+            try
+            {
+                var status = SystemInfo.batteryStatus;
+                double charging = status == BatteryStatus.Charging ? 1.0 : 0.0;
+                _pipeline.EnqueueMetric("is_charging", charging);
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("MetricsSampler: is_charging read failed: " + ex.Message);
+            }
+
+            _pipeline.EnqueueMetric("thermal_state", ReadThermalState());
+
+            try
+            {
+                var root = Path.GetPathRoot(Application.persistentDataPath);
+                if (!string.IsNullOrEmpty(root))
+                {
+                    var info = new DriveInfo(root);
+                    double mb = info.AvailableFreeSpace / (1024.0 * 1024.0);
+                    _pipeline.EnqueueMetric("available_disk_mb", mb);
+                }
+                else
+                {
+                    _pipeline.EnqueueMetric("available_disk_mb", 0.0);
+                }
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("MetricsSampler: available_disk_mb read failed: " + ex.Message);
+                _pipeline.EnqueueMetric("available_disk_mb", 0.0);
+            }
+
+            _pipeline.EnqueueMetric("system_free_ram_mb", NativeMetricsBridge.GetFreeMemoryMb());
+        }
+
+        private double ReadThermalState()
+        {
+            if (!_thermalReflectionResolved)
+            {
+                try
+                {
+                    var t = Type.GetType("UnityEngine.Device.SystemInfo, UnityEngine.CoreModule")
+                            ?? Type.GetType("UnityEngine.Device.SystemInfo");
+                    _thermalStatusProperty = t?.GetProperty("thermalStatus", BindingFlags.Public | BindingFlags.Static);
+                }
+                catch
+                {
+                    _thermalStatusProperty = null;
+                }
+                _thermalReflectionResolved = true;
+            }
+
+            if (_thermalStatusProperty == null)
+            {
+                return THERMAL_NOT_SUPPORTED;
+            }
+
+            try
+            {
+                var value = _thermalStatusProperty.GetValue(null);
+                if (value == null)
+                {
+                    return THERMAL_NOT_SUPPORTED;
+                }
+                return Convert.ToInt32(value);
+            }
+            catch
+            {
+                return THERMAL_NOT_SUPPORTED;
+            }
         }
 
         // Emits gc_alloc_kb (delta since the last sample). First sample is
