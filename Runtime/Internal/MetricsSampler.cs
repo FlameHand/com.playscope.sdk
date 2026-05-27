@@ -32,7 +32,13 @@ namespace PlayScopeSdk.Internal
 
         private float _memTimer;
         private float _batteryTimer;
-        private float _networkTimer;
+
+        // Sentinels for emit-on-change gating. -1 = "never sampled".
+        // Valid emit values are 0/1/2 (network), 0.0/1.0 (charging),
+        // and a non-negative MB count (disk) — so -1 can't collide.
+        private int _prevNetwork = -1;
+        private double _prevCharging = -1.0;
+        private double _prevDiskMb = -1.0;
 
         // Ring buffer of per-frame deltas (ms) for the current 1 s window.
         // Sized for 2 s @ 60 fps so we never wrap during a single sample
@@ -57,17 +63,14 @@ namespace PlayScopeSdk.Internal
         // UnityEngine.Device.SystemInfo.thermalStatus exists from 2023.1+.
         // On 2021.3 (our floor) the type isn't present, so we resolve via
         // reflection at first sample and cache the PropertyInfo. Null
-        // means "API unavailable on this Unity" → we emit THERMAL_NOT_SUPPORTED.
+        // means "API unavailable on this Unity" → we skip the emit.
         private PropertyInfo _thermalStatusProperty;
         private bool _thermalReflectionResolved;
-        // Matches the UnityEngine.ThermalStatus.NotSupported enum value on
-        // newer Unity versions; the dashboard treats 7 as "unknown".
-        private const int THERMAL_NOT_SUPPORTED = 7;
 
         private const float FpsInterval = 1f;
         private const float MemInterval = 5f;
         private const float BatteryInterval = 30f;
-        private const float NetworkInterval = 5f;
+        private const double DISK_CHANGE_THRESHOLD_MB = 5.0;
         // Frame-time + gc-alloc share the same 1 s cadence as fps. They're
         // jank-class metrics that only mean something on a sub-second
         // window — averaging them over multiple seconds smears the spike
@@ -145,20 +148,6 @@ namespace PlayScopeSdk.Internal
                 EmitSlowDeviceMetrics();
                 _batteryTimer = 0;
             }
-
-            // Network reachability — 5s. We emit the periodic metric for
-            // dashboards that want a time-series, AND let the runtime emit a
-            // discrete network_change event on every transition so the
-            // timeline carries a single row at the moment the network flipped
-            // instead of forcing the reader to spot a line-crossing.
-            _networkTimer += dt;
-            if (_networkTimer >= NetworkInterval)
-            {
-                var net = (int)Application.internetReachability; // 0/1/2
-                _pipeline.EnqueueMetric("network_reachability", net);
-                PlayScopeRuntime.RecordNetworkReachabilityIfChanged(net);
-                _networkTimer = 0;
-            }
         }
 
         // Computes p99 frame-time and dropped-frame count from the current
@@ -218,14 +207,23 @@ namespace PlayScopeSdk.Internal
             {
                 var status = SystemInfo.batteryStatus;
                 double charging = status == BatteryStatus.Charging ? 1.0 : 0.0;
-                _pipeline.EnqueueMetric("is_charging", charging);
+                // state-only signal — emit on transition only
+                if (charging != _prevCharging)
+                {
+                    _pipeline.EnqueueMetric("is_charging", charging);
+                    _prevCharging = charging;
+                }
             }
             catch (Exception ex)
             {
                 PlayScopeLog.Warning("MetricsSampler: is_charging read failed: " + ex.Message);
             }
 
-            _pipeline.EnqueueMetric("thermal_state", ReadThermalState());
+            var thermal = ReadThermalState();
+            if (thermal.HasValue)
+            {
+                _pipeline.EnqueueMetric("thermal_state", thermal.Value);
+            }
 
             try
             {
@@ -234,7 +232,12 @@ namespace PlayScopeSdk.Internal
                 {
                     var info = new DriveInfo(root);
                     double mb = info.AvailableFreeSpace / (1024.0 * 1024.0);
-                    _pipeline.EnqueueMetric("available_disk_mb", mb);
+                    // slow-drift signal — emit on first sample + when delta crosses threshold
+                    if (_prevDiskMb < 0 || Math.Abs(mb - _prevDiskMb) >= DISK_CHANGE_THRESHOLD_MB)
+                    {
+                        _pipeline.EnqueueMetric("available_disk_mb", mb);
+                        _prevDiskMb = mb;
+                    }
                 }
                 else
                 {
@@ -248,9 +251,26 @@ namespace PlayScopeSdk.Internal
             }
 
             _pipeline.EnqueueMetric("system_free_ram_mb", NativeMetricsBridge.GetFreeMemoryMb());
+
+            // polling cadence collapsed from 5 s; the periodic emit was redundant with the network_change event flow
+            try
+            {
+                var net = (int)Application.internetReachability;
+                // state-only signal — emit on transition only
+                if (net != _prevNetwork)
+                {
+                    _pipeline.EnqueueMetric("network_reachability", net);
+                    _prevNetwork = net;
+                }
+                PlayScopeRuntime.RecordNetworkReachabilityIfChanged(net);
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("MetricsSampler: network_reachability read failed: " + ex.Message);
+            }
         }
 
-        private double ReadThermalState()
+        private double? ReadThermalState()
         {
             if (!_thermalReflectionResolved)
             {
@@ -269,7 +289,7 @@ namespace PlayScopeSdk.Internal
 
             if (_thermalStatusProperty == null)
             {
-                return THERMAL_NOT_SUPPORTED;
+                return null;
             }
 
             try
@@ -277,13 +297,13 @@ namespace PlayScopeSdk.Internal
                 var value = _thermalStatusProperty.GetValue(null);
                 if (value == null)
                 {
-                    return THERMAL_NOT_SUPPORTED;
+                    return null;
                 }
                 return Convert.ToInt32(value);
             }
             catch
             {
-                return THERMAL_NOT_SUPPORTED;
+                return null;
             }
         }
 
