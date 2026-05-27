@@ -120,10 +120,9 @@ namespace PlayScopeSdk.Internal
                 EmitGcAllocMetric();
 
                 _fpsAccum = 0; _fpsFrames = 0; _fpsTimer = 0;
-                // Reset the ring buffer's "occupied" count but NOT its
-                // index — the next window starts overwriting from where
-                // the last one ended, which is fine because we only read
-                // _frameTimeCount slots when computing the next p99.
+                // Reset both index and count so the next window writes from slot 0;
+                // EmitFrameTimeMetrics reads contiguous [0..count-1].
+                _frameTimeIdx = 0;
                 _frameTimeCount = 0;
             }
 
