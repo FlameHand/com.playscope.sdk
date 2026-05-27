@@ -59,6 +59,17 @@ namespace PlayScopeSdk.Internal
             SceneLoadProgressTracker.TickAndMaybeSample();
         }
 
+        /// <summary>
+        /// Forwards to MetricsSampler.ResetForNewSession() if the sampler exists.
+        /// Sampler is lazily created in Update(), so reset is a no-op when called
+        /// before the first frame after init — that's fine, the lazy-created
+        /// sampler gets fresh sentinels from field initializers anyway.
+        /// </summary>
+        internal void ResetSamplerForNewSession()
+        {
+            _sampler?.ResetForNewSession();
+        }
+
         // First-input poll. Branches on Unity's input-backend defines so we
         // work under either the legacy Input Manager, the new Input System,
         // or the "Both" mode. Touch wins over mouse wins over key wins over

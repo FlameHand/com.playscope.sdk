@@ -149,6 +149,30 @@ namespace PlayScopeSdk.Internal
             }
         }
 
+        /// <summary>
+        /// Resets emit-on-change sentinels and the GC-alloc delta baseline.
+        /// Called from session-rotation paths so the first metric of the new
+        /// session fires its initial value instead of being suppressed by a
+        /// _prev* sentinel that happens to match what carried over.
+        ///
+        /// Today the rotation path destroys the MonoBehaviour, which gives us
+        /// a fresh sampler with fresh field initializers — so this method is
+        /// belt-and-suspenders against future regressions where someone keeps
+        /// the MB alive across sessions. Matches StatePatchCoalescer's
+        /// ResetForNewSession() precedent.
+        /// </summary>
+        internal void ResetForNewSession()
+        {
+            _prevCharging = -1.0;
+            _prevDiskMb = -1.0;
+            _prevNetwork = -1;
+            _lastTotalAllocatedBytes = -1;
+            // Frame-time ring buffer is window-local (resets every 1s) — not
+            // session-scoped. Do NOT touch _frameTimeIdx / _frameTimeCount.
+            // Thermal reflection cache (_thermalStatusProperty,
+            // _thermalReflectionResolved) is also process-scoped, not session.
+        }
+
         // Computes p99 frame-time and dropped-frame count from the current
         // ring-buffer window. p99 means "the value at index 0.99 * N after
         // sorting ascending" — so for a 60-frame window that's frame #59

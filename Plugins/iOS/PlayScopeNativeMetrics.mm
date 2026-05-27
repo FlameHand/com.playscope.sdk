@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <TargetConditionals.h>
 #import <mach/mach.h>
 #import <mach/mach_host.h>
 
@@ -6,6 +7,12 @@ extern "C"
 {
     long PlayScopeGetFreeMemoryMb(void)
     {
+#if TARGET_OS_SIMULATOR
+        // Simulator shares the host Mac's kernel; host_statistics64 would
+        // return the developer's macOS free RAM, not the simulated app's.
+        // Skip entirely.
+        return 0;
+#else
         @try
         {
             mach_port_t host = mach_host_self();
@@ -30,5 +37,6 @@ extern "C"
         {
             return 0;
         }
+#endif
     }
 }

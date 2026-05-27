@@ -539,6 +539,14 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Warning("session_start skipped — WriterWorker null after init (unreachable).");
             }
 
+            // Reset sampler sentinels at every fresh session_start. Today the
+            // rotation path destroys the MonoBehaviour so this is usually a no-op
+            // (the new MB has no sampler yet); harmless then. If we ever keep the
+            // MB alive across rotations, this prevents emit-on-change metrics
+            // (is_charging, network_reachability, available_disk_mb) from being
+            // suppressed because _prev* sentinels carry the prior session's value.
+            _driverGo?.GetComponent<PlayScopeMonoBehaviour>()?.ResetSamplerForNewSession();
+
             // app_update_detected — emit only on a real version change.
             // First-ever install is silent (no prior version to compare).
             // Persist BEFORE emit so a save failure can't double-emit next launch.
