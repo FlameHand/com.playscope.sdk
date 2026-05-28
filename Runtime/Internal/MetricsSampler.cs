@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.Profiling;
@@ -248,29 +247,18 @@ namespace PlayScopeSdk.Internal
                 _pipeline.EnqueueMetric("thermal_state", thermal.Value);
             }
 
-            try
+            // DriveInfo is not implemented in IL2CPP (icall throws every tick),
+            // so disk reads go through the native bridge. -1 = unavailable —
+            // skip emit rather than poison the metric with a fake 0.
+            long diskMb = NativeMetricsBridge.GetAvailableDiskMb();
+            if (diskMb >= 0)
             {
-                var root = Path.GetPathRoot(Application.persistentDataPath);
-                if (!string.IsNullOrEmpty(root))
+                double mb = diskMb;
+                if (_prevDiskMb < 0 || Math.Abs(mb - _prevDiskMb) >= DISK_CHANGE_THRESHOLD_MB)
                 {
-                    var info = new DriveInfo(root);
-                    double mb = info.AvailableFreeSpace / (1024.0 * 1024.0);
-                    // slow-drift signal — emit on first sample + when delta crosses threshold
-                    if (_prevDiskMb < 0 || Math.Abs(mb - _prevDiskMb) >= DISK_CHANGE_THRESHOLD_MB)
-                    {
-                        _pipeline.EnqueueMetric("available_disk_mb", mb);
-                        _prevDiskMb = mb;
-                    }
+                    _pipeline.EnqueueMetric("available_disk_mb", mb);
+                    _prevDiskMb = mb;
                 }
-                else
-                {
-                    _pipeline.EnqueueMetric("available_disk_mb", 0.0);
-                }
-            }
-            catch (Exception ex)
-            {
-                PlayScopeLog.Warning("MetricsSampler: available_disk_mb read failed: " + ex.Message);
-                _pipeline.EnqueueMetric("available_disk_mb", 0.0);
             }
 
             _pipeline.EnqueueMetric("system_free_ram_mb", NativeMetricsBridge.GetFreeMemoryMb());

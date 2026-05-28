@@ -39,4 +39,29 @@ extern "C"
         }
 #endif
     }
+
+    long PlayScopeGetAvailableDiskMb(void)
+    {
+        @try
+        {
+            NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+            NSString *path = paths.firstObject;
+            if (path == nil) { return -1; }
+
+            NSError *err = nil;
+            NSDictionary<NSFileAttributeKey, id> *attrs =
+                [[NSFileManager defaultManager] attributesOfFileSystemForPath:path error:&err];
+            if (attrs == nil || err != nil) { return -1; }
+
+            NSNumber *freeSize = attrs[NSFileSystemFreeSize];
+            if (freeSize == nil) { return -1; }
+
+            uint64_t bytes = [freeSize unsignedLongLongValue];
+            return (long)(bytes / (1024UL * 1024UL));
+        }
+        @catch (NSException *e)
+        {
+            return -1;
+        }
+    }
 }
