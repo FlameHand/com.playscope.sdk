@@ -68,7 +68,12 @@ namespace PlayScopeSdk.Internal
 
         private const float FpsInterval = 1f;
         private const float MemInterval = 5f;
-        private const float BatteryInterval = 30f;
+        // Slow device-state cadence (battery / thermal / charging / disk /
+        // free RAM / network). 10 s keeps short sessions (the common case —
+        // a couple of minutes) from getting only one or zero samples. The
+        // signals barely move, so the extra rows are cheap insurance against
+        // a session that ends before the first interval elapses.
+        private const float BatteryInterval = 10f;
         private const double DISK_CHANGE_THRESHOLD_MB = 5.0;
         // Frame-time + gc-alloc share the same 1 s cadence as fps. They're
         // jank-class metrics that only mean something on a sub-second
@@ -85,6 +90,12 @@ namespace PlayScopeSdk.Internal
         internal MetricsSampler(EventPipeline pipeline)
         {
             _pipeline = pipeline;
+            // Prime the slow-device timer so the first Tick fires an immediate
+            // device-state baseline (battery / disk / RAM / network) at t≈0
+            // instead of waiting a full interval. Without this a session that
+            // ends before the first BatteryInterval captures zero device-state
+            // samples — observed on real sub-30 s sessions.
+            _batteryTimer = BatteryInterval;
         }
 
         /// <summary>Called every frame from MonoBehaviour.Update() on main thread.</summary>
@@ -166,6 +177,9 @@ namespace PlayScopeSdk.Internal
             _prevDiskMb = -1.0;
             _prevNetwork = -1;
             _lastTotalAllocatedBytes = -1;
+            // Re-prime so a rotated session also emits its device-state
+            // baseline on the first Tick rather than after a full interval.
+            _batteryTimer = BatteryInterval;
             // Frame-time ring buffer is window-local (resets every 1s) — not
             // session-scoped. Do NOT touch _frameTimeIdx / _frameTimeCount.
             // Thermal reflection cache (_thermalStatusProperty,
