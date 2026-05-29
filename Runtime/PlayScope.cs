@@ -49,6 +49,7 @@ namespace PlayScopeSdk
             {
                 _openOperationTypes.TryRemove(ordered[i].Key, out _);
                 _openOperationStartTicks.TryRemove(ordered[i].Key, out _);
+                _openOperationStartMetadata.TryRemove(ordered[i].Key, out _);
             }
             PlayScopeLog.Warning(
                 $"PlayScope: open-operation dictionary cap ({MaxOpenOperations}) hit — " +
@@ -74,6 +75,15 @@ namespace PlayScopeSdk
         // can show how long EVERY tracked op took, not just HTTP requests where
         // a separate communicator happened to record it.
         private static readonly ConcurrentDictionary<string, long> _openOperationStartTicks = new();
+
+        // opId → snapshot of operation_start metadata — populated by StartOperation,
+        // drained by CompleteOperation, then merged into the operation_end event
+        // so end events carry forward dimension fields (operation_name / placement /
+        // network / ad_type / store / etc.) that only the start helper set. Without
+        // this, revenue + perf MVs reading from operation_end bucket every row as
+        // 'unknown' because the end event only carries result/duration. End-time
+        // caller metadata still wins on collision (authoritative).
+        private static readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, object>> _openOperationStartMetadata = new();
 
         // Hard cap on outstanding (Start-but-not-yet-Complete) operations.
         // Without this, a code path where CompleteOperation is never reached
@@ -355,6 +365,9 @@ namespace PlayScopeSdk
                 // Merge operation_name into metadata
                 var merged = new Dictionary<string, object> { ["operation_name"] = operationName ?? "" };
                 if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
+                // Stash a snapshot so the matching CompleteOperation can carry
+                // start-time dimensions onto operation_end (see field comment).
+                _openOperationStartMetadata[operationId] = merged;
                 PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_start", operationId: operationId,
                     operationType: typeStr, metadataJson: EventPipeline.DictToJson(merged));
                 return operationId;
@@ -404,8 +417,16 @@ namespace PlayScopeSdk
                 // own deserialization step and that figure is more honest than
                 // the raw SDK span.
                 _openOperationStartTicks.TryRemove(operationId, out var startTicks);
+                // Drain the start-metadata snapshot so we can carry its dimension
+                // fields forward — see _openOperationStartMetadata field comment.
+                _openOperationStartMetadata.TryRemove(operationId, out var startMetadata);
 
-                var merged = new Dictionary<string, object> { ["status"] = status.ToString() };
+                var merged = new Dictionary<string, object>();
+                if (startMetadata != null)
+                {
+                    foreach (var kv in startMetadata) merged[kv.Key] = kv.Value;
+                }
+                merged["status"] = status.ToString();
                 if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
                 if (startTicks != 0
                     && !merged.ContainsKey("duration_ms") && !merged.ContainsKey("durationMs"))
