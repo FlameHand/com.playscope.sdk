@@ -6,6 +6,7 @@ namespace PlayScopeSdk
         HTTP,
         ResourceLoad,
         SceneLoad,
-        Purchase
+        Purchase,
+        Ad
     }
 }

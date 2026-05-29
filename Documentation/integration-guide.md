@@ -210,6 +210,30 @@ PlayScope.EndPurchase(opId, OperationCompletionStatus.Cancelled, cancelMeta);
 
 `transactionId` is hashed (SHA-256, first 16 hex chars) by the helper before it leaves the device — the raw value never lands in metadata.
 
+### Ad impressions — use `AdMetadata` helpers
+
+Call `StartAd` when an ad load/show begins, `EndAd` when the impression resolves (shown, rewarded, skipped, failed). The dashboard's /revenue page splits IAP vs Ads from these events; /errors uses the open-operation window to correlate crashes that happen during an ad. Available on all plan tiers.
+
+```csharp
+using PlayScopeSdk;
+
+// Start
+var startMeta = AdMetadata.BuildStartMetadata(
+    AdMetadata.Network.AdMob,
+    "Rewarded_GameOver_v3",
+    AdMetadata.AdType.Rewarded);
+// Placement here is the operation name on the timeline; the helper also
+// stamps it into metadata.placement for the /revenue split.
+var opId = PlayScope.StartAd("Rewarded_GameOver_v3", startMeta);
+
+// On reward granted
+var endMeta = AdMetadata.BuildEndMetadata(
+    AdMetadata.AdResult.Rewarded,
+    revenue: 0.0142,
+    currency: "USD");
+PlayScope.EndAd(opId, OperationCompletionStatus.Success, endMeta);
+```
+
 ## 10. Track Caught Exceptions
 
 ```csharp

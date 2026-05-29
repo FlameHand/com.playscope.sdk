@@ -562,6 +562,38 @@ namespace PlayScopeSdk
         public static void EndPurchase(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
             => CompleteOperation(operationId, status, metadata);
 
+        // ── Ad-impression helpers ─────────────────────────────────────────────────
+
+        /// <summary>
+        /// Starts a timed ad-impression operation. Shorthand for <see cref="StartOperation"/> with <see cref="OperationType.Ad"/>.
+        /// Returns <see cref="string.Empty"/> in disabled state.
+        /// <para>
+        /// For the canonical metadata schema (<c>network</c> / <c>placement</c> /
+        /// <c>ad_type</c>) use <see cref="AdMetadata.BuildStartMetadata"/> — the
+        /// dashboard surfaces those keys as first-class fields on /revenue and
+        /// /errors crash-during-ad correlation.
+        /// </para>
+        /// </summary>
+        /// <param name="placement">Integrator-defined placement ID (e.g. "Rewarded_GameOver_v3"). Used as the operation name.</param>
+        /// <param name="metadata">Optional ad-initiation attributes; build via <see cref="AdMetadata.BuildStartMetadata"/> for the canonical schema.</param>
+        /// <returns>An opaque operation ID, or <see cref="string.Empty"/> in disabled state.</returns>
+        public static string StartAd(string placement, IReadOnlyDictionary<string, object> metadata = null)
+            => StartOperation(OperationType.Ad, placement, metadata);
+
+        /// <summary>
+        /// Completes an ad-impression operation started with <see cref="StartAd"/>.
+        /// <para>
+        /// For the canonical end-of-impression metadata schema (<c>result</c> /
+        /// <c>revenue</c> / <c>currency</c>) use <see cref="AdMetadata.BuildEndMetadata"/>.
+        /// Negative revenue is clamped to 0 by the helper before it leaves the device.
+        /// </para>
+        /// </summary>
+        /// <param name="operationId">ID returned by <see cref="StartAd"/>.</param>
+        /// <param name="status">Final outcome of the ad impression (Success, Failure, Cancelled, etc.).</param>
+        /// <param name="metadata">Optional completion-time attributes; build via <see cref="AdMetadata.BuildEndMetadata"/> for the canonical schema.</param>
+        public static void EndAd(string operationId, OperationCompletionStatus status, IReadOnlyDictionary<string, object> metadata = null)
+            => CompleteOperation(operationId, status, metadata);
+
         // ── Logging ───────────────────────────────────────────────────────────────
 
         /// <summary>
