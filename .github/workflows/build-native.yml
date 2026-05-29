@@ -68,4 +68,16 @@ jobs:
             exit 0
           fi
           git commit -m "chore(native): rebuild libplayscope_crash for arm64-v8a/armeabi-v7a/x86_64"
-          git push origin HEAD
+          # release.yml frequently runs in parallel with us and pushes
+          # a version-bump commit. Rebase + retry to handle the race.
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin main
+            if git push origin HEAD; then
+              echo "push ok on attempt $attempt"
+              exit 0
+            fi
+            echo "push rejected on attempt $attempt — retrying after pull --rebase"
+            sleep 5
+          done
+          echo "push failed after 5 attempts"
+          exit 1
