@@ -31,6 +31,7 @@ namespace PlayScopeSdk
             Interlocked.Exchange(ref _disabledCompleteWarned, 0);
             _openOperationTypes.Clear();
             _openOperationStartTicks.Clear();
+            _openOperationStartMetadata.Clear();
         }
 
         // Walks the open-operations dicts once and removes the smallest
