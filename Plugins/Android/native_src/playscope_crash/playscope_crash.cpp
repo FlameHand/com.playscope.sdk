@@ -21,6 +21,7 @@
 
 #include <jni.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
@@ -86,6 +87,10 @@ namespace
     // ---- handler-only scratch (no malloc in handler) ----
     char g_scratch[SCRATCH_SIZE];
     uintptr_t g_frames[MAX_FRAMES];
+    // Raw _Unwind_Backtrace output before we strip the handler/shim prefix
+    // and splice in the real fault frame. Separate buffer so the rebuild
+    // into g_frames doesn't overwrite entries it still needs to read.
+    uintptr_t g_raw_frames[MAX_FRAMES];
     size_t g_frame_count;
     char g_path_buf[PATH_MAX_LEN];
     char g_tmp_path_buf[PATH_MAX_LEN];
@@ -291,6 +296,31 @@ namespace
         return _URC_NO_REASON;
     }
 
+    // Extract the interrupted instruction pointer (the real fault site) from
+    // the signal ucontext. Distinct from si_addr, which is the faulting DATA
+    // address. Returns 0 when the context is unavailable or the arch is
+    // unknown — the caller then keeps the raw unwind unchanged.
+    uintptr_t extract_crash_pc(void* uctx)
+    {
+        if (uctx == nullptr)
+        {
+            return 0;
+        }
+        const ucontext_t* uc = static_cast<const ucontext_t*>(uctx);
+#if defined(__aarch64__)
+        return static_cast<uintptr_t>(uc->uc_mcontext.pc);
+#elif defined(__arm__)
+        return static_cast<uintptr_t>(uc->uc_mcontext.arm_pc);
+#elif defined(__x86_64__)
+        return static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]);
+#elif defined(__i386__)
+        return static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_EIP]);
+#else
+        (void)uc;
+        return 0;
+#endif
+    }
+
     // -------- file write --------
 
     // Build "{crash_dir}/{session_id}.json[.tmp]" into out. Returns false
@@ -349,7 +379,7 @@ namespace
 
     // -------- the handler --------
 
-    void handler(int sig, siginfo_t* si, void* /*uctx*/)
+    void handler(int sig, siginfo_t* si, void* uctx)
     {
         // 1. Snapshot capture data into static buffers.
         int64_t tid = static_cast<int64_t>(gettid());
@@ -364,10 +394,47 @@ namespace
         uintptr_t fault_addr = (si != nullptr) ? reinterpret_cast<uintptr_t>(si->si_addr) : 0;
 
         // 2. Capture backtrace.
+        //
+        // _Unwind_Backtrace runs inside the handler, so its leading frames are
+        // the handler itself + the signal-chaining shims (libsigchain, plus any
+        // coexisting native crash SDK such as Embrace) + the kernel signal
+        // trampoline. The genuine crashing frame only appears AFTER that prefix.
+        // Emitting the raw list would make frames[0] always libplayscope_crash.so
+        // and collapse every native crash into one fingerprint.
+        //
+        // Fix: take the real fault PC from the interrupted ucontext, make it
+        // frames[0], then append the raw frames that follow the matching
+        // interrupted frame (the genuine callers), dropping the handler/shim
+        // prefix. If the PC is unavailable or not found in the raw list we still
+        // seed frames[0] with it when known (so the fingerprint + headline are
+        // correct), accepting a noisier tail.
+        uintptr_t crash_pc = extract_crash_pc(uctx);
+
+        size_t raw_count = 0;
+        {
+            UnwindCtx uc = { 0, g_raw_frames, MAX_FRAMES };
+            _Unwind_Backtrace(unwind_cb, &uc);
+            raw_count = uc.count;
+        }
+
         g_frame_count = 0;
-        UnwindCtx uc = { 0, g_frames, MAX_FRAMES };
-        _Unwind_Backtrace(unwind_cb, &uc);
-        g_frame_count = uc.count;
+        size_t copy_start = 0;
+        if (crash_pc != 0)
+        {
+            g_frames[g_frame_count++] = crash_pc;
+            for (size_t i = 0; i < raw_count; ++i)
+            {
+                if (g_raw_frames[i] == crash_pc)
+                {
+                    copy_start = i + 1;
+                    break;
+                }
+            }
+        }
+        for (size_t i = copy_start; i < raw_count && g_frame_count < MAX_FRAMES; ++i)
+        {
+            g_frames[g_frame_count++] = g_raw_frames[i];
+        }
 
         // 3. Build the JSON in g_scratch.
         size_t pos = 0;
