@@ -1,12 +1,11 @@
 name: Build native libs
 
+# Push-time native rebuilds now run as the `native-build` job inside
+# release.yml, sequenced BEFORE the version bump/tag so the rebuilt .so
+# always lands in the tagged commit (no race with release.yml). This
+# workflow is kept as a manual-only lever to rebuild the three .so binaries
+# without cutting a release.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'Plugins/Android/native_src/**'
-      - '.github/workflows/build-native.yml'
-      - '.github/workflows/gen_so_meta.py'
   workflow_dispatch:
 
 jobs:

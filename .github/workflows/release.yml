@@ -10,20 +10,129 @@ on:
         required: false
         type: string
 
+# Single sequential pipeline: native-build → release.
+#
+# Previously release.yml (bump+tag) and build-native.yml (rebuild .so) both
+# fired on the same push and RACED — release frequently tagged first, so the
+# tag pointed at a commit that still carried the STALE prebuilt .so, while the
+# rebuilt .so landed in an untagged commit right after. Consumers pinning that
+# tag got the old binary (the v0.6.8 native-crash regression).
+#
+# Now the native rebuild runs as a dependency of release: the .so is rebuilt
+# and committed FIRST, then release advances to the tip of main (picking up
+# that commit) and tags it — so every tag always carries a .so that matches
+# its native_src. A failing native build blocks the release (fail-closed)
+# instead of shipping stale binaries.
 jobs:
-  release:
-    name: Bump, tag & publish
+  native-build:
+    name: Rebuild native libs if native_src changed
     runs-on: ubuntu-latest
-    # Skip commits made by this workflow itself to prevent infinite loops
+    # Skip commits made by this workflow itself to prevent infinite loops.
     if: ${{ github.actor != 'github-actions[bot]' }}
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only pay the NDK build cost when the C++ source (or its build recipe)
+      # actually changed. workflow_dispatch always rebuilds. A first push / a
+      # missing "before" SHA falls back to rebuilding (safe default).
+      - name: Detect native_src changes
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "${{ github.event.before }}" ] || \
+               [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" \
+               | grep -qE '^Plugins/Android/native_src/|^\.github/workflows/gen_so_meta\.py$'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Android NDK
+        if: steps.detect.outputs.changed == 'true'
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Build .so for arm64-v8a, armeabi-v7a, x86_64
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -e
+          SRC=Plugins/Android/native_src/playscope_crash
+          OUT=Plugins/Android/libs
+          for ABI in arm64-v8a armeabi-v7a x86_64; do
+            BUILD=build-$ABI
+            cmake -S "$SRC" -B "$BUILD" \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=$ABI \
+              -DANDROID_PLATFORM=android-21 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DANDROID_STL=c++_static
+            cmake --build "$BUILD" --config Release -j
+            mkdir -p "$OUT/$ABI"
+            cp "$BUILD/libplayscope_crash.so" "$OUT/$ABI/libplayscope_crash.so"
+          done
+          ls -l "$OUT"/*/libplayscope_crash.so
+
+      - name: Generate .meta files
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          python3 .github/workflows/gen_so_meta.py
+          ls -l Plugins/Android/libs/*/libplayscope_crash.so.meta
+
+      - name: Commit rebuilt binaries if changed
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Plugins/Android/libs/
+          if git diff --cached --quiet; then
+            echo "No binary changes — skipping commit."
+            exit 0
+          fi
+          git commit -m "chore(native): rebuild libplayscope_crash for arm64-v8a/armeabi-v7a/x86_64"
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin main
+            if git push origin HEAD:main; then
+              echo "push ok on attempt $attempt"
+              exit 0
+            fi
+            echo "push rejected on attempt $attempt — retrying after pull --rebase"
+            sleep 5
+          done
+          echo "push failed after 5 attempts"
+          exit 1
+
+  release:
+    name: Bump, tag & publish
+    needs: native-build
+    runs-on: ubuntu-latest
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # native-build may have pushed a fresh .so commit; advance local main to
+      # the tip of origin so the tag we cut includes it.
+      - name: Sync to latest main
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
 
       - name: Determine version
         id: version
@@ -74,7 +183,7 @@ jobs:
       - name: Tag and push
         run: |
           git tag "v${{ steps.version.outputs.new }}"
-          git push origin HEAD
+          git push origin HEAD:main
           git push origin "v${{ steps.version.outputs.new }}"
 
       - name: Create GitHub Release
