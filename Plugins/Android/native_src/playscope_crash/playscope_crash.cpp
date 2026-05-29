@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
+#include <stdio.h>     // rename(2) prototype
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
@@ -45,7 +46,9 @@ namespace
     constexpr size_t PATH_MAX_LEN = CRASH_DIR_MAX + SESSION_ID_MAX + 16;
     constexpr size_t MAX_FRAMES = 64;
     constexpr size_t SCRATCH_SIZE = 8192;
-    constexpr size_t ALT_STACK_SIZE = SIGSTKSZ * 2;
+    // SIGSTKSZ on some Android NDK versions resolves to a runtime call
+    // (sysconf), so this can't be constexpr. Hand-pick a generous size.
+    constexpr size_t ALT_STACK_SIZE = 32 * 1024;
 
     constexpr int FATAL_SIGNALS[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE };
     constexpr int NUM_FATAL_SIGNALS = sizeof(FATAL_SIGNALS) / sizeof(FATAL_SIGNALS[0]);
