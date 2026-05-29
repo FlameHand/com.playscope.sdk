@@ -40,6 +40,12 @@ namespace PlayScopeSdk.Internal
                     // No log here unless something to enqueue; otherwise every
                     // startup is noisy.
                     EnqueueCompletedSessions(uploadQueue);
+                    // Native crashes can still be present on a clean
+                    // state path (process crashed AFTER session_end was
+                    // direct-written + chunks finalized — the session
+                    // was "officially" closed by the time the signal
+                    // landed). Treat them as orphans.
+                    EmitOrphanNativeCrashes(uploadQueue);
                     return;
                 }
 
@@ -89,6 +95,14 @@ namespace PlayScopeSdk.Internal
                     appendSyntheticAbnormalEnd: true);
 
                 EnqueueCompletedSessions(uploadQueue, excludeSessionId: recoveredFolder);
+
+                // Native crash orphans — crash files whose session_id did
+                // NOT match the recovered session (rare: SDK was rotated
+                // between two crashes, or the crashed session left no
+                // chunks behind because session_start hadn't flushed
+                // yet). Drain them into per-session recovered folders so
+                // the uploader picks them up under the right envelope.
+                EmitOrphanNativeCrashes(uploadQueue);
             }
             catch (Exception ex)
             {
@@ -256,6 +270,23 @@ namespace PlayScopeSdk.Internal
             // Step 3b: scan completed (non-current) chunks for session_end
             bool sessionEndFound = ScanChunksForSessionEnd(chunksDir);
 
+            // Step 3b.1: native crash record for THIS recovered session, if any.
+            // Consumed (file deleted) up-front so it can't be re-emitted via
+            // the orphan drain path at the end of RecoverIfNeeded. Reason is
+            // promoted to "native_crash" further down when present.
+            NativeCrashRecord nativeCrash = null;
+            try
+            {
+                nativeCrash = PlayScopeCrashCollector.TryConsumeCrashFor(sessionId);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning(
+                    $"[PlayScope] SessionRecovery: TryConsumeCrashFor({sessionId}) threw — " +
+                    $"continuing without native crash data: {ex.Message}");
+                nativeCrash = null;
+            }
+
             if (!sessionEndFound && appendSyntheticAbnormalEnd)
             {
                 // Step 3d: abnormal end — append synthetic event to chunk_current.jsonl
@@ -287,14 +318,27 @@ namespace PlayScopeSdk.Internal
                     // hook explicitly observed a user-initiated close —
                     // wins over any state-based heuristic. This is the
                     // unambiguous "user swiped from recents" signal.
-                    var reason = intent && lifecycleState == "user_close"
-                        ? "user_close"
-                        : lifecycleState switch
-                          {
-                              "foreground" => "foreground_crash",
-                              "background" => "background_kill",
-                              _ => "unknown",
-                          };
+                    // Native crash record (when present) is the strongest
+                    // signal — the OS demonstrably delivered a fatal signal,
+                    // so reason overrides the heuristic chain.
+                    string reason;
+                    if (nativeCrash != null)
+                    {
+                        reason = "native_crash";
+                    }
+                    else if (intent && lifecycleState == "user_close")
+                    {
+                        reason = "user_close";
+                    }
+                    else
+                    {
+                        reason = lifecycleState switch
+                        {
+                            "foreground" => "foreground_crash",
+                            "background" => "background_kill",
+                            _ => "unknown",
+                        };
+                    }
 
                     // Player swipes the app from recents OR OS evicts a
                     // backgrounded process to reclaim memory — both are the
@@ -314,6 +358,7 @@ namespace PlayScopeSdk.Internal
                     var isNormalEnd = reason is "user_close" or "background_kill";
                     var eventType = isNormalEnd ? "session_end" : "session_abnormal_end";
                     var endStatus = isNormalEnd ? "normal" : "abnormal";
+                    var crashFilePresent = nativeCrash != null;
 
                     // sequence_num MUST sort strictly after every real event
                     // the session emitted; without an explicit value the JSON
@@ -338,7 +383,22 @@ namespace PlayScopeSdk.Internal
                         $"{{\"record_type\":\"event\",\"event_type\":\"{eventType}\"," +
                         $"\"event_id\":\"{eventId}\",\"sequence_num\":{SyntheticSequenceNum}," +
                         $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"," +
-                        $"\"metadata\":{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")},\"synthesized_by\":\"session_recovery\"}}}}\n";
+                        $"\"metadata\":{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")},\"crash_file_present\":{(crashFilePresent ? "true" : "false")},\"synthesized_by\":\"session_recovery\"}}}}\n";
+
+                    // Native crash exception log line — emitted BEFORE the
+                    // synthetic session_end so the timeline reads "crash →
+                    // session_end" in sequence order. Sequence_num sits
+                    // just below SyntheticSequenceNum so it sorts after
+                    // every real event but before the synthetic end.
+                    string nativeCrashLogLine = null;
+                    if (nativeCrash != null)
+                    {
+                        nativeCrashLogLine = BuildNativeCrashLogLine(
+                            nativeCrash,
+                            sessionIdForLine: safeSessionId,
+                            sequenceNum: SyntheticSequenceNum - 1,
+                            fallbackTimestampIso: timestamp);
+                    }
 
                     // If the prior process died mid-write, the existing
                     // chunk_current.jsonl may NOT end with '\n'. Appending
@@ -364,9 +424,13 @@ namespace PlayScopeSdk.Internal
                     }
                     catch { /* best-effort; default to no prepend */ }
 
-                    var toWrite = needsLeadingNewline ? "\n" + syntheticLine : syntheticLine;
+                    var prefix = needsLeadingNewline ? "\n" : "";
+                    var combinedLines = nativeCrashLogLine != null
+                        ? nativeCrashLogLine + syntheticLine
+                        : syntheticLine;
+                    var toWrite = prefix + combinedLines;
                     File.AppendAllText(currentChunk, toWrite, new System.Text.UTF8Encoding(false));
-                    Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {endStatus}/{reason} (last lifecycle state: {lifecycleState ?? "unknown"}, intent: {intent}).");
+                    Debug.Log($"[PlayScope] SessionRecovery: classified previous session as {endStatus}/{reason} (last lifecycle state: {lifecycleState ?? "unknown"}, intent: {intent}, native_crash: {crashFilePresent}).");
                 }
                 catch (Exception ex)
                 {
@@ -376,6 +440,49 @@ namespace PlayScopeSdk.Internal
                 // Tidy up the stale lifecycle file regardless of outcome —
                 // the new session about to start will write its own.
                 try { Core.Session.SessionFiles.DeleteLifecycleState(); } catch { /* best-effort */ }
+            }
+            else if (nativeCrash != null)
+            {
+                // session_end was found in chunks (rare: SDK shut down
+                // cleanly, then the OS delivered the fatal signal during
+                // process teardown — the crash file landed but the
+                // session is already "closed"). Still emit the exception
+                // log line so the dashboard sees it.
+                try
+                {
+                    var safeSessionId = sessionId ?? "";
+                    var fallbackTs = nativeCrash.CapturedAtUnixMs > 0
+                        ? DateTimeOffset.FromUnixTimeMilliseconds(nativeCrash.CapturedAtUnixMs).UtcDateTime
+                            .ToString("o")
+                        : DateTime.UtcNow.ToString("o");
+                    const long PostShutdownCrashSeq = int.MaxValue - 1;
+                    var line = BuildNativeCrashLogLine(
+                        nativeCrash,
+                        sessionIdForLine: safeSessionId,
+                        sequenceNum: PostShutdownCrashSeq,
+                        fallbackTimestampIso: fallbackTs);
+                    bool needsLeadingNewline = false;
+                    if (File.Exists(currentChunk))
+                    {
+                        try
+                        {
+                            using var fs = new FileStream(currentChunk, FileMode.Open, FileAccess.Read);
+                            if (fs.Length > 0)
+                            {
+                                fs.Seek(-1, SeekOrigin.End);
+                                needsLeadingNewline = fs.ReadByte() != '\n';
+                            }
+                        }
+                        catch { /* best-effort */ }
+                    }
+                    File.AppendAllText(currentChunk, (needsLeadingNewline ? "\n" : "") + line,
+                        new System.Text.UTF8Encoding(false));
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning(
+                        $"[PlayScope] SessionRecovery: failed to append native crash log (post-shutdown path): {ex.Message}");
+                }
             }
 
             // Step 3c/3d (cont.): move ALL .jsonl files (including chunk_current) to destDir
@@ -802,6 +909,145 @@ namespace PlayScopeSdk.Internal
             {
                 Debug.LogWarning($"[PlayScope] SessionRecovery: failed to delete session.lock: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Builds a JSONL log line for one native crash record. Shape
+        /// mirrors <see cref="WriterWorker.SerializeLog"/> with the
+        /// addition of a top-level <c>session_id</c> field so the line is
+        /// self-describing when it rides under a different session's
+        /// envelope (orphan path).
+        /// </summary>
+        private static string BuildNativeCrashLogLine(
+            NativeCrashRecord record, string sessionIdForLine, long sequenceNum, string fallbackTimestampIso)
+        {
+            var sb = new System.Text.StringBuilder(512);
+            sb.Append("{\"record_type\":\"log\"");
+            sb.Append(",\"event_id\":\"").Append(Guid.NewGuid().ToString("N")).Append('"');
+            sb.Append(",\"sequence_num\":").Append(sequenceNum);
+            // Use the captured_at_unix_ms from the crash record when
+            // available — the crash happened then, not now. Falls back
+            // to the caller-supplied timestamp (synthetic session_end
+            // alignment) when the C++ handler couldn't read the clock.
+            string crashIsoTs;
+            if (record.CapturedAtUnixMs > 0)
+            {
+                crashIsoTs = DateTimeOffset.FromUnixTimeMilliseconds(record.CapturedAtUnixMs)
+                    .UtcDateTime
+                    .ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            }
+            else
+            {
+                crashIsoTs = fallbackTimestampIso ?? DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            }
+            sb.Append(",\"timestamp\":");
+            EventPipeline.AppendEscapedString(sb, crashIsoTs);
+            sb.Append(",\"session_id\":");
+            EventPipeline.AppendEscapedString(sb, sessionIdForLine ?? string.Empty);
+            sb.Append(",\"level\":\"exception\"");
+            sb.Append(",\"message\":");
+            EventPipeline.AppendEscapedString(sb, PlayScopeCrashCollector.BuildMessage(record));
+            var stack = PlayScopeCrashCollector.BuildStackTrace(record);
+            if (!string.IsNullOrEmpty(stack))
+            {
+                sb.Append(",\"stack_trace\":");
+                EventPipeline.AppendEscapedString(sb, stack);
+            }
+            sb.Append(",\"metadata\":")
+                .Append(PlayScopeCrashCollector.BuildExceptionMetadataJson(record));
+            sb.Append("}\n");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Drains every crash file the collector still holds (i.e. that
+        /// did NOT match a recovered session id) into per-session
+        /// recovered folders. Each orphan gets its own
+        /// <c>completed_sessions/{sessionId}/</c> directory with a
+        /// minimal manifest so UploaderWorker.ResolveEnvelopeIdentity
+        /// accepts it. Best-effort: failures are logged and the rest of
+        /// recovery continues.
+        /// </summary>
+        private static void EmitOrphanNativeCrashes(UploadQueue queue)
+        {
+            IReadOnlyList<NativeCrashRecord> orphans;
+            try
+            {
+                orphans = PlayScopeCrashCollector.DrainOrphans();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] SessionRecovery: DrainOrphans threw: {ex.Message}");
+                return;
+            }
+            if (orphans == null || orphans.Count == 0) return;
+
+            for (int i = 0; i < orphans.Count; i++)
+            {
+                var record = orphans[i];
+                if (record == null || string.IsNullOrEmpty(record.SessionId))
+                {
+                    PlayScopeLog.Warning(
+                        "SessionRecovery: orphan crash record missing session_id — discarding.");
+                    continue;
+                }
+                try
+                {
+                    EmitOneOrphanCrash(record, queue);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning(
+                        $"[PlayScope] SessionRecovery: failed to emit orphan crash for session_id={record.SessionId}: {ex.Message}");
+                }
+            }
+        }
+
+        private static void EmitOneOrphanCrash(NativeCrashRecord record, UploadQueue queue)
+        {
+            var destDir = Path.Combine(PlayScopeDirectory.CompletedSessions, record.SessionId);
+            Directory.CreateDirectory(destDir);
+
+            // Skip if a session.json manifest already exists with a
+            // different session_id — would be a real recovered session
+            // and we don't want to corrupt it. Same-session_id manifest
+            // is fine to re-use.
+            var manifestPath = Path.Combine(destDir, "session.json");
+            if (!File.Exists(manifestPath))
+            {
+                var startedAtIso = record.CapturedAtUnixMs > 0
+                    ? DateTimeOffset.FromUnixTimeMilliseconds(record.CapturedAtUnixMs)
+                        .UtcDateTime.ToString("o")
+                    : DateTime.UtcNow.ToString("o");
+                var shortId = record.SessionId.Replace("-", "");
+                if (shortId.Length > 8) shortId = shortId.Substring(0, 8);
+                var manifestJson = "{" +
+                    "\"session_id\":\"" + record.SessionId + "\"," +
+                    "\"session_short_id\":\"" + shortId + "\"," +
+                    "\"started_at\":\"" + startedAtIso + "\"," +
+                    "\"sdk_version\":\"" + PlayScopeRuntime.SdkVersion + "\"," +
+                    "\"schema_version\":1" +
+                    "}";
+                File.WriteAllText(manifestPath, manifestJson, new System.Text.UTF8Encoding(false));
+            }
+
+            var chunkName = "chunk_native_crash_" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".jsonl";
+            var chunkPath = Path.Combine(destDir, chunkName);
+            // sequence_num just needs to be high enough that it can't
+            // collide with a real event in the (non-existent in the
+            // orphan case) prior chunks. int.MaxValue - 1 mirrors the
+            // synthetic session_end convention.
+            const long OrphanSeq = int.MaxValue - 1;
+            var fallbackIso = record.CapturedAtUnixMs > 0
+                ? DateTimeOffset.FromUnixTimeMilliseconds(record.CapturedAtUnixMs).UtcDateTime.ToString("o")
+                : DateTime.UtcNow.ToString("o");
+            var line = BuildNativeCrashLogLine(
+                record, sessionIdForLine: record.SessionId, sequenceNum: OrphanSeq,
+                fallbackTimestampIso: fallbackIso);
+            File.WriteAllText(chunkPath, line, new System.Text.UTF8Encoding(false));
+
+            queue.Enqueue(chunkPath);
+            PlayScopeLog.Info($"SessionRecovery: emitted orphan native crash for session_id={record.SessionId} → {chunkName}");
         }
     }
 }

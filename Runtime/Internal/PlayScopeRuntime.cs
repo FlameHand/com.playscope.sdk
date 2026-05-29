@@ -312,6 +312,20 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
+            // Step 3.5: Initialise the native crash collector BEFORE
+            // SessionRecovery runs — recovery reads back any crash files
+            // the prior process wrote and turns them into exception log
+            // records. PreInit ensures the crash dir exists; on Android
+            // OnSessionInitialized below installs the signal handler.
+            try
+            {
+                PlayScopeCrashCollector.PreInit();
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("PlayScopeCrashCollector.PreInit failed — native crash capture disabled", ex);
+            }
+
             // Step 4: Recover any stale session from a previous crash (PSDK-12)
             // UploadQueue is created here so recovery can enqueue chunks immediately;
             // the uploader worker is started after the new session is fully initialised.
@@ -343,6 +357,12 @@ namespace PlayScopeSdk.Internal
                 // top of the C# OnApplicationPause-driven state. No-op in
                 // Editor / Standalone / WebGL.
                 NativeLifecycleBridge.Install();
+                // Install/refresh native crash signal handler with the
+                // freshly-generated session_id. Android-only at runtime;
+                // every other platform is a no-op. Failure inside the
+                // collector is swallowed and logged — SDK init MUST NOT
+                // abort because crash capture failed to wire.
+                PlayScopeCrashCollector.OnSessionInitialized(CurrentSession.SessionId);
             }
             catch (Exception ex)
             {

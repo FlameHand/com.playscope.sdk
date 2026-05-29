@@ -161,6 +161,22 @@ namespace PlayScopeSdk.Editor
                         total += copied;
                     }
                 }
+
+                // Android only: recurse into libs/ subtree, preserving
+                // libs/{ABI}/ structure. Native .so files require an
+                // explicit PluginImporter CPU setting per-ABI on top of
+                // the standard "Android platform = true" toggle —
+                // without it Unity ships the wrong slice (or none at
+                // all) into the APK and the System.loadLibrary call at
+                // SDK init fails with UnsatisfiedLinkError.
+                if (entry.Platform == BuildTarget.Android)
+                {
+                    var libsSrcDir = Path.Combine(srcDir, "libs");
+                    if (Directory.Exists(libsSrcDir))
+                    {
+                        total += SyncAndroidLibs(libsSrcDir, entry.DstDir, installedNames, verbose, forceOverwrite);
+                    }
+                }
             }
 
             if (total > 0)
@@ -168,6 +184,67 @@ namespace PlayScopeSdk.Editor
                 AssetDatabase.Refresh();
             }
             return new SyncResult(total, installedNames);
+        }
+
+        // ABI directory name → Unity PluginImporter CPU value. Lockstep with
+        // the build-native.yml matrix in the SDK repo. Anything not in the
+        // map gets skipped with a warning — better than mis-tagging a slice
+        // and shipping a broken APK that loads the wrong arch.
+        private static readonly (string AbiDir, string Cpu)[] ANDROID_ABIS =
+        {
+            ("arm64-v8a",   "ARM64"),
+            ("armeabi-v7a", "ARMv7"),
+            ("x86_64",      "X86_64"),
+        };
+
+        private static int SyncAndroidLibs(
+            string libsSrcDir, string dstRootDir, List<string> installedNames,
+            bool verbose, bool forceOverwrite)
+        {
+            int total = 0;
+            for (int i = 0; i < ANDROID_ABIS.Length; i++)
+            {
+                var abi = ANDROID_ABIS[i];
+                var abiSrcDir = Path.Combine(libsSrcDir, abi.AbiDir);
+                if (!Directory.Exists(abiSrcDir))
+                {
+                    continue;
+                }
+                var abiDstDir = Path.Combine(dstRootDir, "libs", abi.AbiDir);
+                string[] files;
+                try
+                {
+                    files = Directory.GetFiles(abiSrcDir);
+                }
+                catch (Exception ex)
+                {
+                    if (verbose)
+                    {
+                        Debug.LogWarning($"[PlayScope] Native plugin installer: cannot list {abiSrcDir}: {ex.Message}");
+                    }
+                    continue;
+                }
+                foreach (var srcFile in files)
+                {
+                    var fileName = Path.GetFileName(srcFile);
+                    if (fileName.StartsWith("."))
+                    {
+                        continue;
+                    }
+                    if (fileName.EndsWith(".meta"))
+                    {
+                        continue;
+                    }
+                    int copied = SyncAndroidNativeFile(
+                        srcFile, abiDstDir, fileName, abi.Cpu, verbose, forceOverwrite);
+                    if (copied > 0)
+                    {
+                        installedNames.Add($"{abiDstDir}/{fileName}");
+                        total += copied;
+                    }
+                }
+            }
+            return total;
         }
 
         /// <summary>
@@ -237,6 +314,63 @@ namespace PlayScopeSdk.Editor
                 Debug.LogWarning(
                     $"[PlayScope] Imported {dst} but couldn't read PluginImporter — " +
                     "open the Inspector and set Include Platforms manually.");
+            }
+
+            return 1;
+        }
+
+        /// <summary>
+        /// Mirrors <see cref="SyncFile"/> but for ABI-scoped Android
+        /// native libraries. Distinct from SyncFile because the
+        /// PluginImporter settings need an additional <c>CPU</c>
+        /// platform-data slot — without it Unity ships the wrong slice
+        /// (or none) into the APK and System.loadLibrary fails with
+        /// UnsatisfiedLinkError.
+        /// </summary>
+        private static int SyncAndroidNativeFile(
+            string src, string dstDir, string fileName, string cpu, bool verbose, bool forceOverwrite)
+        {
+            if (!File.Exists(src))
+            {
+                if (verbose)
+                {
+                    Debug.LogWarning($"[PlayScope] Native plugin source missing: {src}");
+                }
+                return 0;
+            }
+
+            Directory.CreateDirectory(dstDir);
+            var dst = Path.Combine(dstDir, fileName);
+
+            var srcBytes = File.ReadAllBytes(src);
+            var changed = forceOverwrite || !File.Exists(dst) || !ByteArraysEqual(srcBytes, File.ReadAllBytes(dst));
+            if (!changed)
+            {
+                return 0;
+            }
+
+            File.WriteAllBytes(dst, srcBytes);
+            if (verbose)
+            {
+                Debug.Log($"[PlayScope] Installed native plugin: {dst} (CPU={cpu})");
+            }
+
+            AssetDatabase.ImportAsset(dst, ImportAssetOptions.ForceUpdate);
+            var importer = AssetImporter.GetAtPath(dst) as PluginImporter;
+            if (importer != null)
+            {
+                importer.SetCompatibleWithAnyPlatform(false);
+                importer.SetCompatibleWithEditor(false);
+                importer.SetCompatibleWithPlatform(BuildTarget.Android, true);
+                importer.SetCompatibleWithPlatform(BuildTarget.iOS, false);
+                importer.SetPlatformData(BuildTarget.Android, "CPU", cpu);
+                importer.SaveAndReimport();
+            }
+            else if (verbose)
+            {
+                Debug.LogWarning(
+                    $"[PlayScope] Imported {dst} but couldn't read PluginImporter — " +
+                    $"open the Inspector and set Include Platforms manually (Android, CPU={cpu}).");
             }
 
             return 1;
