@@ -9,13 +9,14 @@ PlayScope is a session-recording and diagnostics SDK for Unity games. It capture
 | **Lifecycle** — session_start / session_end, foreground / background transitions, app updates, first frame, first input | ✅ | — |
 | **Screens** | — | `SetScreen()` |
 | **Actions** | — | `TrackAction()` |
-| **Operations** — HTTP / asset load / scene load / purchases | — | `StartHTTP` / `StartResourceLoad` / `StartSceneLoad` / `StartPurchase` |
+| **Operations** — HTTP / asset load / scene load / purchases / ads | — | `StartHTTP` / `StartResourceLoad` / `StartSceneLoad` / `StartPurchase` / `StartAd` |
+| **Monetisation** — IAP + ad-impression revenue | — | `PurchaseMetadata` / `AdMetadata` helpers |
 | **State** — full profile snapshot + incremental patches | — | `SetInitialState()` + `UpdateState()` |
 | **Session data** — device, OS, addressables, disk, memory | ✅ | `UpdateSessionData()` for game-specific extras |
 | **Logs / exceptions** | ✅ via `AutoCaptureUnityLogs` | `TrackLog()` / `TrackException()` |
 | **Crashes & ANR** — main-thread stalls > 2 s | ✅ | — |
 | **Memory pressure** — `Application.lowMemory` (Android `onTrimMemory` + iOS memory warning) | ✅ | — |
-| **Perf metrics** — fps, frame-time p99, dropped frames, GC alloc per second, heap, battery, network reachability | ✅ | — |
+| **Perf metrics** — fps, frame-time p99, dropped frames, GC alloc/s, heap, battery, charging, thermal state, free disk, free RAM, network reachability | ✅ | — |
 | **Privacy** — value-level PII masking (emails, JWTs, cards, phones, tokens, IPs) | ✅ | toggle via `PiiValueMasksEnabled` |
 
 ## Requirements
@@ -32,10 +33,10 @@ PlayScope is a session-recording and diagnostics SDK for Unity games. It capture
 3. Enter:
 
 ```
-https://github.com/FlameHand/com.playscope.sdk.git#v0.1.39
+https://github.com/FlameHand/com.playscope.sdk.git#v0.6.4
 ```
 
-Pin to a specific tag (recommended). The SDK auto-versions on every change to `main` — `v0.1.39` is the current release at time of writing; check [GitHub Releases](https://github.com/FlameHand/com.playscope.sdk/releases) for the latest tag.
+Pin to a specific tag (recommended). The SDK auto-versions on every change to `main` — `v0.6.4` is the current release at time of writing; check [GitHub Releases](https://github.com/FlameHand/com.playscope.sdk/releases) for the latest tag.
 
 ### Via manifest.json
 
@@ -44,7 +45,7 @@ Add to `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.playscope.sdk": "https://github.com/FlameHand/com.playscope.sdk.git#v0.1.39"
+    "com.playscope.sdk": "https://github.com/FlameHand/com.playscope.sdk.git#v0.6.4"
   }
 }
 ```
@@ -58,21 +59,12 @@ using System.Collections.Generic;
 
 public class AppBootstrapper : MonoBehaviour
 {
-    [SerializeField] private string _playscopeApiKey;
-
     private void Awake()
     {
-        // 1. Initialize — once, as early as possible
-        PlayScope.Initialize(new PlayScopeContext
-        {
-            ApiKey               = _playscopeApiKey,
-            AutoCaptureUnityLogs = true,
-            AutoCaptureMinLevel  = LogLevel.Warning,
-            // Defaults are sensible — toggle these if you need to
-            // AnrDetectionEnabled  = true,
-            // AnrThresholdMs       = 2000,
-            // PiiValueMasksEnabled = true,
-        });
+        // 1. Initialize — once, as early as possible. Reads
+        //    Resources/PlayScopeSettings.asset (created via the
+        //    PlayScope ▸ Settings Editor menu — paste your SDK key there).
+        PlayScope.Initialize();
 
         // 2. Identify the user once you know who they are
         PlayScope.SetUserData(user.Id, new Dictionary<string, object>

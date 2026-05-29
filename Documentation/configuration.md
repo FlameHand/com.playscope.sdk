@@ -1,16 +1,32 @@
 # Configuration
 
-`PlayScopeContext` is the configuration object passed to `PlayScope.Initialize()`. Every field has a sensible default — the only one that's truly required is `ApiKey`.
+Most projects never construct a `PlayScopeContext` by hand. Create the
+**`PlayScopeSettings`** asset via the **PlayScope ▸ Settings** Editor menu
+(it writes `Assets/Resources/PlayScopeSettings.asset`), paste your SDK key,
+and call the parameterless `PlayScope.Initialize()` — the SDK builds the
+context from the asset for you.
+
+Pass an explicit `PlayScopeContext` to `PlayScope.Initialize(context)` only
+when you need to pick the key at runtime or attach custom session metadata.
+The fields below apply to both paths (the asset field name is noted where it
+differs). Every field has a sensible default — the only one that's truly
+required is `SdkKey`.
 
 ## Fields
 
-### `ApiKey` *(required)*
+### `SdkKey` *(required)*
 
 ```csharp
-string ApiKey
+string SdkKey
 ```
 
-Your project API key from the PlayScope dashboard. The SDK enters disabled mode (all calls become silent no-ops) if the key is missing or empty.
+Your project's SDK key from the PlayScope dashboard (**Settings → Projects**),
+of the form `ps_live_…`. The SDK enters disabled mode (all calls become silent
+no-ops) if the key is missing or empty.
+
+> Renamed from `ApiKey` for parity with the dashboard. The old `ApiKey` name
+> is kept as an `[Obsolete]` alias so existing initialisers keep compiling.
+> In the settings asset this field is also named `SdkKey`.
 
 ---
 
@@ -93,20 +109,20 @@ Matches are replaced *in-line* with placeholders like `[redacted-email]` — sur
 ### `UploadEndpoint`
 
 ```csharp
-string UploadEndpoint = "https://api.playscope.io"
+string UploadEndpoint = "https://api.playscope.dev"
 ```
 
-Base URL for the ingest API. Override for self-hosted deployments or staging environments.
+Base URL for the ingest API. Override for self-hosted deployments or staging environments. (In the settings asset this field is named `BackendUrl`.)
 
 ---
 
 ### `Metadata`
 
 ```csharp
-Dictionary<string, string> Metadata
+IReadOnlyDictionary<string, object> Metadata
 ```
 
-Arbitrary key-value pairs attached to the **session** (carried inside `session_start`). Use for environment tags, app version, build number, etc.
+Arbitrary key-value pairs attached to the **session** (carried inside `session_start`). Use for environment tags, build number, etc. `app_version` / `platform` / `device_model` / `os_version` are collected automatically, so this is for *additions*. Not available via the settings asset — use the `Initialize(context)` overload when you need custom metadata.
 
 Reserved key:
 
@@ -119,7 +135,7 @@ Reserved key:
 ```csharp
 PlayScope.Initialize(new PlayScopeContext
 {
-    ApiKey               = "ps_live_xxxxxxxxxxxx",
+    SdkKey               = "ps_live_xxxxxxxxxxxx",
 
     // Logs — capture warnings and above, dedup chatty repeats
     AutoCaptureUnityLogs = true,
@@ -133,12 +149,11 @@ PlayScope.Initialize(new PlayScopeContext
     PiiValueMasksEnabled = true,
 
     // Self-hosted deployment? Override the ingest URL
-    UploadEndpoint       = "https://api.playscope.io",
+    UploadEndpoint       = "https://api.playscope.dev",
 
-    Metadata = new Dictionary<string, string>
+    Metadata = new Dictionary<string, object>
     {
         ["environment"]   = Debug.isDebugBuild ? "development" : "production",
-        ["app_version"]   = Application.version,
         ["build_number"]  = "42",
     },
 });

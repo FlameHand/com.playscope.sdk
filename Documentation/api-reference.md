@@ -6,29 +6,43 @@ All methods are on the `PlayScope` static class in the `PlayScopeSdk` namespace.
 
 ## Initialisation
 
+### `PlayScope.Initialize()`
+
+Preferred entry point. Reads the `PlayScopeSettings` asset from `Resources/PlayScopeSettings.asset` (created via the **PlayScope ▸ Settings** Editor menu) and initialises from it. Must be called once before any other method. Subsequent calls emit a warning and no-op — the first call wins. A missing asset or empty key leaves the SDK disabled (all calls become silent no-ops).
+
+```csharp
+PlayScope.Initialize();
+```
+
 ### `PlayScope.Initialize(PlayScopeContext context)`
 
-Initialises the SDK. Must be called once before any other method. Subsequent calls emit a warning and no-op — the first call wins.
+Initialise with an explicit context — use when you select the key at runtime or attach custom session metadata.
 
 ```csharp
 PlayScope.Initialize(new PlayScopeContext
 {
-    ApiKey               = "ps_live_xxxxxxxxxxxx",
+    SdkKey               = "ps_live_xxxxxxxxxxxx",
     AutoCaptureUnityLogs = true,
     AutoCaptureMinLevel  = LogLevel.Warning,
-    Metadata = new Dictionary<string, string>
+    Metadata = new Dictionary<string, object>
     {
-        ["environment"] = "production",
-        ["app_version"] = Application.version,
+        ["environment"]  = "production",
+        ["build_number"] = "421",
     },
 });
 ```
 
 See [Configuration](configuration.md) for all `PlayScopeContext` fields.
 
-### `PlayScope.Shutdown()`
+### `PlayScope.IsInitialized` / `PlayScope.IsDisabled`
 
-Flushes any buffered events, emits a final `session_end`, stops worker threads, and disposes the MonoBehaviour driver. Called automatically on `OnApplicationQuit` — most integrators never need to call it manually.
+Read-only flags. `IsInitialized` is true once every subsystem is wired up; `IsDisabled` is true after a permanent self-disable (missing/empty key, missing asset, partial-init failure). Probe them after `Initialize` if you want to surface the result to your own boot pipeline.
+
+### `PlayScope.Settings`
+
+The loaded `PlayScopeSettings` asset (or `null`). Lets wrapper / game code mirror `MinLogLevel` in its own logger without re-loading Resources.
+
+> There is **no** public `Shutdown()` method. The SDK flushes buffered events and emits the final `session_end` automatically on `OnApplicationQuit` — you never call it.
 
 ---
 
@@ -155,6 +169,9 @@ PlayScope.CompleteOperation(opId, OperationCompletionStatus.Success);
 | `StartResourceLoad(name, metadata)` | `EndResourceLoad(id, status, metadata)` | `ResourceLoad` |
 | `StartSceneLoad(sceneName[, asyncOp], metadata)` | `EndSceneLoad(id, status, metadata)` | `SceneLoad` |
 | `StartPurchase(productId, metadata)` | `EndPurchase(id, status, metadata)` | `Purchase` |
+| `StartAd(placement, metadata)` | `EndAd(id, status, metadata)` | `Ad` |
+
+`RecordSceneLoadProgress(id, progress)` pushes an explicit progress reading for an in-flight scene/resource load when you poll progress on your own loop instead of handing the `AsyncOperation` to `StartSceneLoad`.
 
 ### HTTP example
 
@@ -215,6 +232,34 @@ Canonical schema:
 - **start:** `store` (auto: `app_store` / `google_play` / `steam` / `amazon` / `other`), `currency`, `price_amount`, `is_restore`
 - **end:** `transaction_id_hash` (sha256-16), `validation_status` (`pending` / `valid` / `invalid` / `error`), `failure_reason` (`user_cancelled` / `payment_declined` / `network_error` / `validation_failed` / …)
 
+### Ad impression with canonical metadata
+
+Call `StartAd` when an ad load/show begins and `EndAd` when it resolves. Build the dicts with `AdMetadata.BuildStartMetadata` / `BuildEndMetadata` — they feed the dashboard's **Revenue** page (IAP vs ads split) and the crash-during-ad correlation on **Errors**. Available on all plan tiers.
+
+```csharp
+using PlayScopeSdk;
+
+// Start — placement is the operation name AND echoed into metadata.placement.
+var startMeta = AdMetadata.BuildStartMetadata(
+    network:   AdMetadata.Network.AdMob,
+    placement: "Rewarded_GameOver_v3",
+    adType:    AdMetadata.AdType.Rewarded);
+var opId = PlayScope.StartAd("Rewarded_GameOver_v3", startMeta);
+
+// End — negative revenue is clamped to 0 by the helper.
+PlayScope.EndAd(opId, OperationCompletionStatus.Success,
+    AdMetadata.BuildEndMetadata(
+        result:   AdMetadata.AdResult.Rewarded,
+        revenue:  0.0142,
+        currency: "USD"));
+```
+
+Canonical schema:
+- **start:** `network` (`AdMetadata.Network`: `admob` / `unity_ads` / `ironsource` / `applovin` / …), `placement`, `ad_type` (`interstitial` / `rewarded` / `banner` / `app_open` / `native`)
+- **end:** `result` (`shown` / `rewarded` / `skipped` / `closed` / `failed` / `no_fill` / …), `revenue`, `currency`
+
+> Don't embed user-identifiable data in `placement` strings or `productId` values — they're stored verbatim and rendered in dashboard UI. Templated forms like `Rewarded_GameOver_{level}` are fine.
+
 ---
 
 ## Logging
@@ -258,7 +303,7 @@ These events fire without API calls — listed here so you know what to expect o
 | Event | Trigger | Carries |
 |---|---|---|
 | `session_start` | `Initialize` | app_version, platform, device_model, os_version, sdk_version |
-| `session_end` | `Shutdown` / `OnApplicationQuit` | end_status: `normal` |
+| `session_end` | `OnApplicationQuit`, or a clean 5-min background timeout | end_status: `normal` / `background_timeout` |
 | `session_abnormal_end` | Recovery on next launch when prior session didn't emit `session_end` | end_status: `abnormal` |
 | `lifecycle` | Foreground / background transitions | transition, duration_in_prev_state_ms |
 | `app_update_detected` | First launch on a new `Application.version` | from_version, to_version |
@@ -279,8 +324,12 @@ Plus a periodic metric stream sampled by `MetricsSampler`:
 | `gc_alloc_kb` | 1 s | `Profiler.GetTotalAllocatedMemoryLong()` delta |
 | `memory_heap` | 5 s | `GC.GetTotalMemory(false)` |
 | `memory_unity_reserved` | 5 s | `Profiler.GetTotalReservedMemoryLong()` |
-| `battery_level` | 30 s | `SystemInfo.batteryLevel` |
-| `network_reachability` | 5 s | `Application.internetReachability` |
+| `battery_level` | 10 s | `SystemInfo.batteryLevel` |
+| `is_charging` | on change | `SystemInfo.batteryStatus` (0 / 1) |
+| `thermal_state` | 10 s | `UnityEngine.Device.SystemInfo.thermalStatus` (enum 0–6; Unity 2023.1+ only) |
+| `available_disk_mb` | on change (≥ 5 MB) | native bridge; omitted where unsupported |
+| `system_free_ram_mb` | 10 s | native bridge |
+| `network_reachability` | on change | `Application.internetReachability` (0 none / 1 carrier / 2 wifi) |
 
 ---
 
@@ -295,6 +344,7 @@ Plus a periodic metric stream sampled by `MetricsSampler`:
 | `ResourceLoad` | Asset or bundle load |
 | `SceneLoad` | Unity scene load |
 | `Purchase` | In-app purchase flow |
+| `Ad` | Ad-impression flow (rewarded / interstitial / banner) |
 
 ### `OperationCompletionStatus`
 

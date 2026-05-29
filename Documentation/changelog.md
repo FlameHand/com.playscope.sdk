@@ -2,7 +2,37 @@
 
 All notable changes to the PlayScope SDK are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
-CI auto-bumps the patch version on every push to `main`, so intermediate versions (most of `0.1.3` through `0.1.39`) carry the same feature set as their nearest documented release.
+CI auto-bumps the patch version on every push to `main`, so intermediate versions carry the same feature set as their nearest documented release. The `0.2`–`0.5` minor bumps tracked roadmap milestones whose work was mostly backend/dashboard-side; the entries below consolidate the **SDK-package** changes per milestone. See [GitHub Releases](https://github.com/FlameHand/com.playscope.sdk/releases) for the per-patch tags.
+
+---
+
+## [0.6.x] — Monetisation analytics
+
+### Added
+- **Ad-impression API** — `PlayScope.StartAd(placement, metadata)` / `EndAd(id, status, metadata)` + `OperationType.Ad`. Feeds the dashboard's Revenue page (IAP vs ads split) and the crash-during-ad correlation on Errors.
+- **`AdMetadata`** helper — canonical `network` / `placement` / `ad_type` / `result` / `revenue` / `currency` schema, with `Network` / `AdType` / `AdResult` vocab constants. Negative revenue is clamped to 0 before leaving the device.
+- Native crash-collector groundwork on Android (`PlayScopeCrashCollector`, `PlayScopeCrash.java`, NDK `.so` delivery via the installer) — capture surface lands in a later milestone.
+
+---
+
+## [0.4.x] — Device-state telemetry
+
+### Added
+- **`thermal_state`** metric — `UnityEngine.Device.SystemInfo.thermalStatus` via reflection (Unity 2023.1+; omitted on older Unity), **`is_charging`** (emit-on-change), **`available_disk_mb`** and **`system_free_ram_mb`** via the new `PlayScopeNativeMetrics` Android/iOS pair + `NativeMetricsBridge`.
+- Disk free now read through the native bridge (IL2CPP doesn't implement the `DriveInfo` icall); slow device-state cadence cut to 10 s and primed to fire a baseline on the first tick so short sessions still capture a sample.
+
+---
+
+## [0.3.x] — Settings asset, symbols & swipe-kill
+
+### Added
+- **`PlayScopeSettings`** ScriptableObject + parameterless **`PlayScope.Initialize()`** — create via the **PlayScope ▸ Settings** Editor menu; no key in source. `PlayScope.Settings` exposes the loaded asset at runtime.
+- **`PlayScopeContext.SdkKey`** — renamed from `ApiKey` (old name kept as an `[Obsolete]` alias).
+- **Editor IL2CPP symbol uploader** (`PlayScopeSymbolUploader`) — post-build upload of Android `symbols.zip` / iOS dSYM; never fails the build.
+- **Native lifecycle bridges** (`PlayScopeLifecycle.java` / `.mm` + `NativeLifecycleBridge`) for swipe-kill detection, delivered into the consumer project by `PlayScopeNativePluginInstaller`.
+
+### Changed
+- 5-minute background-timeout session rotation; synchronous `session_end` finalize on shutdown closes a wake-vs-cancel race that could drop the final event.
 
 ---
 

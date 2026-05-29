@@ -7,7 +7,7 @@ Step-by-step guide for wiring PlayScope SDK into a new Unity project. After this
 Add to `Packages/manifest.json`:
 
 ```json
-"com.playscope.sdk": "https://github.com/FlameHand/com.playscope.sdk.git#v0.1.39"
+"com.playscope.sdk": "https://github.com/FlameHand/com.playscope.sdk.git#v0.6.4"
 ```
 
 Or use **Window → Package Manager → ＋ → Add package from git URL**. Pin to a tag (recommended) — CI bumps the version on every push so the package keeps moving without you noticing if you track a branch.
@@ -16,44 +16,53 @@ Or use **Window → Package Manager → ＋ → Add package from git URL**. Pin 
 
 1. Log in to [playscope.dev](https://playscope.dev)
 2. Open **Settings → Projects**
-3. Copy the SDK key (`ps_live_...` for production, `ps_test_...` for dev) — each project has one of each.
+3. The `ps_live_…` SDK key is shown **once** — when the project is created, and again only if you rotate it. It's stored hashed server-side, so after you dismiss it the dashboard shows only the prefix. Save it into your `PlayScopeSettings.asset` (next step).
 
-> Rotate the key whenever a build with the old one is no longer in the wild. The dashboard's **Rotate** button generates a new value and keeps both valid for a 24-hour overlap window.
+> The key is a project identifier embedded in the built app — not a server secret. **Rotate** immediately invalidates the old key (no overlap window): any client still shipping it gets `401` on ingest until you publish a build with the new value. Rotate only once the old build is out of circulation.
 
 ## 3. Initialize the SDK
+
+Create the **`PlayScopeSettings`** asset once via the **PlayScope ▸ Settings** Editor menu and paste your SDK key into it. Then call the parameterless `PlayScope.Initialize()` — it reads `Resources/PlayScopeSettings.asset`, so there's no key in source.
 
 Initialize **as early as possible** — before any gameplay code runs. A good location is `Awake()` on a `DontDestroyOnLoad` bootstrapper or the first `IInitializable` in your DI container.
 
 ```csharp
 using PlayScopeSdk;
 using UnityEngine;
-using System.Collections.Generic;
 
 public class AppBootstrapper : MonoBehaviour
 {
-    [SerializeField] private string _playscopeApiKey;
-
     private void Awake()
     {
-        PlayScope.Initialize(new PlayScopeContext
-        {
-            ApiKey               = _playscopeApiKey,
-            AutoCaptureUnityLogs = true,
-            AutoCaptureMinLevel  = LogLevel.Warning,
-            Metadata = new Dictionary<string, string>
-            {
-                ["environment"]  = Debug.isDebugBuild ? "development" : "production",
-                ["app_version"]  = Application.version,
-                ["build_number"] = "42",
-            },
-        });
+        // Reads Resources/PlayScopeSettings.asset (PlayScope ▸ Settings).
+        PlayScope.Initialize();
     }
 }
 ```
 
-> **Never hardcode the API key in source.** Use a `ScriptableObject` under `Resources/`, an environment file outside source control, or your remote-config system. The SDK reads it once at `Initialize`-time, so a runtime override is fine.
+### Overriding settings programmatically
 
-See [Configuration](configuration.md) for every `PlayScopeContext` field — ANR threshold, PII mask toggle, ingest endpoint, etc.
+If you pick the key at runtime (one codebase, several environments) or want to attach custom `session_start` metadata, pass an explicit context. App version / platform / device are collected automatically — `Metadata` is for additions.
+
+```csharp
+using System.Collections.Generic;
+using PlayScopeSdk;
+using UnityEngine;
+
+PlayScope.Initialize(new PlayScopeContext
+{
+    SdkKey               = ResolveKeyForEnvironment(),   // ps_live_…
+    AutoCaptureUnityLogs = true,
+    AutoCaptureMinLevel  = LogLevel.Warning,
+    Metadata = new Dictionary<string, object>
+    {
+        ["environment"]  = Debug.isDebugBuild ? "development" : "production",
+        ["build_number"] = "42",
+    },
+});
+```
+
+See [Configuration](configuration.md) for every field — settings asset vs context, ANR threshold, PII mask toggle, ingest endpoint, etc.
 
 ## 4. Identify Users
 
@@ -329,7 +338,8 @@ Both can be used together — auto-capture for the catch-all firehose, manual `T
 | First frame rendered / first input latency | `StartHTTP` / `EndHTTP` (and the other op pairs) |
 | Periodic perf metrics (fps, frame-time p99, GC, memory, battery, network) | `TrackException` for caught exceptions |
 | Network reachability changes | `TrackRestart` on player-initiated profile wipe |
-| ANR detection (with `AnrDetectionEnabled = true`) | `Shutdown` is optional — auto-called on app quit |
+| ANR detection (with `AnrDetectionEnabled = true`) | `StartAd` / `EndAd`, `StartPurchase` / `EndPurchase` for revenue |
+| Session finalize + final `session_end` on app quit (no manual `Shutdown` call) |  |
 | Memory warning capture (`Application.lowMemory`) |  |
 | PII value scrubbing on metadata |  |
 | Crash recovery & session resume |  |
