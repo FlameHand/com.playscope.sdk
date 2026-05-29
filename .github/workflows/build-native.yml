@@ -1,0 +1,71 @@
+name: Build native libs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Plugins/Android/native_src/**'
+      - '.github/workflows/build-native.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build libplayscope_crash.so (3 ABIs)
+    runs-on: ubuntu-latest
+    # Skip commits made by this workflow itself to prevent infinite loops.
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Build .so for arm64-v8a, armeabi-v7a, x86_64
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -e
+          SRC=Plugins/Android/native_src/playscope_crash
+          OUT=Plugins/Android/libs
+          for ABI in arm64-v8a armeabi-v7a x86_64; do
+            BUILD=build-$ABI
+            cmake -S "$SRC" -B "$BUILD" \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=$ABI \
+              -DANDROID_PLATFORM=android-21 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DANDROID_STL=c++_static
+            cmake --build "$BUILD" --config Release -j
+            mkdir -p "$OUT/$ABI"
+            cp "$BUILD/libplayscope_crash.so" "$OUT/$ABI/libplayscope_crash.so"
+          done
+          ls -l "$OUT"/*/libplayscope_crash.so
+
+      - name: Generate .meta files
+        run: |
+          python3 .github/workflows/gen_so_meta.py
+          ls -l Plugins/Android/libs/*/libplayscope_crash.so.meta
+          ls -l Plugins/Android/libs/*.meta 2>/dev/null || true
+
+      - name: Commit binaries if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Stage binaries + their meta files only; ignore the temp build dirs.
+          git add Plugins/Android/libs/
+          if git diff --cached --quiet; then
+            echo "No binary changes — skipping commit."
+            exit 0
+          fi
+          git commit -m "chore(native): rebuild libplayscope_crash for arm64-v8a/armeabi-v7a/x86_64"
+          git push origin HEAD
