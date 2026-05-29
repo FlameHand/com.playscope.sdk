@@ -132,6 +132,12 @@ namespace PlayScopeSdk.Internal
             {
                 return null;
             }
+            if (!IsSafeSessionIdSegment(sessionId))
+            {
+                PlayScopeLog.Warning(
+                    $"{LOG_TAG} TryConsumeCrashFor: rejecting unsafe sessionId={sessionId}");
+                return null;
+            }
             string path;
             try
             {
@@ -149,7 +155,13 @@ namespace PlayScopeSdk.Internal
                 return null;
             }
             var record = ReadAndDelete(path, expectedSessionId: sessionId);
-            if (record != null)
+            // Mark BOTH the filename stem AND the parsed JSON session_id —
+            // they normally match (C++ handler writes session_id from the
+            // same C# string used as filename), but if a future divergence
+            // ever lands a file under stem != json sid, DrainOrphans must
+            // still skip the already-consumed file by its filename key.
+            _consumedSessionIds.Add(sessionId);
+            if (record != null && !string.IsNullOrEmpty(record.SessionId))
             {
                 _consumedSessionIds.Add(record.SessionId);
             }
@@ -198,15 +210,65 @@ namespace PlayScopeSdk.Internal
                 {
                     continue;
                 }
+                if (!IsSafeSessionIdSegment(stem))
+                {
+                    PlayScopeLog.Warning(
+                        $"{LOG_TAG} DrainOrphans: rejecting unsafe filename stem={stem} — deleting.");
+                    TryDelete(file);
+                    continue;
+                }
                 var record = ReadAndDelete(file, expectedSessionId: stem);
+                _consumedSessionIds.Add(stem);
                 if (record != null)
                 {
-                    results.Add(record);
-                    _consumedSessionIds.Add(record.SessionId);
+                    if (!string.IsNullOrEmpty(record.SessionId) && IsSafeSessionIdSegment(record.SessionId))
+                    {
+                        _consumedSessionIds.Add(record.SessionId);
+                        results.Add(record);
+                    }
+                    else
+                    {
+                        PlayScopeLog.Warning(
+                            $"{LOG_TAG} DrainOrphans: parsed sessionId is unsafe — dropping record. stem={stem}");
+                    }
                 }
                 processed++;
             }
             return results;
+        }
+
+        /// <summary>
+        /// Guards a string that will be used as a path segment derived from
+        /// either a crash-file filename or a JSON session_id field. Real
+        /// SDK session ids are <see cref="Guid"/> strings (32-char N format
+        /// or 36-char D format with dashes). Rejects anything containing
+        /// path separators or relative-traversal sequences so a corrupted
+        /// or malicious crash file can't escape the crash dir / completed
+        /// sessions dir at write time. Cheap defense in depth — the SDK
+        /// is the only writer of the crash dir on a real device, but a
+        /// future C++ regression or a developer's copy-pasted test file
+        /// won't be able to weaponize this path.
+        /// </summary>
+        private static bool IsSafeSessionIdSegment(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 64)
+            {
+                return false;
+            }
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                bool isAlphaNumDash =
+                    (c >= '0' && c <= '9') ||
+                    (c >= 'a' && c <= 'z') ||
+                    (c >= 'A' && c <= 'Z') ||
+                    c == '-';
+                if (!isAlphaNumDash)
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /// <summary>
