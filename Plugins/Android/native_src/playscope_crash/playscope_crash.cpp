@@ -45,10 +45,18 @@ namespace
     constexpr size_t SESSION_ID_MAX = 64;
     constexpr size_t PATH_MAX_LEN = CRASH_DIR_MAX + SESSION_ID_MAX + 16;
     constexpr size_t MAX_FRAMES = 64;
-    constexpr size_t SCRATCH_SIZE = 8192;
+    // Realistic IL2CPP frame on Android 10+ scoped install dirs:
+    // /data/app/~~base64==/pkg-base64==/lib/arm64/libil2cpp.so ≈ 110 chars
+    // → ~160 B per JSON frame. 64 × 160 + header ≈ 10.4 KB. Pad to 16 KB.
+    constexpr size_t SCRATCH_SIZE = 16384;
+    // Reserve tail room for closing "]}\n" + safety. Frames stop appending
+    // once pos crosses this watermark so the JSON is always well-formed.
+    constexpr size_t SCRATCH_CLOSE_RESERVE = 256;
     // SIGSTKSZ on some Android NDK versions resolves to a runtime call
-    // (sysconf), so this can't be constexpr. Hand-pick a generous size.
-    constexpr size_t ALT_STACK_SIZE = 32 * 1024;
+    // (sysconf), so this can't be constexpr. 64 KB matches Crashpad's
+    // alt-stack size — comfortable headroom for _Unwind_Backtrace through
+    // deep IL2CPP-generated managed trampolines.
+    constexpr size_t ALT_STACK_SIZE = 64 * 1024;
 
     constexpr int FATAL_SIGNALS[] = { SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE };
     constexpr int NUM_FATAL_SIGNALS = sizeof(FATAL_SIGNALS) / sizeof(FATAL_SIGNALS[0]);
@@ -56,11 +64,18 @@ namespace
     // ---- install-time state (only read in handler) ----
     char g_crash_dir[CRASH_DIR_MAX];
     // session_id is read in handler context AFTER the C# layer rotates it.
-    // We accept a torn read here as a documented best-effort: a brand-new
-    // session may inherit the previous session's filename on a crash that
-    // hits during the millisecond between rotate-begin and write. Same
-    // posture as Crashpad's session annotation. Mark volatile so the
-    // compiler does not cache a stale value across the install boundary.
+    // We accept a torn read here as a documented best-effort. The race
+    // window has THREE observable outcomes if a crash hits mid-rotation:
+    //   (a) handler sees old id → file lands under previous session
+    //   (b) handler sees new id → file lands under new session
+    //   (c) handler sees mix: new chars at start, stale tail bytes, or
+    //       (worse) new NUL terminator early with stale leading bytes →
+    //       filename labels a session_id that NEVER existed
+    // Day 3 recovery MUST NOT assume the labeled session_id always
+    // corresponds to a real PG session — orphan crash files emit as
+    // standalone exception events keyed by whatever session_id is in
+    // the filename. Same posture as Crashpad's session annotation.
+    // Mark volatile so the compiler does not cache stale values.
     volatile char g_session_id[SESSION_ID_MAX];
 
     struct sigaction g_prev[NUM_FATAL_SIGNALS];
@@ -386,6 +401,13 @@ namespace
         append(g_scratch, SCRATCH_SIZE, &pos, ",\"frames\":[");
         for (size_t i = 0; i < g_frame_count; ++i)
         {
+            // Hard stop before exhausting the scratch buffer so the closing
+            // "]}\n" always fits. Truncated frames are dropped, output stays
+            // well-formed JSON the recovery path can parse.
+            if (pos > SCRATCH_SIZE - SCRATCH_CLOSE_RESERVE)
+            {
+                break;
+            }
             if (i > 0)
             {
                 append(g_scratch, SCRATCH_SIZE, &pos, ",");

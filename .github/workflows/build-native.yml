@@ -6,6 +6,7 @@ on:
     paths:
       - 'Plugins/Android/native_src/**'
       - '.github/workflows/build-native.yml'
+      - '.github/workflows/gen_so_meta.py'
   workflow_dispatch:
 
 jobs:
