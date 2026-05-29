@@ -22,6 +22,13 @@ FOLDER_META = [
     ("x86_64",      "a05afe15452545bb881fb2998cfb1d03"),
 ]
 
+# Android MUST be enabled: 0 here. These .meta belong to the .so shipped
+# INSIDE the UPM package, which PlayScopeNativePluginInstaller mirrors into the
+# consumer's Assets/Plugins/Android/libs/ and enables there (per-ABI CPU). If
+# the package copy is enabled too, Unity registers BOTH and the Android build
+# aborts: AndroidPluginImporterExtension.CheckFileCollisions "Found plugins
+# with same names and architectures". Do NOT flip this to 1 (regressed once
+# when a CI rebuild re-generated it as enabled:1 — see CLAUDE.md).
 SO_META_TEMPLATE = """fileFormatVersion: 2
 guid: {guid}
 PluginImporter:
@@ -49,7 +56,7 @@ PluginImporter:
   - first:
       Android: Android
     second:
-      enabled: 1
+      enabled: 0
       settings:
         CPU: {cpu}
   userData:
