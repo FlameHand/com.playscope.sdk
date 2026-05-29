@@ -517,7 +517,7 @@ namespace PlayScopeSdk.Internal
             var sessionMeta = new System.Collections.Generic.Dictionary<string, object>
             {
                 ["app_version"] = UnityEngine.Application.version,
-                ["build_number"] = UnityEngine.Application.buildGUID,
+                ["build_number"] = ResolveBuildNumber(context),
                 ["environment"] = env,
                 ["is_editor"] = isEditor,
                 ["is_development_build"] = isDevelopmentBuild,
@@ -912,6 +912,60 @@ namespace PlayScopeSdk.Internal
             return "android";
 #else
             return "standalone";
+#endif
+        }
+
+        // The build_number stamped on session_start MUST match the value the
+        // Editor symbol uploader sends with the symbols.zip — otherwise the
+        // dashboard shows two unrelated identifiers (session vs symbol bundle)
+        // and symbol resolution can't confirm the uploaded symbols belong to
+        // the crashing compile. The uploader uses Android bundleVersionCode /
+        // iOS CFBundleVersion (PlayScopeSymbolUploader), so we read the same
+        // native value at runtime. Order: explicit integrator override →
+        // native version code → Application.buildGUID (last-resort fallback so
+        // the field is never empty).
+        private static string ResolveBuildNumber(PlayScopeContext context)
+        {
+            if (context?.Metadata != null
+                && context.Metadata.TryGetValue("build_number", out var provided)
+                && provided != null)
+            {
+                var s = provided.ToString();
+                if (!string.IsNullOrEmpty(s)) return s;
+            }
+            var native = TryReadNativeBuildNumber();
+            if (!string.IsNullOrEmpty(native)) return native;
+            return UnityEngine.Application.buildGUID;
+        }
+
+        // Android: PackageManager versionCode (== PlayerSettings.Android.
+        // bundleVersionCode baked into the APK). iOS CFBundleVersion isn't
+        // exposed by UnityEngine at runtime — that needs a native read, so iOS
+        // falls back to buildGUID for now (symbols still match by app_version).
+        private static string TryReadNativeBuildNumber()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using (var player = new UnityEngine.AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+                using (var activity = player.GetStatic<UnityEngine.AndroidJavaObject>("currentActivity"))
+                using (var pm = activity.Call<UnityEngine.AndroidJavaObject>("getPackageManager"))
+                {
+                    var pkg = activity.Call<string>("getPackageName");
+                    using (var info = pm.Call<UnityEngine.AndroidJavaObject>("getPackageInfo", pkg, 0))
+                    {
+                        int versionCode = info.Get<int>("versionCode");
+                        return versionCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("build_number: native versionCode read failed — using buildGUID", ex);
+                return null;
+            }
+#else
+            return null;
 #endif
         }
 
