@@ -3,25 +3,12 @@ using UnityEngine;
 namespace PlayScopeSdk
 {
     /// <summary>
-    /// Per-project PlayScope configuration loaded from
-    /// <c>Resources/PlayScopeSettings.asset</c> at SDK initialise time. Use
-    /// the <c>PlayScope ▸ Settings</c> Editor menu to create + edit the
-    /// asset; the parameterless <see cref="PlayScope.Initialize()"/>
-    /// overload uses these values.
-    ///
-    /// <para>
-    /// Runtime fields (SdkKey, BackendUrl, MinLogLevel) are read every
-    /// time the SDK initialises. Build-time fields (AutoUploadSymbols,
-    /// VerboseEditor) are read by the Editor build postprocessor and
-    /// have zero runtime effect.
-    /// </para>
-    ///
-    /// <para>
-    /// The SDK key is intentionally embedded in the built app — it's a
-    /// project identifier, not a secret. Same model as Firebase config
-    /// or Sentry DSN. Don't commit it to a public repo only if you're
-    /// running a non-public dashboard.
-    /// </para>
+    /// Per-project config loaded from <c>Resources/PlayScopeSettings.asset</c>;
+    /// created/edited via the <c>PlayScope ▸ Settings</c> Editor menu and used by
+    /// parameterless <see cref="PlayScope.Initialize()"/>. Build-time fields
+    /// (AutoUploadSymbols, VerboseEditor) are Editor-only, no runtime cost.
+    /// The SDK key is intentionally embedded in the build — it's a project
+    /// identifier, not a secret (same model as a Sentry DSN).
     /// </summary>
     [CreateAssetMenu(fileName = "PlayScopeSettings", menuName = "PlayScope/Settings Asset")]
     public class PlayScopeSettings : ScriptableObject
@@ -94,8 +81,7 @@ namespace PlayScopeSdk
         public static PlayScopeSettings Load()
         {
             if (_cached != null) return _cached;
-            // ScriptableObject loads as null when no asset exists at the
-            // path. Don't throw — let the caller surface a useful message.
+            // Resources.Load returns null when no asset exists — don't throw.
             _cached = Resources.Load<PlayScopeSettings>("PlayScopeSettings");
             return _cached;
         }

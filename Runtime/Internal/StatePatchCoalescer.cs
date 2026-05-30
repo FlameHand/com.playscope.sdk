@@ -4,41 +4,22 @@ using System.Collections.Generic;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// Buffers <c>state_patch</c> calls inside a small time window and emits
-    /// one merged patch per window. Per-frame state churn in games is the
-    /// common case — without coalescing a 60 fps loop that calls
-    /// <c>UpdateState</c> each frame fires 60 patch events / sec, and a
-    /// 5-minute session pumps 18 000 near-identical rows through the
-    /// pipeline. After coalescing a session settles into the few hundred
-    /// patches that actually matter to a reviewer.
-    ///
-    /// <para>
-    /// Rules:
-    /// <list type="bullet">
-    /// <item>Same-reason patches in the window merge (last write wins per key).</item>
-    /// <item>A patch with a different <c>reason</c> than the buffered one
-    ///       flushes the current buffer first, then starts a new one — so the
-    ///       dashboard sees a clean row boundary on each new cause.</item>
-    /// <item>Null values are preserved (they encode key removal in the patch
-    ///       protocol).</item>
-    /// <item>Flush is automatic on the next Unity Update() tick after the
-    ///       window expires, plus explicit on pause / shutdown / abnormal end.</item>
-    /// </list>
-    /// </para>
+    /// Buffers <c>state_patch</c> calls in a small window and emits one merged
+    /// patch per window — a 60 fps UpdateState loop would otherwise fire 60
+    /// rows/sec. Rules: same-reason patches merge (last write wins per key); a
+    /// different <c>reason</c> flushes first then starts a new buffer (clean row
+    /// boundary per cause); null values are preserved (key removal). Flushes on
+    /// the next Update after the window, plus on pause / shutdown.
     /// </summary>
     internal sealed class StatePatchCoalescer
     {
-        // 100ms — short enough that user-visible state changes still feel
-        // immediate in the dashboard, long enough to fold a 60 fps update
-        // storm into a single row.
+        // 100ms — immediate enough in the dashboard, long enough to fold a 60 fps storm.
         private const int WindowMs = 100;
 
         private readonly object _gate = new();
         private Dictionary<string, object>? _buffer;
         private string? _bufferReason;
-        // Stopwatch-derived monotonic milliseconds — see comment in
-        // SessionDataCoalescer. Environment.TickCount (int) wraps after
-        // 49.7 days.
+        // Stopwatch-monotonic ms — Environment.TickCount (int) wraps after 49.7 days.
         private long _bufferStartTick;
 
         private static long StopwatchMs() =>
@@ -46,10 +27,8 @@ namespace PlayScopeSdk.Internal
             / System.Diagnostics.Stopwatch.Frequency;
 
         /// <summary>
-        /// Append a patch to the buffer. Safe from any thread. The window timer
-        /// is anchored on the FIRST patch in a given buffer, so a burst of
-        /// rapid updates still emits in one ~100ms window rather than sliding
-        /// indefinitely.
+        /// Append a patch (thread-safe). The window is anchored on the FIRST
+        /// patch in a buffer, so a burst emits in one ~100ms window, not sliding.
         /// </summary>
         internal void Add(IReadOnlyDictionary<string, object>? patch, string? reason)
         {
@@ -87,14 +66,8 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Force-flush whatever is buffered right now. Called on session_end,
-        /// abnormal_end, and lifecycle pause so the last patch isn't lost to
-        /// the window timer when the app is about to die / suspend.
-        /// </summary>
-        /// <summary>
-        /// Drops any buffered patch and starts fresh — called by
-        /// PlayScopeRuntime.InitializeLocked on session rotation so the
-        /// new session never inherits state from the dead one.
+        /// Drops any buffered patch and starts fresh — called on session rotation
+        /// so the new session never inherits state from the dead one.
         /// </summary>
         internal void ResetForNewSession()
         {

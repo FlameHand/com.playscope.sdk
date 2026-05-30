@@ -12,41 +12,20 @@ using UpmPackageInfo = UnityEditor.PackageManager.PackageInfo;
 namespace PlayScopeSdk.Editor
 {
     /// <summary>
-    /// Copies every native plugin shipped under the package's
-    /// <c>Plugins/Android/</c> and <c>Plugins/iOS/</c> top-level folders
-    /// into the consumer's <c>Assets/Plugins/{Android,iOS}/</c>. Adding a
-    /// new native file to the SDK is zero-touch: drop it in
-    /// <c>Plugins/{Android,iOS}/</c>, the installer picks it up on the
-    /// next domain reload.
+    /// Mirrors the package's <c>Plugins/{Android,iOS}/</c> native files into the
+    /// consumer's <c>Assets/Plugins/{Android,iOS}/</c> on domain reload.
     ///
     /// <para>
-    /// Why this is needed: native (Java / Obj-C) files shipped inside a
-    /// read-only UPM package have a long-standing reliability problem
-    /// where Unity's PluginImporter platform settings from the bundled
-    /// <c>.meta</c> are intermittently ignored. Symptoms observed on the
-    /// 0.1.63 release:
-    /// </para>
-    /// <list type="bullet">
-    ///   <item><c>com.playscope.sdk.PlayScopeLifecycle NOT found in APK
-    ///         (ClassNotFoundException)</c> at SDK init</item>
-    ///   <item><c>_playscope_install_ios_lifecycle</c> EntryPointNotFound
-    ///         on iOS</item>
-    /// </list>
-    /// <para>
-    /// Workaround: ship the native files inside the package as the source
-    /// of truth (disabled-everywhere via the package's own <c>.meta</c> so
-    /// Unity doesn't try to compile them in-place), and let this installer
-    /// mirror them into <c>Assets/Plugins/{Android,iOS}/</c> where the
-    /// consumer-owned <c>.meta</c> reliably applies PluginImporter
-    /// settings.
+    /// Native files shipped inside a read-only UPM package hit a reliability
+    /// problem where Unity intermittently ignores the bundled <c>.meta</c>'s
+    /// PluginImporter settings (ClassNotFoundException / EntryPointNotFound at
+    /// runtime). Workaround: ship them disabled-everywhere as the source of truth
+    /// and mirror into Assets/Plugins/ where the consumer-owned <c>.meta</c>
+    /// reliably applies platform settings.
     /// </para>
     /// <para>
-    /// Idempotent. The silent on-load sync re-copies only when the source
-    /// bytes differ from the installed copy (catches SDK upgrades that
-    /// bring a new helper version). The menu path
-    /// <c>PlayScope ▸ Reinstall Native Plugins</c> force-overwrites every
-    /// file regardless of byte-equality — "I clicked reinstall, give me
-    /// fresh copies" semantics.
+    /// Idempotent — the on-load sync re-copies only when source bytes differ;
+    /// <c>PlayScope ▸ Reinstall Native Plugins</c> force-overwrites regardless.
     /// </para>
     /// </summary>
     [InitializeOnLoad]

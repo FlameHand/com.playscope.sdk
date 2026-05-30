@@ -26,25 +26,18 @@ namespace PlayScopeSdk.Internal
             try
             {
                 bool hasStaleLock = File.Exists(PlayScopeDirectory.SessionLock);
-                // Orphan detection: any leftover chunk_*.jsonl in chunksDir (or a non-empty
-                // chunk_current.jsonl) means the prior session left data behind. We must
-                // relocate it to completed_sessions/{priorSessionId}/ BEFORE the new session
-                // takes over chunksDir, otherwise the uploader would upload those chunks
-                // under the NEW session's envelope and commingle two sessions' events
-                // under one backend session_id (regression seen 2026-05-19).
+                // Leftover chunks must be relocated to completed_sessions/{priorId}/
+                // BEFORE the new session takes over chunksDir — else the uploader
+                // ships them under the NEW envelope and commingles two sessions
+                // under one backend session_id.
                 bool hasOrphans = ChunksDirHasOrphans();
 
                 if (!hasStaleLock && !hasOrphans)
                 {
-                    // Clean state — just pick up any orphaned completed_sessions.
-                    // No log here unless something to enqueue; otherwise every
-                    // startup is noisy.
+                    // Clean state — pick up any orphaned completed_sessions.
                     EnqueueCompletedSessions(uploadQueue);
-                    // Native crashes can still be present on a clean
-                    // state path (process crashed AFTER session_end was
-                    // direct-written + chunks finalized — the session
-                    // was "officially" closed by the time the signal
-                    // landed). Treat them as orphans.
+                    // A native crash can still exist here (process died AFTER
+                    // session_end was written) — treat as an orphan.
                     EmitOrphanNativeCrashes(uploadQueue);
                     return;
                 }
@@ -52,18 +45,12 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Info(
                     $"SessionRecovery: starting (hasStaleLock={hasStaleLock}, hasOrphans={hasOrphans}).");
 
-                // Step 3a: read session_id from the on-disk session.json (still holds the
-                // PRIOR session's identity — the new session hasn't been generated yet).
+                // session.json still holds the PRIOR session's identity (new one not generated yet).
                 var sessionId = ReadStaleSesionId();
-                // Fallback: if session.json is unreadable / corrupt (power-kill
-                // mid-write, partial flush), scan the orphan chunks for the
-                // first session_start event and pull the session_id out of its
-                // metadata. Without this, the recovered folder ends up with
-                // name "recovered_TIMESTAMP" and CopySessionManifest copies a
-                // broken manifest — UploaderWorker.ResolveEnvelopeIdentity then
-                // dead-letters every chunk, losing ALL data from the crashed
-                // session. The chunks themselves are append-only JSONL so they
-                // survive a manifest corruption.
+                // Fallback for a corrupt session.json (power-kill mid-write): scan
+                // the orphan chunks' session_start for the id. Without it the folder
+                // becomes "recovered_TIMESTAMP", the manifest is broken, and the
+                // uploader dead-letters every chunk — total data loss for the crash.
                 if (string.IsNullOrEmpty(sessionId))
                 {
                     sessionId = TryScanChunksForSessionId();
@@ -79,29 +66,18 @@ namespace PlayScopeSdk.Internal
                     ? sessionId
                     : $"recovered_{DateTime.UtcNow:yyyyMMddHHmmss}";
 
-                // Synthetic abnormal-end is appended whenever the chunks scan
-                // does NOT find a real session_end record (the inner check in
-                // ProcessStaleLockSession gates on that). Previously we only
-                // appended it when hasStaleLock=true, which left the "lock
-                // removed but session_end never written" case (e.g. a clean
-                // teardown that crashed AFTER unlock but BEFORE writing
-                // session_end) producing a session that lives forever with
-                // EndedAt=NULL on the dashboard — exactly the Crash-Free
-                // Sessions distortion the abandoned-session sweep on the
-                // backend now compensates for. We close it at the source
-                // here too: if no real session_end is on disk, we ALWAYS
-                // emit a synthetic one, classified by the lifecycle file.
+                // Always synthesize an abnormal-end when no real session_end is on
+                // disk (inner check gates on that). Covers the "unlocked but
+                // session_end never written" case that otherwise leaves a session
+                // with EndedAt=NULL forever, distorting Crash-Free Sessions.
                 ProcessStaleLockSession(sessionId, recoveredFolder, uploadQueue,
                     appendSyntheticAbnormalEnd: true);
 
                 EnqueueCompletedSessions(uploadQueue, excludeSessionId: recoveredFolder);
 
-                // Native crash orphans — crash files whose session_id did
-                // NOT match the recovered session (rare: SDK was rotated
-                // between two crashes, or the crashed session left no
-                // chunks behind because session_start hadn't flushed
-                // yet). Drain them into per-session recovered folders so
-                // the uploader picks them up under the right envelope.
+                // Crash files whose session_id didn't match the recovered session
+                // (SDK rotated between crashes, or session_start hadn't flushed) —
+                // drain into per-session folders so they upload under the right envelope.
                 EmitOrphanNativeCrashes(uploadQueue);
             }
             catch (Exception ex)
@@ -161,13 +137,8 @@ namespace PlayScopeSdk.Internal
             try
             {
                 var json = File.ReadAllText(path);
-                // Defensive UTF-8 BOM strip. File.ReadAllText with the default
-                // UTF-8 encoding usually swallows the BOM, but if the file got
-                // re-saved by a tool that explicitly used UTF8Encoding(true) on
-                // some platforms the BOM can survive the read and break our
-                // tolerant-but-not-permissive SimpleJson parser. We compare
-                // against the explicit ﻿ escape instead of a literal BOM
-                // char so the source stays readable in editors that hide it.
+                // Strip a surviving UTF-8 BOM — if a tool re-saved with
+                // UTF8Encoding(true) it can survive the read and break SimpleJson.
                 if (json.Length > 0 && json[0] == '﻿') json = json.Substring(1);
                 var dto = SimpleJson.Deserialize(json);
                 if (dto != null && dto.TryGetValue("session_id", out var id) && id is string idStr)
@@ -216,10 +187,7 @@ namespace PlayScopeSdk.Internal
                 int scanned = 0;
                 while ((line = reader.ReadLine()) != null)
                 {
-                    // Bound the per-file scan to a few KB — session_start is
-                    // typically the FIRST record, and if it isn't there in
-                    // the first ~50 records, the chunk is mid-session
-                    // continuation and won't have it.
+                    // session_start is the first record; past ~50 it's a mid-session continuation chunk.
                     if (++scanned > 50) break;
                     if (string.IsNullOrEmpty(line) || !line.Contains("session_start")) continue;
                     var dto = SimpleJson.Deserialize(line);
@@ -270,10 +238,8 @@ namespace PlayScopeSdk.Internal
             // Step 3b: scan completed (non-current) chunks for session_end
             bool sessionEndFound = ScanChunksForSessionEnd(chunksDir);
 
-            // Step 3b.1: native crash record for THIS recovered session, if any.
-            // Consumed (file deleted) up-front so it can't be re-emitted via
-            // the orphan drain path at the end of RecoverIfNeeded. Reason is
-            // promoted to "native_crash" further down when present.
+            // Consume the native crash for THIS session up-front (deletes the file)
+            // so the orphan-drain path can't re-emit it. Promotes reason below.
             NativeCrashRecord nativeCrash = null;
             try
             {
@@ -289,22 +255,15 @@ namespace PlayScopeSdk.Internal
 
             if (!sessionEndFound && appendSyntheticAbnormalEnd)
             {
-                // Step 3d: abnormal end — append synthetic event to chunk_current.jsonl
-                //
-                // Classify *why* the previous session died by reading the
-                // persisted lifecycle state file. The categories drive the
-                // backend's corrected CFS% formula:
-                //   foreground_crash → counts as crashed (real crash / ANR / native kill in foreground)
-                //   background_kill  → does NOT count as crashed (user swipe-kill, OS low-memory in background — not the app's fault)
-                //   unknown          → counts as crashed (legacy / lifecycle file missing — pessimistic so we don't hide real crashes)
+                // Synthetic abnormal-end. The reason (from the lifecycle file)
+                // drives the backend's corrected CFS%:
+                //   foreground_crash → crashed (real crash / ANR / native kill)
+                //   background_kill  → NOT crashed (swipe-kill / OS low-mem)
+                //   unknown          → crashed (pessimistic, file missing)
                 try
                 {
-                    // End timestamp = max timestamp seen in chunks + 10 ms.
-                    // Approximates the moment the SDK actually died (last
-                    // record it managed to flush). Falls back to UtcNow only
-                    // when chunks are unreadable / empty — with session_start
-                    // now direct-written via WriteCriticalAndFinalizeSync,
-                    // chunks always contain at least one record.
+                    // End ts = max chunk timestamp + 10 ms ≈ when the SDK died;
+                    // UtcNow only if chunks are unreadable (rare — session_start is direct-written).
                     var maxOnDisk = ScanChunksForMaxTimestamp(chunksDir);
                     var endTs = maxOnDisk.HasValue
                         ? maxOnDisk.Value.AddMilliseconds(10)
@@ -314,13 +273,8 @@ namespace PlayScopeSdk.Internal
                     var safeSessionId = sessionId ?? "";
 
                     var (lifecycleState, _, intent) = Core.Session.SessionFiles.TryReadLifecycleState();
-                    // intent=true means the native (Java / iOS) lifecycle
-                    // hook explicitly observed a user-initiated close —
-                    // wins over any state-based heuristic. This is the
-                    // unambiguous "user swiped from recents" signal.
-                    // Native crash record (when present) is the strongest
-                    // signal — the OS demonstrably delivered a fatal signal,
-                    // so reason overrides the heuristic chain.
+                    // Priority: native crash (OS delivered a fatal signal) >
+                    // intent user_close (native hook saw an explicit close) > heuristic.
                     string reason;
                     if (nativeCrash != null)
                     {
@@ -340,21 +294,11 @@ namespace PlayScopeSdk.Internal
                         };
                     }
 
-                    // Player swipes the app from recents OR OS evicts a
-                    // backgrounded process to reclaim memory — both are the
-                    // normal way a mobile session ends. Lumping them under
-                    // "abnormal" floods the dashboard with red on every
-                    // session and drags Crash-Free Sessions% down to ~zero.
-                    // Only foreground death (likely crash / ANR) and the
-                    // unknown fallback (lifecycle file missing — pessimistic)
-                    // get the abnormal classification.
-                    //
-                    // The event_type drives backend's EndStatus directly
-                    // (IngestionService maps session_end→normal,
-                    // session_abnormal_end→abnormal), so flipping the event
-                    // name is sufficient. We also stamp end_status into
-                    // metadata so any consumer reading the raw event line
-                    // gets the same answer without a second mapping table.
+                    // swipe-kill / OS background eviction are NORMAL mobile session
+                    // ends — classifying them abnormal floods the dashboard red and
+                    // tanks CFS%. Only foreground death + the unknown fallback are
+                    // abnormal. event_type drives backend EndStatus; end_status is
+                    // also stamped into metadata for raw-line consumers.
                     var isNormalEnd = reason is "user_close" or "background_kill";
                     var eventType = isNormalEnd ? "session_end" : "session_abnormal_end";
                     var endStatus = isNormalEnd ? "normal" : "abnormal";
@@ -374,9 +318,8 @@ namespace PlayScopeSdk.Internal
                     // accepted range. Mirrors the AbandonedSessionWorker
                     // strategy of using a high baseSeq for synthetic rows.
                     const long SyntheticSequenceNum = int.MaxValue - 1;
-                    // event_id was previously omitted → backend stored "" and
-                    // any dashboard / agent-support query that joins / dedups
-                    // on event_id treated every synthetic event as colliding.
+                    // Must set event_id — an empty one makes every synthetic event
+                    // collide in dashboard queries that dedup on it.
                     var eventId = Guid.NewGuid().ToString("N");
 
                     var syntheticLine =
@@ -385,11 +328,8 @@ namespace PlayScopeSdk.Internal
                         $"\"timestamp\":\"{timestamp}\",\"session_id\":\"{safeSessionId}\"," +
                         $"\"metadata\":{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\",\"last_lifecycle_state\":\"{lifecycleState ?? "unknown"}\",\"intent\":{(intent ? "true" : "false")},\"crash_file_present\":{(crashFilePresent ? "true" : "false")},\"synthesized_by\":\"session_recovery\"}}}}\n";
 
-                    // Native crash exception log line — emitted BEFORE the
-                    // synthetic session_end so the timeline reads "crash →
-                    // session_end" in sequence order. Sequence_num sits
-                    // just below SyntheticSequenceNum so it sorts after
-                    // every real event but before the synthetic end.
+                    // Emitted BEFORE the synthetic session_end (sequence just below
+                    // it) so the timeline reads "crash → session_end".
                     string nativeCrashLogLine = null;
                     if (nativeCrash != null)
                     {
@@ -400,14 +340,9 @@ namespace PlayScopeSdk.Internal
                             fallbackTimestampIso: timestamp);
                     }
 
-                    // If the prior process died mid-write, the existing
-                    // chunk_current.jsonl may NOT end with '\n'. Appending
-                    // the synthetic line directly would concatenate onto
-                    // the partial last line, producing one corrupt JSONL
-                    // line: the synthetic event_type is silently swallowed
-                    // by UploaderWorker.ExtractRecordType and the recovered
-                    // session stays open. Prepend a newline when the last
-                    // byte isn't already one.
+                    // If the prior process died mid-write, chunk_current may not end
+                    // in '\n'; appending directly would corrupt the last JSONL line
+                    // and swallow our synthetic event. Prepend '\n' if needed.
                     bool needsLeadingNewline = false;
                     try
                     {
@@ -443,11 +378,8 @@ namespace PlayScopeSdk.Internal
             }
             else if (nativeCrash != null)
             {
-                // session_end was found in chunks (rare: SDK shut down
-                // cleanly, then the OS delivered the fatal signal during
-                // process teardown — the crash file landed but the
-                // session is already "closed"). Still emit the exception
-                // log line so the dashboard sees it.
+                // session_end already on disk but a crash file too (OS killed us
+                // during teardown after a clean close). Still emit the exception line.
                 try
                 {
                     var safeSessionId = sessionId ?? "";
@@ -488,10 +420,9 @@ namespace PlayScopeSdk.Internal
             // Step 3c/3d (cont.): move ALL .jsonl files (including chunk_current) to destDir
             MoveAllChunksToDir(chunksDir, currentChunk, destDir, sessionId);
 
-            // Step 3d.1: snapshot session.json into destDir as a manifest. UploaderWorker reads
-            // this when building the envelope for recovered chunks so the original session_id,
-            // sdk_version, and schema_version are preserved (without it, recovered chunks would
-            // be attributed to the NEW session that runs the upload).
+            // Snapshot session.json into destDir as a manifest so the uploader
+            // preserves the ORIGINAL session_id / sdk_version / schema_version —
+            // without it, recovered chunks attribute to the NEW session.
             CopySessionManifest(destDir);
 
             // Step 3e: enqueue all .jsonl files in destDir
@@ -512,33 +443,14 @@ namespace PlayScopeSdk.Internal
         {
             if (!Directory.Exists(chunksDir)) return;
 
-            // Move chunk_current first (if it exists and has content).
-            //
-            // Rename it so the resulting batch_id (filename without
-            // extension) is UNIQUE per recovered session. The default
-            // name "chunk_current" collides across every recovery: when
-            // two devices/launches each recover a prior session's data,
-            // both batches upload with batch_id = "chunk_current" and
-            // backend's (project_id, batch_id) idempotency drops the
-            // second one as already_processed. The synthetic
-            // session_abnormal_end inside the second chunk is then
-            // silently lost — observed in production with all recovered
-            // sessions stuck at EndStatus=unknown.
-            //
-            // New name: chunk_{shortId}_recovered.jsonl, where shortId
-            // is the first 5 hex chars of the recovered session_id
-            // (matching the existing chunk_{shortId}_NNNNNN naming).
-            // This keeps the file aligned with the same prefix scheme
-            // UploaderWorker uses for ownership checks.
+            // Rename chunk_current to chunk_{shortId}_recovered.jsonl so the batch_id
+            // is UNIQUE per recovery. The default "chunk_current" collides across
+            // recoveries → backend (project_id, batch_id) idempotency drops the
+            // second, silently losing its synthetic session_abnormal_end (sessions
+            // stuck EndStatus=unknown). The shortId prefix matches the ownership scheme.
             if (File.Exists(currentChunk))
             {
-                // Skip renaming when chunk_current ended up empty — happens if
-                // FlushImmediate finalized everything cleanly into chunk_NNNNNN
-                // before the kill AND the synthetic-event append step above
-                // either was skipped (sessionEndFound=true) or silently threw
-                // (catch swallowed). Without this guard we'd create a 0-byte
-                // chunk_XX_recovered.jsonl, upload it as an empty batch, and
-                // pollute IngestBatches with a row that carries no payload.
+                // Skip an empty chunk_current — else we'd upload a 0-byte batch.
                 bool isEmpty = false;
                 try { isEmpty = new FileInfo(currentChunk).Length == 0; }
                 catch { /* size unknown — fall through and try to move */ }
@@ -579,19 +491,13 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// First 5 hex chars of a UUID string after dash strip, mirroring
-        /// the SessionInfo.SessionShortId convention. Used to derive
-        /// unique chunk filenames on recovery. Returns empty string if
-        /// the input is missing or too short.
+        /// First N hex chars of the session id (dashes stripped), mirroring
+        /// SessionInfo.SessionShortId. Used for unique recovered-chunk filenames.
         /// </summary>
         private static string ExtractShortId(string sessionId)
         {
-            // MUST stay in lockstep with SessionInfo.ShortIdLength. Hard-coded
-            // 5 here pre-dated the 5→8 bump in SessionInfo (collision risk on
-            // long-lived devices) — leaving it at 5 would produce a different
-            // prefix than the one chunks are written under, breaking the
-            // orphan-rescue ownership check the moment the rescue path
-            // exercises it.
+            // MUST match SessionInfo.ShortIdLength — a different prefix here than
+            // chunks were written under breaks the orphan-rescue ownership check.
             const int ShortIdLength = 8;
             if (string.IsNullOrEmpty(sessionId)) return "";
             var stripped = sessionId.Replace("-", "");
@@ -599,10 +505,9 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Copies the live session.json into the completed-session folder as session.json so that
-        /// at upload time we can read the ORIGINAL session_id, sdk_version, and schema_version
-        /// for chunks that belong to the crashed session.
-        /// Best-effort: failures are logged but never fatal — uploader falls back to current session.
+        /// Copies live session.json into the completed-session folder so the
+        /// uploader reads the ORIGINAL session_id / sdk_version / schema_version.
+        /// Best-effort — on failure the uploader falls back to the current session.
         /// </summary>
         private static void CopySessionManifest(string destDir)
         {
@@ -677,19 +582,10 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Enqueues all .jsonl files in a single directory into the upload queue.
-        ///
-        /// <para>
-        /// Skips chunks that already have a sibling <c>.uploaded</c> marker
-        /// file, which means UploaderWorker successfully sent them but the
-        /// follow-up File.Delete on Windows failed (Editor file lock,
-        /// AV scanner, etc.). Re-enqueueing them would mean uploading the
-        /// same data again on every Editor restart — backend is idempotent
-        /// so it absorbs the duplicate, but local disk usage and the
-        /// "rescued_rescued_rescued" chain in the log keep growing. Skipping
-        /// here breaks the cycle and we also retry the deletion: most
-        /// transient locks clear between Editor sessions.
-        /// </para>
+        /// Enqueues all .jsonl files in a directory. Skips chunks with a sibling
+        /// <c>.uploaded</c> marker (sent OK but the follow-up Delete failed —
+        /// Windows lock / AV) and retries the deletion, breaking the re-upload
+        /// loop that otherwise grows disk + the "rescued_rescued" log chain.
         /// </summary>
         private static void EnqueueJsonlFilesInDir(string dir, UploadQueue queue)
         {
@@ -703,10 +599,7 @@ namespace PlayScopeSdk.Internal
                     var markerPath = file + ".uploaded";
                     if (File.Exists(markerPath))
                     {
-                        // Retry the deletion the original upload couldn't do.
-                        // If it still fails (file is genuinely locked right
-                        // now), leave both files and the marker — we'll try
-                        // again next launch.
+                        // Retry the deletion the upload couldn't do; if still locked, try next launch.
                         try { File.Delete(file); File.Delete(markerPath); skipped++; }
                         catch { /* still locked — try next launch */ }
                         continue;
@@ -763,13 +656,9 @@ namespace PlayScopeSdk.Internal
         /// </summary>
         private static bool ScanFileForSessionEnd(string filePath)
         {
-            // Stream the file line-by-line instead of File.ReadAllText. On a
-            // low-memory device (post-crash, finishing a multi-tens-of-MB
-            // chunk backlog) the previous version's read-then-split-then-
-            // string[] allocation routinely OOM'd. The catch then logged a
-            // warning and returned false → SessionRecovery synthesised
-            // session_abnormal_end → the recovered session was misreported
-            // as a crash even though session_end was in the file.
+            // Stream line-by-line, not File.ReadAllText: the read-then-split
+            // allocation OOM'd on a low-memory post-crash device, and the catch
+            // returned false → a real session_end was misreported as a crash.
             try
             {
                 using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -778,10 +667,7 @@ namespace PlayScopeSdk.Internal
                 while ((line = reader.ReadLine()) != null)
                 {
                     if (string.IsNullOrEmpty(line)) continue;
-                    // Quick substring check before paying for JSON parse.
-                    // Note: "session_end" is a substring of
-                    // "session_abnormal_end" too — the JSON-parse check
-                    // below disambiguates.
+                    // Substring prefilter; the JSON parse below disambiguates from "session_abnormal_end".
                     if (!line.Contains("session_end")) continue;
 
                     var dto = SimpleJson.Deserialize(line);
@@ -925,10 +811,8 @@ namespace PlayScopeSdk.Internal
             sb.Append("{\"record_type\":\"log\"");
             sb.Append(",\"event_id\":\"").Append(Guid.NewGuid().ToString("N")).Append('"');
             sb.Append(",\"sequence_num\":").Append(sequenceNum);
-            // Use the captured_at_unix_ms from the crash record when
-            // available — the crash happened then, not now. Falls back
-            // to the caller-supplied timestamp (synthetic session_end
-            // alignment) when the C++ handler couldn't read the clock.
+            // Use the record's captured_at_unix_ms (the crash happened then),
+            // falling back to the caller timestamp if the C++ handler couldn't read the clock.
             string crashIsoTs;
             if (record.CapturedAtUnixMs > 0)
             {
@@ -1008,10 +892,7 @@ namespace PlayScopeSdk.Internal
             var destDir = Path.Combine(PlayScopeDirectory.CompletedSessions, record.SessionId);
             Directory.CreateDirectory(destDir);
 
-            // Skip if a session.json manifest already exists with a
-            // different session_id — would be a real recovered session
-            // and we don't want to corrupt it. Same-session_id manifest
-            // is fine to re-use.
+            // Don't overwrite an existing manifest (a real recovered session); same-id is fine to reuse.
             var manifestPath = Path.Combine(destDir, "session.json");
             if (!File.Exists(manifestPath))
             {
@@ -1033,10 +914,7 @@ namespace PlayScopeSdk.Internal
 
             var chunkName = "chunk_native_crash_" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".jsonl";
             var chunkPath = Path.Combine(destDir, chunkName);
-            // sequence_num just needs to be high enough that it can't
-            // collide with a real event in the (non-existent in the
-            // orphan case) prior chunks. int.MaxValue - 1 mirrors the
-            // synthetic session_end convention.
+            // High enough not to collide with a real event; mirrors the synthetic session_end convention.
             const long OrphanSeq = int.MaxValue - 1;
             var fallbackIso = record.CapturedAtUnixMs > 0
                 ? DateTimeOffset.FromUnixTimeMilliseconds(record.CapturedAtUnixMs).UtcDateTime.ToString("o")

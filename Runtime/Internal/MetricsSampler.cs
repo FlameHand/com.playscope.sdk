@@ -6,19 +6,11 @@ using UnityEngine.Profiling;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// Samples device/runtime metrics on the Unity main thread.
-    /// Call Tick() from MonoBehaviour.Update() every frame.
-    /// Threading rule: ALL UnityEngine API calls on main thread only.
-    ///
-    /// <para>
-    /// Deliberately stays on the Unity core API surface — no Addressables,
-    /// no Adaptive Performance, no Analytics. Anything that lives in an
-    /// optional Unity package belongs in the game-side wrapper layer, which
-    /// can push samples to us via <see cref="EventPipeline.EnqueueMetric"/>
-    /// or <c>PlayScope.UpdateSessionData</c>. That way the SDK package's
-    /// dependency list stays minimal and a project that doesn't use
-    /// Addressables can pull us in cleanly.
-    /// </para>
+    /// Samples device/runtime metrics on the Unity main thread (all UnityEngine
+    /// calls main-thread only). Tick() every frame from MonoBehaviour.Update().
+    /// Stays on the Unity core API — no Addressables / Adaptive Performance /
+    /// Analytics — so the package dependency list stays minimal; optional-package
+    /// metrics belong in the game-side wrapper, pushed via EnqueueMetric.
     /// </summary>
     internal sealed class MetricsSampler
     {
@@ -32,69 +24,44 @@ namespace PlayScopeSdk.Internal
         private float _memTimer;
         private float _batteryTimer;
 
-        // Sentinels for emit-on-change gating. -1 = "never sampled".
-        // Valid emit values are 0/1/2 (network), 0.0/1.0 (charging),
-        // and a non-negative MB count (disk) — so -1 can't collide.
+        // Emit-on-change sentinels; -1 = never sampled (can't collide with valid 0/1/2 or MB counts).
         private int _prevNetwork = -1;
         private double _prevCharging = -1.0;
         private double _prevDiskMb = -1.0;
 
-        // Ring buffer of per-frame deltas (ms) for the current 1 s window.
-        // Sized for 2 s @ 60 fps so we never wrap during a single sample
-        // window — even when the engine hits 120 Hz we still cover a full
-        // second's worth of frames without losing samples. Indexed
-        // modulo Length; _frameTimeCount tracks how many slots are
-        // populated (caps at Length once we've cycled through).
+        // Per-frame delta (ms) ring buffer for the current 1 s window. 128 slots
+        // = 2 s @ 60 fps so we never wrap mid-window even at 120 Hz.
         private readonly float[] _frameTimesMs = new float[128];
         private int _frameTimeIdx;
         private int _frameTimeCount;
-        // Scratch buffer used by the p99 sort path so we don't allocate
-        // a new array every second. Sized to match _frameTimesMs.
+        // Scratch for the p99 sort so we don't allocate every second.
         private readonly float[] _frameTimesSortScratch = new float[128];
 
-        // GC allocation tracking — Profiler reports cumulative bytes
-        // allocated to the managed heap since process start. We sample at
-        // 1 s and emit the delta so the dashboard sees a KB-per-second
-        // rate that's meaningful on its own (vs the cumulative value
-        // which only matters as a derivative).
+        // Profiler total is cumulative-since-start; we emit the 1 s delta as a
+        // kB/s rate (the cumulative value only matters as a derivative).
         private long _lastTotalAllocatedBytes = -1;
 
-        // UnityEngine.Device.SystemInfo.thermalStatus exists from 2023.1+.
-        // On 2021.3 (our floor) the type isn't present, so we resolve via
-        // reflection at first sample and cache the PropertyInfo. Null
-        // means "API unavailable on this Unity" → we skip the emit.
+        // UnityEngine.Device.SystemInfo.thermalStatus is 2023.1+; on our 2021.3
+        // floor the type is absent, so resolve via reflection once. Null = skip emit.
         private PropertyInfo _thermalStatusProperty;
         private bool _thermalReflectionResolved;
 
         private const float FpsInterval = 1f;
         private const float MemInterval = 5f;
-        // Slow device-state cadence (battery / thermal / charging / disk /
-        // free RAM / network). 10 s keeps short sessions (the common case —
-        // a couple of minutes) from getting only one or zero samples. The
-        // signals barely move, so the extra rows are cheap insurance against
-        // a session that ends before the first interval elapses.
+        // Slow device-state cadence (battery/thermal/charging/disk/RAM/network).
+        // 10 s so a couple-minute session still gets several near-static samples.
         private const float BatteryInterval = 10f;
         private const double DISK_CHANGE_THRESHOLD_MB = 5.0;
-        // Frame-time + gc-alloc share the same 1 s cadence as fps. They're
-        // jank-class metrics that only mean something on a sub-second
-        // window — averaging them over multiple seconds smears the spike
-        // we're trying to detect into invisibility.
-        // Threshold for "dropped frame": ANY frame longer than this counts
-        // against the dropped_frames_count metric for the current window.
-        // 33.4 ms = ½ of a 60 Hz budget, captures both 30 Hz targets that
-        // overran AND 60 Hz targets that doubled their budget — the only
-        // useful definition of "dropped" that doesn't depend on the
-        // target frame rate (which we don't try to introspect here).
+        // "Dropped frame" threshold = ½ of a 60 Hz budget — catches 30 Hz overruns
+        // AND 60 Hz doublings without needing the target frame rate. Frame-time +
+        // gc-alloc stay on the 1 s cadence; averaging over more would smear the spike.
         private const float DroppedFrameThresholdMs = 33.4f;
 
         internal MetricsSampler(EventPipeline pipeline)
         {
             _pipeline = pipeline;
-            // Prime the slow-device timer so the first Tick fires an immediate
-            // device-state baseline (battery / disk / RAM / network) at t≈0
-            // instead of waiting a full interval. Without this a session that
-            // ends before the first BatteryInterval captures zero device-state
-            // samples — observed on real sub-30 s sessions.
+            // Prime so the first Tick emits a device-state baseline at t≈0 — else
+            // a sub-interval session captures zero device-state samples.
             _batteryTimer = BatteryInterval;
         }
 
@@ -104,8 +71,7 @@ namespace PlayScopeSdk.Internal
             float dt = Time.unscaledDeltaTime;
             float dtMs = dt * 1000f;
 
-            // Frame-time ring buffer push — every frame, no rate-limiting.
-            // The 1 s sample window below drains whatever's accumulated.
+            // Push every frame; the 1 s window below drains what accumulated.
             _frameTimesMs[_frameTimeIdx] = dtMs;
             _frameTimeIdx = (_frameTimeIdx + 1) % _frameTimesMs.Length;
             if (_frameTimeCount < _frameTimesMs.Length) _frameTimeCount++;
@@ -119,19 +85,13 @@ namespace PlayScopeSdk.Internal
                 var fps = _fpsAccum / _fpsFrames;
                 _pipeline.EnqueueMetric("fps", fps);
 
-                // Frame-time p99 + dropped-frame count for the same 1 s
-                // window. p99 (vs p95 or max) is the sweet spot for jank
-                // — picks up the single bad frame in 100 without being
-                // dominated by an outlier blip that doesn't repeat.
+                // p99 (vs p95/max) is the jank sweet spot — catches the 1-in-100
+                // bad frame without being dominated by a non-repeating outlier.
                 EmitFrameTimeMetrics();
-
-                // GC allocations for the same window. Profiler counter
-                // is cumulative; we emit the delta as a kB/s rate.
                 EmitGcAllocMetric();
 
                 _fpsAccum = 0; _fpsFrames = 0; _fpsTimer = 0;
-                // Reset both index and count so the next window writes from slot 0;
-                // EmitFrameTimeMetrics reads contiguous [0..count-1].
+                // Reset so the next window writes from slot 0 ([0..count-1] contiguous).
                 _frameTimeIdx = 0;
                 _frameTimeCount = 0;
             }
@@ -147,10 +107,7 @@ namespace PlayScopeSdk.Internal
                 _memTimer = 0;
             }
 
-            // Battery + thermal + charging + disk + system RAM — 30s.
-            // All five share the same slot: they're slow-moving device-
-            // state signals where 30 s resolution is plenty and a single
-            // tick keeps the timer count small.
+            // Battery / thermal / charging / disk / RAM share one slow slot.
             _batteryTimer += dt;
             if (_batteryTimer >= BatteryInterval)
             {
@@ -160,16 +117,10 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Resets emit-on-change sentinels and the GC-alloc delta baseline.
-        /// Called from session-rotation paths so the first metric of the new
-        /// session fires its initial value instead of being suppressed by a
-        /// _prev* sentinel that happens to match what carried over.
-        ///
-        /// Today the rotation path destroys the MonoBehaviour, which gives us
-        /// a fresh sampler with fresh field initializers — so this method is
-        /// belt-and-suspenders against future regressions where someone keeps
-        /// the MB alive across sessions. Matches StatePatchCoalescer's
-        /// ResetForNewSession() precedent.
+        /// Resets emit-on-change sentinels + GC-alloc baseline so the new
+        /// session's first metric fires instead of being suppressed by a carried-
+        /// over _prev*. Belt-and-suspenders: rotation destroys the MB today, so
+        /// fields already start fresh.
         /// </summary>
         internal void ResetForNewSession()
         {
@@ -177,45 +128,25 @@ namespace PlayScopeSdk.Internal
             _prevDiskMb = -1.0;
             _prevNetwork = -1;
             _lastTotalAllocatedBytes = -1;
-            // Re-prime so a rotated session also emits its device-state
-            // baseline on the first Tick rather than after a full interval.
-            _batteryTimer = BatteryInterval;
-            // Frame-time ring buffer is window-local (resets every 1s) — not
-            // session-scoped. Do NOT touch _frameTimeIdx / _frameTimeCount.
-            // Thermal reflection cache (_thermalStatusProperty,
-            // _thermalReflectionResolved) is also process-scoped, not session.
+            _batteryTimer = BatteryInterval; // re-prime device-state baseline
+            // Frame-time buffer + thermal cache are window/process-scoped, not session — leave them.
         }
 
-        // Computes p99 frame-time and dropped-frame count from the current
-        // ring-buffer window. p99 means "the value at index 0.99 * N after
-        // sorting ascending" — so for a 60-frame window that's frame #59
-        // (sorted). With a partial window we use the same fraction.
-        // Bails when the window is too small for p99 to be meaningful
-        // (< 10 frames in a 1 s window means the game was running below
-        // 10 fps, at which point jank metrics are noise and the fps
-        // metric alone tells the story).
+        // p99 frame-time + dropped-frame count from the ring-buffer window.
+        // Bails under 10 frames/sec — below that, fps alone tells the story and jank metrics are noise.
         private void EmitFrameTimeMetrics()
         {
             int n = _frameTimeCount;
             if (n < 10) return;
 
-            // Copy into the scratch buffer and sort. Array.Sort is in-place
-            // quicksort under the hood — O(N log N) on a 128-element window
-            // is single-digit microseconds, completely fine to run every
-            // second on the main thread.
             Array.Copy(_frameTimesMs, _frameTimesSortScratch, n);
             Array.Sort(_frameTimesSortScratch, 0, n);
 
-            // p99 index: floor(0.99 * (n-1)). For n=60 → 58, for n=120 → 117.
+            // p99 index: floor(0.99 * (n-1)).
             int p99Index = (int)Math.Floor(0.99 * (n - 1));
             float p99Ms = _frameTimesSortScratch[p99Index];
             _pipeline.EnqueueMetric("frame_time_p99_ms", p99Ms);
 
-            // Dropped frame count — walk the unsorted buffer (or the sorted
-            // one; the count is order-invariant). Cheap linear scan, no
-            // allocation. Using the sorted buffer means we can break out
-            // early on the first sample <= threshold from the high end,
-            // but the buffer is small enough that a full scan is fine.
             int dropped = 0;
             for (int i = 0; i < n; i++)
             {
@@ -243,8 +174,7 @@ namespace PlayScopeSdk.Internal
             {
                 var status = SystemInfo.batteryStatus;
                 double charging = status == BatteryStatus.Charging ? 1.0 : 0.0;
-                // state-only signal — emit on transition only
-                if (charging != _prevCharging)
+                if (charging != _prevCharging) // emit on transition only
                 {
                     _pipeline.EnqueueMetric("is_charging", charging);
                     _prevCharging = charging;
@@ -277,12 +207,10 @@ namespace PlayScopeSdk.Internal
 
             _pipeline.EnqueueMetric("system_free_ram_mb", NativeMetricsBridge.GetFreeMemoryMb());
 
-            // polling cadence collapsed from 5 s; the periodic emit was redundant with the network_change event flow
             try
             {
                 var net = (int)Application.internetReachability;
-                // state-only signal — emit on transition only
-                if (net != _prevNetwork)
+                if (net != _prevNetwork) // emit on transition only
                 {
                     _pipeline.EnqueueMetric("network_reachability", net);
                     _prevNetwork = net;
@@ -332,19 +260,10 @@ namespace PlayScopeSdk.Internal
             }
         }
 
-        // Emits gc_alloc_kb (delta since the last sample). First sample is
-        // skipped — we don't have a previous total to delta against, and
-        // emitting "everything allocated since process start" would be
-        // a meaningless huge number that drags the dashboard scale.
-        //
-        // <para>
-        // Profiler.GetTotalAllocatedMemoryLong returns the cumulative bytes
-        // allocated to the managed heap since the process started. Available
-        // on every Unity Player; Development Build is NOT required (unlike
-        // some other Profiler APIs). The value can briefly decrease across
-        // a sample if a GC ran in-between — we clamp the delta to >= 0 to
-        // avoid emitting a negative rate.
-        // </para>
+        // Emits gc_alloc_kb (delta since last sample). First sample is skipped —
+        // the cumulative-since-start total would be a meaningless huge number.
+        // GetTotalAllocatedMemoryLong works on every Player (no Dev Build needed);
+        // a GC between samples can make it dip, so we clamp the delta to >= 0.
         private void EmitGcAllocMetric()
         {
             long currentTotal = Profiler.GetTotalAllocatedMemoryLong();

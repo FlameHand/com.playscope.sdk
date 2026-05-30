@@ -26,10 +26,7 @@ namespace PlayScopeSdk.Internal
         private static bool _stateWarningEmitted;
         private static bool _metadataWarningEmitted;
 
-        // Value-level mask toggle, wired by Initialize. Default true so any
-        // path that calls FilterMetadata/FilterState before Initialize (tests,
-        // misuse) gets the safe behaviour. Initialize overrides with
-        // PlayScopeContext.PiiValueMasksEnabled.
+        // Default true so a Filter call before Initialize masks by default; Initialize overrides.
         private static bool _piiValueMasksEnabled = true;
 
         internal static void SetPiiValueMasksEnabled(bool enabled)
@@ -85,11 +82,8 @@ namespace PlayScopeSdk.Internal
                     anyDropped = true;
                     continue;
                 }
-                // Value-level PII pass. Runs only when enabled (default true).
-                // Returns the input reference-equal when nothing matched, so
-                // the dictionary stays free of unnecessary string allocs on
-                // the common path. Nested dicts / lists are walked
-                // recursively by MaskValueDeep.
+                // Value-level PII pass — reference-equal when nothing matched (no
+                // alloc on the common path); MaskValueDeep recurses nested dicts/lists.
                 var maybeMasked = _piiValueMasksEnabled
                     ? PiiValueScanner.MaskValueDeep(kvp.Value)
                     : kvp.Value;

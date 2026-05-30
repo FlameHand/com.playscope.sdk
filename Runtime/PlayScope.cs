@@ -13,18 +13,14 @@ namespace PlayScopeSdk
     /// </summary>
     public static class PlayScope
     {
-        // One-time warning flag for CompleteOperation in disabled state.
-        // Reset on every Initialize via ResetSessionScopedState so test
-        // harnesses that cycle SDK on/off get a warning per cycle instead of
-        // exactly once for the process lifetime.
+        // Reset on every Initialize so on/off cycles re-warn per cycle, not once per process.
         private static int _disabledCompleteWarned;
 
         /// <summary>
-        /// Wipes any static state owned by this file that's scoped to a
-        /// single SDK session. Called from <see cref="Internal.PlayScopeRuntime.Initialize"/>
-        /// before the gate flips so a re-Initialize starts from a clean slate.
-        /// Add new session-scoped statics here when introducing them — there's
-        /// no other safe place to reset them from outside this class.
+        /// Wipes session-scoped static state owned by this file. Called from
+        /// <see cref="Internal.PlayScopeRuntime.Initialize"/> before the gate
+        /// flips so a re-Initialize starts clean. Add new session-scoped statics
+        /// here — there's no other safe place to reset them from outside.
         /// </summary>
         internal static void ResetSessionScopedState()
         {
@@ -34,15 +30,11 @@ namespace PlayScopeSdk
             _openOperationStartMetadata.Clear();
         }
 
-        // Walks the open-operations dicts once and removes the smallest
-        // (oldest-start-tick) ~10% of entries when the cap is breached.
-        // Cheap fast-path Count check first — eviction only runs on a real
-        // leak (forgotten CompleteOperation calls), not on the happy path.
+        // Safety valve for leaked (forgotten-CompleteOperation) entries: drops
+        // the oldest ~10% when the cap is breached. Fast-path Count check first.
         private static void EvictOpenOperationsIfOverflow()
         {
             if (_openOperationStartTicks.Count < MaxOpenOperations) return;
-            // Snapshot start ticks, sort, drop oldest 10%. We don't claim
-            // perfect LRU — this is a safety valve.
             var ordered = new List<KeyValuePair<string, long>>(_openOperationStartTicks);
             ordered.Sort((a, b) => a.Value.CompareTo(b.Value));
             int evictCount = Math.Max(1, ordered.Count / 10);
@@ -57,58 +49,34 @@ namespace PlayScopeSdk
                 $"evicted {evictCount} oldest entry. Some CompleteOperation calls were probably missed.");
         }
 
-        // opId → OperationType.ToString() — populated by StartOperation, read
-        // and drained by CompleteOperation so the operation_end event carries
-        // the type the dashboard needs to drive its per-channel filter
-        // (HTTP / ResourceLoad / SceneLoad / Purchase / Custom).
-        //
-        // Without this the timeline can only tell the type of a "start" event;
-        // toggling the HTTP filter off would still leave every HTTP "end"
-        // visible because it carried no type at all and fell through to the
-        // "Custom" bucket. ConcurrentDictionary so cross-thread Start/End
-        // (the common case — request fires on the main thread, completes on
-        // a worker) is safe.
+        // opId → type, carried onto operation_end so the timeline's per-channel
+        // filter (HTTP / ResourceLoad / SceneLoad / Purchase / Custom) classifies
+        // the end event; without it every end falls through to "Custom".
+        // Concurrent because Start (main thread) and End (worker) commonly race.
         private static readonly ConcurrentDictionary<string, string> _openOperationTypes = new();
 
-        // opId → start tick reading (DateTime.UtcNow.Ticks). Lets CompleteOperation
-        // attach a duration_ms field to the operation_end metadata even when the
-        // caller (or its wrapper) didn't measure it themselves — so the dashboard
-        // can show how long EVERY tracked op took, not just HTTP requests where
-        // a separate communicator happened to record it.
+        // opId → start tick, so CompleteOperation can stamp duration_ms even when
+        // the caller didn't measure it — duration for EVERY tracked op, not just HTTP.
         private static readonly ConcurrentDictionary<string, long> _openOperationStartTicks = new();
 
-        // opId → snapshot of operation_start metadata — populated by StartOperation,
-        // drained by CompleteOperation, then merged into the operation_end event
-        // so end events carry forward dimension fields (operation_name / placement /
-        // network / ad_type / store / etc.) that only the start helper set. Without
-        // this, revenue + perf MVs reading from operation_end bucket every row as
-        // 'unknown' because the end event only carries result/duration. End-time
-        // caller metadata still wins on collision (authoritative).
+        // opId → start-metadata snapshot, merged into operation_end so dimension
+        // fields (operation_name / placement / network / ad_type / store) survive
+        // forward; otherwise revenue/perf MVs bucket every end row as 'unknown'.
+        // End-time caller metadata wins on collision (authoritative).
         private static readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, object>> _openOperationStartMetadata = new();
 
-        // Hard cap on outstanding (Start-but-not-yet-Complete) operations.
-        // Without this, a code path where CompleteOperation is never reached
-        // (forgotten end, fire-and-forget pattern, exception escapes between
-        // Start and End) leaks dictionary entries for the rest of the session.
-        // 1024 is generous — real games have at most a few dozen ops in flight.
-        // When we go over, we drop the oldest still-open op silently — the
-        // matching End will still fire but won't get duration_ms/op-type
-        // stamped, which is degraded-but-better-than-unbounded behaviour.
+        // Cap on outstanding Start-but-not-Completed ops so forgotten/leaked ends
+        // don't grow the dicts unbounded. 1024 is generous (real games: a few dozen).
+        // Over-cap drops the oldest open op; its End still fires but unstamped.
         private const int MaxOpenOperations = 1024;
 
         /// <summary>
-        /// Initializes the SDK using the project's
-        /// <see cref="PlayScopeSettings"/> asset (loaded from
-        /// <c>Resources/PlayScopeSettings.asset</c>). This is the typical
-        /// entry point — create the asset via <c>PlayScope ▸ Settings</c>
-        /// in the Editor, paste your SDK key, and call this from a
-        /// bootstrap script.
-        ///
-        /// <para>
-        /// If the asset is missing or its <c>SdkKey</c> is empty, the SDK
-        /// stays disabled and every public API call becomes a silent no-op.
-        /// A clear console warning identifies the cause.
-        /// </para>
+        /// Initializes the SDK from the project's <see cref="PlayScopeSettings"/>
+        /// asset (<c>Resources/PlayScopeSettings.asset</c>) — the typical entry
+        /// point. Create the asset via <c>PlayScope ▸ Settings</c>, paste your
+        /// SDK key, and call this from a bootstrap script.
+        /// If the asset is missing or its <c>SdkKey</c> is empty, the SDK stays
+        /// disabled (every call no-ops) and logs a console warning.
         /// </summary>
         public static void Initialize()
         {
@@ -126,16 +94,10 @@ namespace PlayScopeSdk
         }
 
         /// <summary>
-        /// Initializes the SDK with an explicit context object. Use this
-        /// when you need to override settings programmatically (e.g. you
-        /// run multiple environments from one codebase and pick the key
-        /// at runtime). For the common case, prefer the parameterless
-        /// <see cref="Initialize()"/> + <see cref="PlayScopeSettings"/>.
-        ///
-        /// <para>
-        /// Subsequent calls after the first are a warning + no-op — the
-        /// first wins.
-        /// </para>
+        /// Initializes the SDK with an explicit context — use to override
+        /// settings programmatically (e.g. pick the key per environment at
+        /// runtime). For the common case prefer the parameterless
+        /// <see cref="Initialize()"/>. Calls after the first warn + no-op.
         /// </summary>
         public static void Initialize(PlayScopeContext context)
         {
@@ -151,10 +113,8 @@ namespace PlayScopeSdk
         }
 
         /// <summary>
-        /// Loaded <see cref="PlayScopeSettings"/> asset, or null if it
-        /// doesn't exist. Wrapper / game-side code that wants to mirror
-        /// the SDK's <c>MinLogLevel</c> in its own logger can read it from
-        /// here without re-loading Resources.
+        /// Loaded <see cref="PlayScopeSettings"/> asset, or null if absent.
+        /// Lets wrapper code mirror the SDK's <c>MinLogLevel</c> without re-loading Resources.
         /// </summary>
         public static PlayScopeSettings Settings => PlayScopeSettings.Load();
 
@@ -176,19 +136,15 @@ namespace PlayScopeSdk
 
         /// <summary>
         /// True once <see cref="Initialize"/> has wired up every subsystem and
-        /// the public API is ready to record events. Stays true until
-        /// Shutdown (or process exit). False on an SDK that was never started
-        /// OR one that failed during Initialize and self-disabled.
+        /// the API is ready. False if never started, or if Initialize failed
+        /// and self-disabled. Stays true until Shutdown / process exit.
         /// </summary>
         public static bool IsInitialized => PlayScopeRuntime.IsInitialized;
 
         /// <summary>
-        /// True after the SDK has been permanently disabled — either because
-        /// the supplied ApiKey was blank, because a required boot step threw,
-        /// or because <see cref="Initialize"/> itself caught an exception.
-        /// Wrappers can probe this AFTER Initialize to surface the failure to
-        /// their own caller instead of letting every downstream API silently
-        /// no-op.
+        /// True after the SDK has been permanently disabled — blank key, a boot
+        /// step threw, or <see cref="Initialize"/> caught an exception. Probe
+        /// AFTER Initialize to surface the failure instead of silently no-opping.
         /// </summary>
         public static bool IsDisabled => PlayScopeRuntime.IsDisabled;
 
@@ -258,11 +214,8 @@ namespace PlayScopeSdk
             {
                 if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
                 patch = SensitiveKeyFilter.FilterState(patch);
-                // Hand off to the coalescer instead of emitting directly. The
-                // coalescer folds a per-frame burst of UpdateState() calls
-                // into one row per ~100ms window — see StatePatchCoalescer.
-                // It stamps _reason itself before the actual emit, so callers
-                // don't need to merge anything here.
+                // Coalescer folds a per-frame burst into one row per ~100ms window
+                // and stamps _reason itself before emit.
                 PlayScopeRuntime.StatePatchCoalescer.Add(patch, reason);
             }
             catch (Exception ex) { PlayScopeLog.Warning("UpdateState failed", ex); }
@@ -352,22 +305,11 @@ namespace PlayScopeSdk
                 var session = PlayScopeRuntime.CurrentSession;
                 var operationId = $"{session?.SessionShortId}-{SequenceCounter.Next()}";
                 var typeStr = type.ToString();
-                // Drop oldest entries when we exceed the cap. We use the
-                // Count check as a fast path; the actual eviction walks the
-                // dictionary once (rare branch — only when leaks are happening).
                 EvictOpenOperationsIfOverflow();
-                // Remember the type so the matching CompleteOperation can stamp
-                // it onto the operation_end event too — see the field comment.
                 _openOperationTypes[operationId] = typeStr;
-                // Remember when we started so we can attach a measured duration
-                // on the matching CompleteOperation. Ticks are monotonic enough
-                // for ms-resolution durations and survive a wall-clock change.
                 _openOperationStartTicks[operationId] = DateTime.UtcNow.Ticks;
-                // Merge operation_name into metadata
                 var merged = new Dictionary<string, object> { ["operation_name"] = operationName ?? "" };
                 if (metadata != null) foreach (var kv in metadata) merged[kv.Key] = kv.Value;
-                // Stash a snapshot so the matching CompleteOperation can carry
-                // start-time dimensions onto operation_end (see field comment).
                 _openOperationStartMetadata[operationId] = merged;
                 PlayScopeRuntime.Pipeline?.EnqueueEvent("operation_start", operationId: operationId,
                     operationType: typeStr, metadataJson: EventPipeline.DictToJson(merged));
@@ -393,13 +335,9 @@ namespace PlayScopeSdk
             {
                 if (PlayScopeRuntime.IsDisabled || !PlayScopeRuntime.IsInitialized)
                 {
-                    // Warn once per session that the SDK is dropping completion
-                    // calls. The prior implementation gated this on
-                    // string.IsNullOrEmpty(operationId), making the warning
-                    // unreachable for the common case (caller stored the empty
-                    // string StartOperation handed back in the disabled state
-                    // and passed it back here). Devs silently learned nothing
-                    // about why their dashboard was empty.
+                    // Warn once per session before the IsNullOrEmpty(operationId)
+                    // bail below — in disabled state StartOperation returns "",
+                    // so gating the warning on that check would make it unreachable.
                     if (Interlocked.CompareExchange(ref _disabledCompleteWarned, 1, 0) == 0)
                     {
                         PlayScopeLog.Warning("CompleteOperation called in disabled state — ignored.");
@@ -408,18 +346,10 @@ namespace PlayScopeSdk
                 }
                 if (string.IsNullOrEmpty(operationId)) return;
                 metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-                // Drain the type stamped by StartOperation so the end event
-                // carries the same operationType as its start — the timeline
-                // filter needs it to put the end on the right channel.
                 _openOperationTypes.TryRemove(operationId, out var typeStr);
-                // Drain start tick so we can compute and stamp duration_ms. We
-                // only add it when the caller didn't already provide one — the
-                // HTTP wrapper, for example, measures duration including its
-                // own deserialization step and that figure is more honest than
-                // the raw SDK span.
+                // Only stamp our measured duration if the caller didn't supply one —
+                // e.g. the HTTP wrapper's figure includes deserialization, more honest.
                 _openOperationStartTicks.TryRemove(operationId, out var startTicks);
-                // Drain the start-metadata snapshot so we can carry its dimension
-                // fields forward — see _openOperationStartMetadata field comment.
                 _openOperationStartMetadata.TryRemove(operationId, out var startMetadata);
 
                 var merged = new Dictionary<string, object>();
@@ -435,10 +365,7 @@ namespace PlayScopeSdk
                     var durationMs = (DateTime.UtcNow.Ticks - startTicks) / TimeSpan.TicksPerMillisecond;
                     if (durationMs >= 0) merged["duration_ms"] = durationMs;
                 }
-                // SceneLoad: drain any progress samples that were collected by
-                // SceneLoadProgressTracker between Start and End. Caller can
-                // still pass scene_progress_samples in metadata explicitly —
-                // we only auto-fill when nothing was provided.
+                // Auto-fill scene_progress_samples from the tracker unless the caller passed its own.
                 if (typeStr == "SceneLoad" && !merged.ContainsKey("scene_progress_samples"))
                 {
                     var samples = SceneLoadProgressTracker.DrainSamples(operationId);
@@ -673,13 +600,10 @@ namespace PlayScopeSdk
         /// <c>from_level=12</c>, <c>character_name=guest_1234</c>) — surface
         /// alongside the reason in the dashboard's restart details panel.</param>
         /// <remarks>
-        /// After this call the SetInitialState lock is re-armed: the caller is
-        /// expected to push a fresh <see cref="SetInitialState"/> for the
-        /// post-restart period. The dashboard's profile-state reconstruction
-        /// rebuilds from the most recent <c>state_initial</c> so the new
-        /// snapshot naturally replaces the old one — no client-side hack.
-        /// Session-data (device / environment / addressables) is NOT reset:
-        /// it stays the same across a restart by definition.
+        /// Re-arms the SetInitialState lock — push a fresh
+        /// <see cref="SetInitialState"/> for the post-restart period; the
+        /// dashboard rebuilds from the most recent <c>state_initial</c>.
+        /// Session-data (device / environment / addressables) is NOT reset.
         /// </remarks>
         public static void TrackRestart(string reason = null, IReadOnlyDictionary<string, object> metadata = null)
         {
@@ -687,12 +611,7 @@ namespace PlayScopeSdk
             {
                 if (!PlayScopeRuntime.IsInitialized || PlayScopeRuntime.IsDisabled) return;
                 metadata = SensitiveKeyFilter.FilterMetadata(metadata);
-                // Merge reason into the metadata payload as a top-level
-                // "reason" key. Dashboard's RestartDetails surfaces it
-                // first, separate from the rest of the metadata table.
-                // Reason wins over any conflicting "reason" key the caller
-                // might have already put in metadata — it's the explicit
-                // parameter, so it represents intent.
+                // Explicit reason param wins over any "reason" key in metadata.
                 Dictionary<string, object> merged = null;
                 if (!string.IsNullOrEmpty(reason))
                 {
@@ -708,13 +627,10 @@ namespace PlayScopeSdk
                 }
                 var metaJson = merged != null && merged.Count > 0
                     ? EventPipeline.DictToJson(merged) : null;
-                // Flush any in-flight state patches BEFORE the restart marker
-                // lands so the dashboard's per-restart replay sees a clean
-                // boundary instead of patches straddling the divider.
+                // Flush in-flight patches before the marker so per-restart replay
+                // sees a clean boundary, not patches straddling the divider.
                 PlayScopeRuntime.StatePatchCoalescer.FlushNow();
                 PlayScopeRuntime.Pipeline?.EnqueueEvent("restart", metadataJson: metaJson);
-                // Re-arm the SetInitialState gate so the game can push a
-                // fresh snapshot for the post-restart period.
                 PlayScopeRuntime.ResetInitialStateLock();
             }
             catch (Exception ex) { PlayScopeLog.Warning("TrackRestart failed", ex); }

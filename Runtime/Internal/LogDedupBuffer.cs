@@ -4,39 +4,18 @@ using System.Collections.Generic;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// Collapses repeated <c>info</c>/<c>warning</c>/<c>debug</c> logs that share
-    /// the same <c>(level, message)</c> within a 5-second window into a single
-    /// timeline record carrying <c>repeat_count: N</c> metadata.
-    ///
-    /// <para>
-    /// Critical levels (<c>error</c>, <c>exception</c>) bypass the dedup
-    /// entirely — every error matters individually and we never want to delay
-    /// it by the dedup window. <see cref="EventPipeline.EnqueueLog"/> calls
-    /// <see cref="Add"/> only for the absorbable levels and routes criticals
-    /// straight to the queue.
-    /// </para>
-    ///
-    /// <para>
-    /// Trade-off: the FIRST occurrence of a key is held for up to 5 seconds
-    /// before reaching the queue. That delays "what just happened?" visibility
-    /// slightly, but it's preferable to the alternative of emitting both the
-    /// first record AND a summary record (two rows for one logical event).
-    /// </para>
-    ///
-    /// <para>
-    /// Thread-safety: <see cref="Add"/> may be called from any thread (Unity's
-    /// log-stream callback runs on a threadpool worker). All buffer state is
-    /// guarded by a single monitor; the only main-thread coupling is the
-    /// optional periodic <see cref="TickAndMaybeFlush"/> driven by the
-    /// MonoBehaviour Update loop.
-    /// </para>
+    /// Collapses repeated info/warning/debug logs with the same (level, message)
+    /// within a 5 s window into one record carrying <c>repeat_count: N</c>.
+    /// Critical levels (error/exception) bypass dedup — every error matters and
+    /// must not be delayed by the window. Trade-off: the first occurrence is held
+    /// up to 5 s, preferable to emitting both a first record AND a summary (two
+    /// rows for one event). <see cref="Add"/> is thread-safe (Unity's log callback
+    /// runs on a worker); state is guarded by a single monitor.
     /// </summary>
     internal sealed class LogDedupBuffer
     {
         private const int WindowMs = 5000;
-        // Hard cap on buffered entries — keeps a runaway spam scenario from
-        // growing the dictionary without bound. Eviction policy: drop the
-        // oldest entry (emit it with its current count) to make room.
+        // Cap against runaway spam; over-cap emits the oldest entry to make room.
         private const int MaxEntries = 256;
 
         private sealed class Entry
@@ -49,14 +28,9 @@ namespace PlayScopeSdk.Internal
         private readonly EventQueue _queue;
         private readonly Dictionary<string, Entry> _entries = new();
 
-        // Rate-limit for the "evicted oldest entry" warning. Without this,
-        // a steady-state full buffer (consumer's code spamming many UNIQUE
-        // warnings per second — e.g. LocalizationManager logging one warn
-        // per missing translation × hundreds of UI elements per scene)
-        // would log the eviction notice on EVERY add. The notice itself is
-        // useful — it tells the integrator "your call site is too chatty" —
-        // but its value is just as high if it shows once every 10 seconds
-        // as it is if it shows hundreds of times per second.
+        // Rate-limit the eviction warning — a flood of unique warnings (e.g. one
+        // per missing translation × hundreds of UI elements) would otherwise log
+        // the eviction notice on every add. Once per 10 s carries the same signal.
         private long _lastEvictionWarnTicks;
         private long _droppedEvictionWarnings;
         private const long EvictionWarnIntervalMs = 10_000; // log at most once per 10s
@@ -97,12 +71,7 @@ namespace PlayScopeSdk.Internal
             }
         }
 
-        /// <summary>
-        /// Called from MonoBehaviour.Update every frame. Walks the buffer
-        /// and emits any entries whose 5 s window has elapsed. Cheap — the
-        /// early-return on empty buffer means the per-frame cost is one
-        /// lock + one Count check when nothing is buffered.
-        /// </summary>
+        /// <summary>Per-frame tick — emits entries whose 5 s window elapsed.</summary>
         internal void TickAndMaybeFlush()
         {
             List<Entry>? toEmit = null;
@@ -153,9 +122,7 @@ namespace PlayScopeSdk.Internal
         private void EvictIfFull_NoLock()
         {
             if (_entries.Count < MaxEntries) return;
-            // Find the oldest buffered entry and emit it to make room.
-            // We don't need precise LRU — this is a safety valve for
-            // pathological spam, not a hot path.
+            // Emit the oldest to make room — not precise LRU, just a spam safety valve.
             string? oldestKey = null;
             long oldestTicks = long.MaxValue;
             foreach (var kv in _entries)
@@ -169,16 +136,11 @@ namespace PlayScopeSdk.Internal
             if (oldestKey == null) return;
             var victim = _entries[oldestKey];
             _entries.Remove(oldestKey);
-            // Emit OUTSIDE the lock would be cleaner, but the dictionary
-            // is small and EmitWithCount only touches the queue (which
-            // has its own lock). Safe to call inside.
+            // Safe to emit under the lock — the queue has its own.
             EmitWithCount(victim);
 
-            // Rate-limited Editor-console warning. Without the throttle the
-            // warning itself becomes the spam — was visibly the case in user
-            // testing where a missing-translation loop printed thousands of
-            // these per second. Show the SUPPRESSED count when we finally
-            // re-emit so the integrator sees both the signal and its scale.
+            // Rate-limited warning with the suppressed-count suffix so the
+            // integrator sees both the signal and its scale.
             var nowTicks = DateTime.UtcNow.Ticks;
             var elapsedMs = (nowTicks - _lastEvictionWarnTicks) / TimeSpan.TicksPerMillisecond;
             if (_lastEvictionWarnTicks == 0 || elapsedMs >= EvictionWarnIntervalMs)
@@ -199,10 +161,8 @@ namespace PlayScopeSdk.Internal
             }
         }
 
-        // Emits the buffered sample, splicing repeat_count into its metadata
-        // JSON when the count is > 1. For count == 1 the record is emitted
-        // verbatim — no metadata mutation, no synthetic "repeat_count: 1"
-        // bloat on every dashboard log row.
+        // Splices repeat_count into metadata only when > 1 — count==1 emits
+        // verbatim, no "repeat_count: 1" bloat on every log row.
         private void EmitWithCount(Entry e)
         {
             if (e.RepeatCount > 1)
@@ -212,20 +172,15 @@ namespace PlayScopeSdk.Internal
             _queue.Enqueue(e.Sample);
         }
 
-        // Inserts "repeat_count": N as the FIRST key of the existing metadata
-        // object. Works whether MetadataJson is null/empty (build a fresh
-        // single-key object) or a populated object literal (splice after the
-        // opening brace). Hand-rolled rather than re-parsing because the SDK
-        // already keeps metadata as serialized JSON throughout the pipeline.
+        // Splices "repeat_count": N after the opening brace — hand-rolled because
+        // the pipeline keeps metadata as serialized JSON throughout.
         private static string InjectRepeatCount(string? metadataJson, int count)
         {
             if (string.IsNullOrEmpty(metadataJson) || metadataJson == "{}")
                 return "{\"repeat_count\":" + count + "}";
-            // Expecting metadataJson to start with '{'. Splice after it.
             if (metadataJson![0] == '{')
                 return "{\"repeat_count\":" + count + "," + metadataJson.Substring(1);
-            // Unexpected shape — leave as-is, drop repeat_count rather than
-            // produce malformed JSON.
+            // Unexpected shape — leave as-is rather than produce malformed JSON.
             return metadataJson;
         }
     }

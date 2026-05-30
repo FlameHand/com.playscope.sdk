@@ -6,28 +6,14 @@ using UnityEngine;
 namespace PlayScopeSdk.Editor
 {
     /// <summary>
-    /// Editor utility for wiping the on-disk PlayScope cache.
-    ///
-    /// <para>
-    /// Use this when iterating in the Editor and you want a clean slate — e.g. after a
-    /// crash left orphan chunks behind, or before re-running a session-recovery test.
-    /// The runtime mirror of this lives in PlayScopeRuntime/SessionRecovery; this menu
-    /// is purely a dev affordance and is NOT shipped to runtime (file is under
-    /// Assets/Editor/ and the asmdef is Editor-only).
-    /// </para>
-    ///
-    /// <para>
-    /// What gets removed: everything under <c>Application.persistentDataPath/PlayScope/</c>
-    /// — session.json/lock/hb, chunks/, upload_queue/, completed_sessions/, dead_letter/,
-    /// and device.json. After confirming, the directory is deleted and re-created empty
-    /// so the next Play Mode start lands in a virgin state.
-    /// </para>
+    /// Editor-only utility to wipe the on-disk PlayScope cache (everything under
+    /// <c>persistentDataPath/PlayScope/</c>) for a clean slate when iterating —
+    /// e.g. after a crash left orphans, or before a session-recovery test.
     /// </summary>
     internal static class PlayScopeSessionCacheMenu
     {
-        // Path resolution mirrors PlayScopeDirectory but is Editor-only and avoids
-        // pulling in any runtime singleton — keeps the menu safe to invoke when the
-        // SDK hasn't been Initialize()d in this Editor session.
+        // Mirrors PlayScopeDirectory without a runtime singleton, so the menu works
+        // even when the SDK was never Initialize()d this Editor session.
         private static string CacheRoot =>
             Path.Combine(Application.persistentDataPath, "PlayScope");
 
@@ -45,9 +31,7 @@ namespace PlayScopeSdk.Editor
                 return;
             }
 
-            // Show the user exactly what they're about to nuke. The size hint helps
-            // when chunks accumulated over multiple test runs — visible quantification
-            // is the difference between "ok" and "wait, what?" for destructive ops.
+            // Size hint in the confirm dialog — a destructive op deserves quantification.
             long totalBytes;
             int fileCount;
             try
@@ -74,10 +58,8 @@ namespace PlayScopeSdk.Editor
 
             if (!confirm) return;
 
-            // If Play Mode is running, the runtime is holding file handles (chunk_current.jsonl
-            // stream is long-lived). Deleting under live handles either silently corrupts the
-            // worker state or errors out per-file on Windows. Refuse to proceed loudly instead
-            // of half-clearing.
+            // In Play Mode the runtime holds the chunk_current.jsonl handle — deleting
+            // under it corrupts worker state / errors on Windows. Refuse loudly.
             if (EditorApplication.isPlayingOrWillChangePlaymode || EditorApplication.isPlaying)
             {
                 EditorUtility.DisplayDialog(

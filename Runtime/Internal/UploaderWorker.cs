@@ -85,15 +85,10 @@ namespace PlayScopeSdk.Internal
                 catch (OperationCanceledException) { /* fall through to one final drain */ }
                 catch (Exception) { /* timeout is fine — proceed to upload cycle */ }
 
-                // ALWAYS run ProcessQueueAsync once per wake, even on cancellation.
-                // Shutdown's flow is: enqueue session_end → DrainAndFinalize →
-                // TriggerInstantUpload → Stop. Without this unconditional drain
-                // the cancel could race the wake and skip the final upload —
-                // session_end would only land on the NEXT launch via
-                // SessionRecovery (when it works), and silently never (when
-                // anything in that chain fails). We pass CancellationToken.None
-                // so a single in-flight HTTP request gets to finish; the OS
-                // will kill us hard if we exceed Unity's quit budget anyway.
+                // ALWAYS drain once per wake, even on cancellation — Shutdown
+                // (enqueue session_end → TriggerInstantUpload → Stop) could
+                // otherwise race the cancel and skip the final upload. None token
+                // so the in-flight request finishes (OS kills us past the budget anyway).
                 try { await ProcessQueueAsync(CancellationToken.None); }
                 catch (Exception ex) { PlayScopeLog.Warning("Uploader drain error", ex); }
 
@@ -115,9 +110,7 @@ namespace PlayScopeSdk.Internal
 
             if (paths.Count == 0) return; // silent — most ticks have nothing to do
 
-            // Per-pass counters so we end with one summary line instead of N
-            // anonymous Info lines. Each individual chunk also logs its own
-            // outcome at Info level for fine-grained diagnosis.
+            // Per-pass counters → one summary line instead of N.
             int succeeded = 0, retryScheduled = 0, deadLettered = 0, rescued = 0, alreadyUploaded = 0;
             _passSucceeded = 0; _passRetried = 0; _passDeadLettered = 0; _passRescued = 0; _passAlreadyUploaded = 0;
 
@@ -136,9 +129,7 @@ namespace PlayScopeSdk.Internal
             rescued         = _passRescued;
             alreadyUploaded = _passAlreadyUploaded;
 
-            // Always emit a summary line. Use Warning when ANY chunk hit
-            // dead-letter (operator should notice — that's permanent data
-            // loss for that chunk), Info otherwise.
+            // Warn if any chunk dead-lettered (permanent loss), else Info.
             var summary = $"UploaderWorker: pass done. " +
                           $"ok={succeeded} retry={retryScheduled} dead={deadLettered} " +
                           $"rescued={rescued} already_uploaded={alreadyUploaded} " +
@@ -147,10 +138,7 @@ namespace PlayScopeSdk.Internal
             else                  PlayScopeLog.Info(summary);
         }
 
-        // Per-pass outcome tallies. Set to 0 at the start of each
-        // ProcessQueueAsync, incremented from UploadChunkAsync, read back
-        // in the summary line. Not thread-safe — every uploader pass is
-        // strictly sequential.
+        // Per-pass tallies. Not thread-safe — uploader passes are strictly sequential.
         private int _passSucceeded;
         private int _passRetried;
         private int _passDeadLettered;
@@ -176,18 +164,10 @@ namespace PlayScopeSdk.Internal
                     if (state == null) continue;
                     if (state.IsUploaded) continue;
 
-                    // Belt-and-braces ownership check: a leftover state file from a PRIOR
-                    // session must not pull its chunk into THIS session's upload loop.
-                    // Without this guard, an orphan chunk_{otherShort}_NNN.jsonl in chunks/
-                    // would be uploaded under our envelope and cross-session-commingled
-                    // under our session_id (regression 2026-05-21 — three Unity runs
-                    // squashed into one backend session_id because three prior sessions'
-                    // chunks all rode in on this path).
-                    //
-                    // chunk_id in the state file is the chunk's filename (e.g.
-                    // "chunk_4e91a_000001.jsonl"). Anything not matching our short-id
-                    // prefix gets removed from the queue dir so we stop checking it
-                    // every poll; the chunk itself stays for SessionRecovery to relocate.
+                    // Ownership check: a PRIOR session's leftover state file must not
+                    // pull its chunk into THIS session's loop, or it uploads under our
+                    // envelope and commingles sessions. Non-matching prefix → drop the
+                    // state file (stop re-checking); the chunk stays for SessionRecovery.
                     var chunkId = state.ChunkId ?? "";
                     if (!chunkId.StartsWith(ownPrefix, StringComparison.Ordinal))
                     {
@@ -199,9 +179,8 @@ namespace PlayScopeSdk.Internal
                         continue;
                     }
 
-                    // Check TTL — based on CreatedAt (NOT LastAttemptAt), otherwise a chunk that
-                    // keeps failing would reset its own TTL on every retry. Legacy state files
-                    // missing CreatedAt fall back to LastAttemptAt for backwards compatibility.
+                    // TTL anchors on CreatedAt, not LastAttemptAt — else a chunk that keeps
+                    // failing resets its own TTL each retry. Legacy files fall back to LastAttemptAt.
                     var ttlAnchor = state.CreatedAt ?? state.LastAttemptAt;
                     if (ttlAnchor.HasValue &&
                         (now - ttlAnchor.Value).TotalDays >= RetryTtlDays)
@@ -246,14 +225,9 @@ namespace PlayScopeSdk.Internal
             }
             catch (InvalidOperationException ex)
             {
-                // Foreign short-id in chunks/ — SessionRecovery should have moved
-                // this chunk to completed_sessions/{prior_session_id}/ at startup
-                // but didn't (TryMoveFile is best-effort and swallows IO errors).
-                // Try a self-rescue: look for an existing completed_sessions
-                // manifest whose session_id starts with the chunk's short-id and
-                // relocate the chunk there so the NEXT upload pass picks it up
-                // with the correct envelope identity. Only if that fails do we
-                // dead-letter the data.
+                // Foreign short-id that SessionRecovery failed to relocate. Self-rescue:
+                // find a completed_sessions manifest matching the chunk's short-id and
+                // move it there for the next pass; dead-letter only if that fails.
                 if (TryRescueOrphanChunk(chunkPath, stateFilePath, out var rescueDest))
                 {
                     _passRescued++;
@@ -272,15 +246,9 @@ namespace PlayScopeSdk.Internal
             }
             catch (Exception ex)
             {
-                // BuildGzipPayload threw something other than the foreign-
-                // short-id case (corrupt UTF-8, disk read IO error, gzip
-                // failure). Previously we returned silently here — so on
-                // every 30s poll we re-tried the same broken chunk forever
-                // without ever incrementing Attempts or scheduling a
-                // backoff. Now treat it like a retryable failure: bump
-                // Attempts, schedule the next retry with backoff, and let
-                // the 7-day TTL eventually dead-letter the file if it
-                // never recovers.
+                // Other build failure (corrupt UTF-8, IO, gzip). Treat as retryable:
+                // bump Attempts + schedule backoff so the 7-day TTL eventually
+                // dead-letters it, instead of silently re-trying forever every poll.
                 state.Attempts++;
                 state.LastAttemptAt = DateTime.UtcNow;
                 double buildFailBackoffSeconds = BackoffBase[Math.Min(state.Attempts - 1, BackoffBase.Length - 1)];
@@ -322,37 +290,17 @@ namespace PlayScopeSdk.Internal
 
             if (!networkError && httpStatus >= 200 && httpStatus < 300)
             {
-                // Success. Bug L1 used to live here: we deleted the chunk
-                // FIRST and only wrote the .uploaded marker if the delete
-                // failed. A process kill landing between the 200 response
-                // and the delete (or between delete and marker, when delete
-                // failed) could leave the chunk on disk with no marker —
-                // SessionRecovery on next launch would then re-enqueue it,
-                // re-upload it (server dedups), and the chunk could pile up
-                // forever on the device.
-                //
-                // The fix is a strict two-phase shutdown:
-                //   1. Make the "this chunk is done" decision DURABLE before
-                //      we even attempt the delete. Two durable signals are
-                //      written in this order: state.IsUploaded=true, then a
-                //      sibling .uploaded marker file. Either is sufficient
-                //      to suppress re-upload on the next launch — we write
-                //      both because a stale state file alone can be deleted
-                //      by quota-pressure pruning, and a marker alone can be
-                //      missed if SessionRecovery never moves the chunk into
-                //      the upload queue dir (e.g. it died in completed_sessions/).
-                //   2. ONLY THEN attempt to free the disk by deleting the
-                //      chunk + the now-redundant marker + the state file.
+                // Two-phase to survive a kill between the 200 and the delete:
+                // (1) make "done" DURABLE first — state.IsUploaded=true AND a
+                // .uploaded marker (both, because a state file can be quota-pruned
+                // and a marker can be missed if the chunk never reached the queue
+                // dir); (2) only THEN delete chunk + marker + state to free disk.
                 state.IsUploaded = true;
                 SaveState(stateFilePath, state);
                 long sizeBytes = 0;
                 try { sizeBytes = new FileInfo(chunkPath).Length; } catch { /* best-effort */ }
-                // Show bytes when <1 KB. The old "(0 KB)" rounding was
-                // mistaken for "empty chunk" during debugging because a
-                // synthetic session_end event line is typically ~300-500
-                // bytes — it carries real signal but looked like garbage
-                // in the log. Threshold of 1024 bytes keeps the existing
-                // "(N KB)" output for any normal chunk.
+                // Show raw bytes under 1 KB — "(0 KB)" rounding looked like an empty
+                // chunk for a real ~300-500 byte synthetic session_end line.
                 var sizeLabel = sizeBytes >= 1024
                     ? $"{sizeBytes / 1024} KB"
                     : $"{sizeBytes} B";
@@ -468,17 +416,13 @@ namespace PlayScopeSdk.Internal
                 }
             }
 
-            // Recovered chunks live under completed_sessions/{sessionId}/ and carry a manifest
-            // (session.json) with the original session's identity. Use it so the envelope
-            // attributes the data to the crashed session, not the currently-running one.
-            // Throws if a recovered chunk has no usable manifest — see ResolveEnvelopeIdentity.
+            // Recovered chunks attribute to the crashed session via their bundled
+            // manifest, not the live one (throws if it's missing — see below).
             ResolveEnvelopeIdentity(chunkPath,
                 out var envelopeSessionId, out var envelopeSdkVersion, out var envelopeSchemaVersion);
 
-            // Defensive: backend rejects envelopes with batch_id.Length > 128 (400 invalid_batch_id).
-            // Current chunk names are 21-37 chars, so the cap is far away — but truncate-and-warn
-            // here so a future filename change doesn't silently lose data to backend rejection.
-            // Truncate (not drop): the payload matters more than the id.
+            // Backend rejects batch_id > 128 chars; truncate-and-warn (not drop) so a
+            // future filename change can't silently lose data — the payload outranks the id.
             var batchId = Path.GetFileNameWithoutExtension(chunkPath);
             if (batchId != null && batchId.Length > 128)
             {
@@ -508,24 +452,12 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Determines which session_id / sdk_version / schema_version should be attached to the
-        /// envelope for the given chunk.
-        ///
-        /// <para>
-        /// For chunks under <c>chunks/</c> (the live session's directory) we use the live
-        /// SessionInfo — by the time a chunk gets here, RecoverPendingChunks has already
-        /// filtered out anything that isn't owned by the current session.
-        /// </para>
-        ///
-        /// <para>
-        /// For chunks under <c>completed_sessions/{sessionId}/</c> we read the bundled
-        /// <c>session.json</c> manifest so the envelope describes the ORIGINAL session, not
-        /// the currently-running one. If the manifest is missing or unreadable we cannot
-        /// safely attribute the data to ANY session — falling back to the live SessionInfo
-        /// would commingle two sessions under one backend session_id, which is the exact
-        /// bug we fixed in 0.1.16. In that case we throw <see cref="InvalidOperationException"/>
-        /// so the caller can dead-letter the chunk.
-        /// </para>
+        /// Resolves the envelope session_id / sdk_version / schema_version.
+        /// Live-dir chunks use the live SessionInfo; recovered chunks under
+        /// completed_sessions/ read their bundled session.json so the envelope
+        /// describes the ORIGINAL session. A missing/unreadable manifest throws
+        /// <see cref="InvalidOperationException"/> (so the caller dead-letters)
+        /// rather than commingling two sessions under one backend session_id.
         /// </summary>
         private void ResolveEnvelopeIdentity(string chunkPath,
             out string sessionId, out string sdkVersion, out int schemaVersion)
@@ -540,16 +472,9 @@ namespace PlayScopeSdk.Internal
             var completedRoot = PlayScopeDirectory.CompletedSessions;
             if (!chunkDir.StartsWith(completedRoot, StringComparison.OrdinalIgnoreCase))
             {
-                // Live chunk → live identity is ONLY correct when the chunk filename
-                // actually belongs to the current session. A chunk with a foreign
-                // short-id prefix sitting in chunks/ is an orphan from a prior session
-                // that SessionRecovery failed to relocate; uploading it under the live
-                // session_id is exactly the cross-session commingling we're trying to
-                // prevent (regression 2026-05-21).
-                //
-                // Refuse to upload — the caller dead-letters the chunk. SessionRecovery
-                // remains the official path for re-attributing prior-session data via
-                // its bundled manifest.
+                // Live identity is correct only if the filename belongs to this
+                // session. A foreign short-id in chunks/ is an orphan SessionRecovery
+                // failed to relocate — refuse it (dead-letter) rather than commingle.
                 var chunkName = Path.GetFileName(chunkPath);
                 var ownPrefix = $"chunk_{_session.SessionShortId}_";
                 if (!chunkName.StartsWith(ownPrefix, StringComparison.Ordinal) &&
@@ -562,8 +487,7 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            // Recovered chunk: the manifest is the ONLY source of truth for which session
-            // this data belongs to. No fallback allowed.
+            // Recovered chunk: the manifest is the ONLY source of truth — no fallback.
             var manifestPath = Path.Combine(chunkDir, "session.json");
             if (!File.Exists(manifestPath))
                 throw new InvalidOperationException(
@@ -614,13 +538,9 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// JSON string escape that also handles C0 control characters,
-        /// quotes, backslash, and lone UTF-16 surrogates. The previous
-        /// minimal version only escaped \\ and \" — a session_id value
-        /// pulled from a power-kill-corrupted session.json that contained
-        /// a stray control character would produce invalid JSON that the
-        /// backend then rejected with 400 on every retry. Mirrors
-        /// EventPipeline.AppendEscapedString.
+        /// JSON escape incl. C0 controls — a stray control char in a corrupt
+        /// session_id once produced invalid JSON the backend 400'd on every retry.
+        /// Mirrors EventPipeline.AppendEscapedString.
         /// </summary>
         private static string EscapeJsonString(string s)
         {
@@ -686,13 +606,10 @@ namespace PlayScopeSdk.Internal
         // ── Orphan self-rescue ────────────────────────────────────────────────────
 
         /// <summary>
-        /// Last-chance rescue for a chunk with foreign short-id that SessionRecovery
-        /// failed to relocate. Scans <c>completed_sessions/*/session.json</c> for a
-        /// manifest whose session_id starts with the chunk's short-id; if found, moves
-        /// the chunk INTO that folder so the next upload pass attributes it correctly
-        /// via the existing completed_sessions code path. Best-effort — returns false
-        /// (and leaves the chunk untouched) if no matching manifest exists or any IO
-        /// step fails. The caller falls back to dead-letter on false.
+        /// Last-chance rescue for a foreign-short-id chunk: finds a
+        /// completed_sessions manifest whose session_id matches the short-id and
+        /// moves the chunk there for the next pass. Returns false (chunk untouched,
+        /// caller dead-letters) when no match or any IO step fails.
         /// </summary>
         private static bool TryRescueOrphanChunk(string chunkPath, string stateFilePath, out string destPath)
         {
@@ -700,7 +617,7 @@ namespace PlayScopeSdk.Internal
             try
             {
                 var chunkName = Path.GetFileName(chunkPath);
-                // Extract the 5-hex short-id from "chunk_{shortid}_NNNNNN.jsonl".
+                // short-id from "chunk_{shortid}_NNNNNN.jsonl".
                 if (!chunkName.StartsWith("chunk_", StringComparison.Ordinal)) return false;
                 var rest = chunkName.Substring("chunk_".Length);
                 int us = rest.IndexOf('_');
@@ -726,8 +643,7 @@ namespace PlayScopeSdk.Internal
                     }
                     catch { continue; }
 
-                    // session_id is a UUID with dashes; short-id is first 5 chars of
-                    // its dash-stripped form. Compare case-insensitively to be safe.
+                    // Compare against the manifest's dash-stripped session_id (case-insensitive).
                     var manifestShort = manifestSid.Replace("-", "");
                     if (manifestShort.Length < shortId.Length) continue;
                     if (!manifestShort.Substring(0, shortId.Length)
@@ -749,9 +665,7 @@ namespace PlayScopeSdk.Internal
                         }
                     }
                     File.Move(chunkPath, dest);
-                    // Clear the state file — completed_sessions chunks build their own
-                    // state on the next attempt. Leaving the stale one around would
-                    // mis-anchor the retry TTL.
+                    // Clear the stale state file — else it mis-anchors the retry TTL.
                     TryDeleteFile(stateFilePath);
                     destPath = dest;
                     return true;
@@ -808,20 +722,11 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// On startup, scan the chunks directory for finalized .jsonl files left from THIS
-        /// session (e.g. a crash mid-upload). Enqueue them so the upload loop picks them up.
-        ///
-        /// <para>
-        /// Critically: only files whose name contains the current session's short id are
-        /// picked up here. Finalized chunks are named <c>chunk_{shortId}_{counter:D6}.jsonl</c>;
-        /// any chunk with a DIFFERENT short id is an orphan from a prior session and must NOT
-        /// be uploaded under the current session's envelope (doing so commingles events from
-        /// multiple SDK sessions into one backend session_id — see ClickHouse audit
-        /// 2026-05-19). Orphans are left for <see cref="SessionRecovery"/> to relocate.
-        /// </para>
-        ///
-        /// Skips chunk_current.jsonl (still being written) and already-uploaded chunks
-        /// (tracked via state files marked is_uploaded=true).
+        /// On startup, enqueue finalized chunks left from THIS session (crash mid-
+        /// upload). Only files matching the current short-id prefix —
+        /// foreign-short-id chunks are prior-session orphans that would commingle
+        /// under our session_id, left for <see cref="SessionRecovery"/>. Skips
+        /// chunk_current.jsonl and already-uploaded chunks.
         /// </summary>
         private void RecoverPendingChunks()
         {
@@ -880,13 +785,9 @@ namespace PlayScopeSdk.Internal
             try { if (File.Exists(path)) File.Delete(path); }
             catch (Exception ex)
             {
-                // Windows file-lock from the Editor process holding the
-                // file open is the most common cause — was previously
-                // swallowed silently and the chunks accumulated on disk
-                // forever, requeueing on every Editor restart. Now logged
-                // at Warning so we can spot the situation; the actual
-                // recovery path (skip already-uploaded files on next
-                // requeue) lives in SessionRecovery.EnqueueJsonlFilesInDir.
+                // Usually an Editor Windows file-lock. Logged (not swallowed) so the
+                // accumulating-chunks case is visible; recovery skips already-uploaded
+                // files on requeue in SessionRecovery.EnqueueJsonlFilesInDir.
                 PlayScopeLog.Warning($"TryDeleteFile failed for '{Path.GetFileName(path)}': {ex.GetType().Name}: {ex.Message}");
             }
         }

@@ -19,10 +19,9 @@ namespace PlayScopeSdk.Internal
         private readonly List<EventRecord> _buffer = new(64);
         private readonly object _bufferLock = new object();
         private CancellationTokenSource? _cts;
-        // Monotonic wall clock for the time-trigger flush. DateTime.UtcNow is
-        // subject to NTP rewinds — a backwards step would leave the diff
-        // negative and the time-triggered flush silently disabled until the
-        // wall clock caught up. Stopwatch is hardware-monotonic everywhere.
+        // Monotonic clock for the time-trigger flush: a DateTime.UtcNow rewind
+        // (NTP) would go negative and silently disable the flush until the clock
+        // caught up. Stopwatch is hardware-monotonic.
         private long _lastFlushStopwatchTicks = Stopwatch.GetTimestamp();
         private int _chunkCounter = 0;
         private long _currentChunkSize = 0;
@@ -36,14 +35,10 @@ namespace PlayScopeSdk.Internal
         private const long BatchSplitBytes = 1_048_576; // 1 MB
 
         /// <summary>
-        /// Optional callback invoked whenever a chunk is finalized — by a
-        /// critical record, by a 1 MB size split, by FlushImmediate on
-        /// background, or by DrainAndFinalize on shutdown. PlayScopeRuntime
-        /// wires this to <see cref="UploaderWorker.TriggerInstantUpload"/> so
-        /// the uploader wakes immediately instead of sleeping out the
-        /// remainder of its 30 s polling window. Idempotent on the uploader
-        /// side (semaphore release only if count is 0) so firing on every
-        /// finalize is safe.
+        /// Invoked whenever a chunk is finalized (critical record, 1 MB split,
+        /// FlushImmediate, DrainAndFinalize). Wired to
+        /// <see cref="UploaderWorker.TriggerInstantUpload"/> so the uploader wakes
+        /// instead of sleeping out its 30 s window. Idempotent uploader-side.
         /// </summary>
         internal Action? OnChunkFinalized;
 
@@ -57,14 +52,10 @@ namespace PlayScopeSdk.Internal
         internal void Start()
         {
             _cts = new CancellationTokenSource();
-            // Defense in depth: if SessionRecovery couldn't relocate the prior session's
-            // chunk_current.jsonl (file locked, AV scanner, partial-failure inside
-            // TryMoveFile — it swallows exceptions), the file would still be on disk and
-            // EnsureCurrentChunk would open it with FileMode.Append, mixing this session's
-            // events with the previous session's content. The merged chunk would later
-            // rotate to chunk_{ourShortId}_NNNNNN.jsonl and upload under OUR envelope,
-            // re-introducing the cross-session commingling we just fixed in 0.1.16.
-            // So before we touch the file at all, quarantine any leftover content.
+            // If SessionRecovery couldn't relocate the prior session's
+            // chunk_current.jsonl (locked, AV scanner, swallowed TryMoveFile
+            // failure), FileMode.Append below would commingle two sessions'
+            // events under our envelope. Quarantine any leftover first.
             QuarantineStaleCurrentChunk();
             EnsureCurrentChunk();
             RunAsync(_cts.Token).Forget();
@@ -118,19 +109,14 @@ namespace PlayScopeSdk.Internal
 
         internal void Stop()
         {
-            // Cancel the loop FIRST so RunAsync drops out of its current
-            // iteration; then acquire the buffer lock to wait for any
-            // in-progress FlushBufferLocked to finish before we close the
-            // stream out from under it.
+            // Cancel FIRST so RunAsync exits, then take the lock to let any
+            // in-progress FlushBufferLocked finish before we close the stream.
             _cts?.Cancel();
             lock (_bufferLock)
             {
-                // Close the long-lived chunk_current handle. Shutdown's caller
-                // already invokes DrainAndFinalize which closes via
-                // FinalizeChunkInternal → CloseCurrentWriter, but
-                // EnsureCurrentChunk reopens immediately afterwards. Without
-                // this explicit close the stream stays open until GC and the
-                // next session's Initialize fails with a sharing violation.
+                // Explicit close — DrainAndFinalize closes but EnsureCurrentChunk
+                // reopens right after, so without this the handle lingers until GC
+                // and the next Initialize hits a sharing violation.
                 CloseCurrentWriter();
             }
             try { _cts?.Dispose(); } catch { /* best-effort */ }
@@ -163,20 +149,11 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Synchronously write a single critical record AND finalize the chunk —
-        /// bypasses the async RunAsync loop entirely. Built for the rotation /
-        /// shutdown path where the regular Pipeline.EnqueueEvent → async drain
-        /// could race with the worker loop and lose the record (post-mortem on
-        /// 2026-05-21: rotation-induced session_end didn't survive the race
-        /// between WriterWorker.RunAsync drain and TeardownInternal's
-        /// DrainAndFinalize, and the finalized chunk uploaded empty).
-        ///
-        /// <para>
-        /// The single lock acquisition covers drain-queue → append-record →
-        /// flush → close-writer → rename → enqueue-for-upload as one atomic
-        /// step, so the WorkerWorker.RunAsync loop physically cannot
-        /// interleave between flush and finalize. Returns true on success.
-        /// </para>
+        /// Synchronously write one critical record AND finalize the chunk under a
+        /// single lock (drain → append → flush → close → rename → enqueue), so
+        /// the RunAsync loop can't interleave and finalize an empty chunk. For the
+        /// rotation/shutdown path where the async-drain race once lost session_end.
+        /// Returns true on success.
         /// </summary>
         internal bool WriteCriticalAndFinalizeSync(EventRecord record)
         {
@@ -184,14 +161,11 @@ namespace PlayScopeSdk.Internal
             {
                 lock (_bufferLock)
                 {
-                    // First drain any events already queued so they ride along
-                    // in the same final chunk — otherwise they get stranded in
-                    // _queue when Stop() cancels the worker loop seconds later.
+                    // Drain queued events so they ride the same final chunk
+                    // instead of being stranded when Stop() cancels the loop.
                     while (_queue.TryDequeue(out var queued)) _buffer.Add(queued);
                     _buffer.Add(record);
                     FlushBufferLocked();
-                    // Finalize INSIDE the same lock so RunAsync can't sneak in
-                    // and finalize an empty chunk between our flush and rename.
                     FinalizeChunkInternal();
                 }
                 StorageQuotaManager.EnforceQuota();
@@ -238,17 +212,13 @@ namespace PlayScopeSdk.Internal
                 {
                     FinalizeChunk();
                     StorageQuotaManager.EnforceQuota();
-                    // Wake-up signal is fired from inside FinalizeChunkInternal
-                    // now (covers FlushImmediate / DrainAndFinalize /
-                    // size-split paths too), so we don't fire it again here.
+                    // Wake-up fires inside FinalizeChunkInternal — don't double-fire here.
                 }
             }
         }
 
-        // Caller must hold _bufferLock. Serializes buffered records to a single string,
-        // releases the buffer contents, then performs file I/O. We keep the I/O inside the
-        // lock here because _currentWriter is shared mutable state too (open/close on
-        // FinalizeChunk happens from the same lock-aware paths).
+        // Caller must hold _bufferLock — I/O stays inside the lock because
+        // _currentWriter is shared with the lock-aware FinalizeChunk paths.
         private void FlushBufferLocked()
         {
             if (_buffer.Count == 0) return;
@@ -257,8 +227,6 @@ namespace PlayScopeSdk.Internal
             if (StorageQuotaManager.IsHardCapExceeded())
             {
                 var (kept, dropped) = StorageQuotaManager.TrimBuffer(_buffer);
-                // TrimBuffer mutates the list in-place and returns the same reference;
-                // re-assign for clarity in case implementation changes.
                 _buffer.Clear();
                 _buffer.AddRange(kept);
                 if (dropped > 0)
@@ -348,16 +316,9 @@ namespace PlayScopeSdk.Internal
             EnsureCurrentChunk();
             _currentChunkSize = 0;
 
-            // Wake the uploader the instant any chunk lands in the queue,
-            // not at the next 30 s poll. The old behaviour meant a
-            // FlushImmediate-on-background that produced a real chunk could
-            // wait up to 30 s on the uploader's WaitAsync — and if the user
-            // swipe-killed the app within those 30 s, the chunk shipped only
-            // on the NEXT launch via SessionRecovery. With this hook every
-            // finalization (size-split / pause / quit / critical-event)
-            // triggers an immediate upload attempt. Safe to fire on every
-            // path: UploaderWorker.TriggerInstantUpload is a no-op when a
-            // pass is already queued.
+            // Wake the uploader the instant a chunk lands, not at the next 30 s
+            // poll — a swipe-kill within that window otherwise delayed shipping
+            // to the next launch. Safe on every path (no-op if a pass is queued).
             if (enqueued)
             {
                 try { OnChunkFinalized?.Invoke(); }
@@ -411,14 +372,10 @@ namespace PlayScopeSdk.Internal
         {
             var sb = new StringBuilder();
             sb.Append("{\"record_type\":\"event\"");
-            // Stamp session_id at the event top-level so SessionRecovery on
-            // next launch can read it back via the flat SimpleJson parser
-            // (which can't traverse nested metadata). Without this, a
-            // corrupted session.json with intact chunk files results in
-            // every chunk going to dead-letter — SessionRecovery has no
-            // path to learn the session_id. The backend's TimelineEventRecord
-            // DTO has no SessionId field so deserialization ignores it
-            // (the envelope's SessionId is authoritative).
+            // Top-level session_id so SessionRecovery's flat SimpleJson parser can
+            // read it back if session.json is corrupt — otherwise every chunk
+            // dead-letters with no way to learn the session_id. Backend ignores
+            // it (envelope SessionId is authoritative).
             Append(sb, "session_id", _session.SessionId);
             Append(sb, "event_type", r.EventType);
             Append(sb, "event_id", r.EventId);

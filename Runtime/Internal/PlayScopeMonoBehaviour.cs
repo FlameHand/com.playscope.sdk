@@ -16,11 +16,9 @@ namespace PlayScopeSdk.Internal
 
         private void Update()
         {
-            // Background-timeout session rotation lands here on the tick AFTER
-            // OnApplicationPause(false) set the flag. PerformRotation destroys
-            // this very GameObject as part of teardown, so we MUST `return`
-            // immediately after — any further code in this Update() would run
-            // against a half-destroyed sampler / pipeline.
+            // Rotation runs here the tick after the flag was set. PerformRotation
+            // destroys this GameObject, so we MUST return immediately — further
+            // code would run against a half-destroyed sampler / pipeline.
             if (PlayScopeRuntime.ConsumePendingRotation())
             {
                 PlayScopeRuntime.PerformRotation();
@@ -31,55 +29,35 @@ namespace PlayScopeSdk.Internal
                 _sampler = new MetricsSampler(PlayScopeRuntime.Pipeline);
             if (PlayScopeRuntime.Pipeline == null)
                 _sampler = null;
-            // First Update() after Initialize == "the player can see the game now".
-            // Runtime handles the once-only guard internally so a transient
-            // Pipeline==null window can't cause us to double-emit.
+            // First Update == "player can see the game" (runtime guards once-only).
             PlayScopeRuntime.EmitFirstFrameRenderedOnce();
-            // After first-frame, poll once per frame for any input — touch,
-            // mouse click, keyboard, gamepad. The runtime helper is a no-op
-            // fast-path on subsequent calls once the input event has fired.
-            // Anti-flake: skip in Editor batch mode where there's literally
-            // no input device — keeps the once-per-frame check cheap and
-            // doesn't strand a never-emitted sample in the dashboard.
             PollFirstInputLatency();
-            // ANR watchdog heartbeat — null-conditional skips when the
-            // watchdog is disabled (Editor or opted-out via context).
+            // null-conditional skips when the watchdog is disabled (Editor / opted out).
             PlayScopeRuntime.AnrWatchdog?.RecordHeartbeat();
             _sampler?.Tick();
-            // Drive both coalescers' window timers on the same frame pulse —
-            // cheap, no worker thread, deterministic with Unity's main loop.
+            // Drive all window timers off the same frame pulse — no worker thread.
             PlayScopeRuntime.StatePatchCoalescer.TickAndMaybeFlush();
             PlayScopeRuntime.SessionDataCoalescer.TickAndMaybeFlush();
-            // Drive the log dedup buffer's 5 s window from the same pulse.
-            // Cheap when the buffer is empty (single lock + Count check),
-            // null-safe between Initialize and the first tick where the
-            // runtime has finished constructing the buffer.
             PlayScopeRuntime.LogDedupBuffer?.TickAndMaybeFlush();
-            // Also drive the sceneload progress sampler — see SceneLoadProgressTracker.
             SceneLoadProgressTracker.TickAndMaybeSample();
         }
 
         /// <summary>
-        /// Forwards to MetricsSampler.ResetForNewSession() if the sampler exists.
-        /// Sampler is lazily created in Update(), so reset is a no-op when called
-        /// before the first frame after init — that's fine, the lazy-created
-        /// sampler gets fresh sentinels from field initializers anyway.
+        /// Resets the sampler if it exists. No-op before the first frame (the
+        /// lazily-created sampler gets fresh sentinels from field initializers).
         /// </summary>
         internal void ResetSamplerForNewSession()
         {
             _sampler?.ResetForNewSession();
         }
 
-        // First-input poll. Branches on Unity's input-backend defines so we
-        // work under either the legacy Input Manager, the new Input System,
-        // or the "Both" mode. Touch wins over mouse wins over key wins over
-        // gamepad button — keeps the input_kind label stable when more than
-        // one source fires on the same frame (e.g. mouse-down also registers
-        // a touch on some emulators).
+        // Branches on Unity's input-backend defines (legacy / new / Both).
+        // Precedence touch > mouse > key > gamepad keeps input_kind stable when
+        // multiple sources fire the same frame (mouse-down also registers a touch
+        // on some emulators).
         private static void PollFirstInputLatency()
         {
-            // Cheap fast-path: bail before touching any Input API at all
-            // once the event has already fired.
+            // Fast-path out before touching any Input API once the event fired.
             if (!PlayScopeRuntime.IsInitialized) return;
             if (PlayScopeRuntime.HasEmittedFirstInputLatency) return;
 

@@ -78,17 +78,11 @@ namespace PlayScopeSdk.Core.Session
             return null;
         }
 
-        // session.lifecycle — last known lifecycle state ("foreground" or
-        // "background") plus the UTC timestamp it was entered. Rewritten on
-        // every transition (atomic via temp+rename to survive a crash mid-
-        // write) so SessionRecovery on next launch can tell us where the
-        // app was when it died.
-        //
-        // The same file gets deleted on a clean Shutdown so its presence on
-        // next launch is itself a signal of an unclean exit. (Heartbeat file
-        // alone isn't enough — it's updated periodically by background
-        // workers even on a backgrounded session and doesn't carry the
-        // state itself.)
+        // session.lifecycle — last state + entry timestamp, rewritten atomically
+        // every transition so recovery knows where the app was when it died.
+        // Deleted on clean Shutdown, so its presence next launch signals an
+        // unclean exit (the heartbeat alone can't — it updates on backgrounded
+        // sessions too and carries no state).
         internal static void WriteLifecycleState(string state)
         {
             var path = PlayScopeDirectory.SessionLifecycle;
@@ -97,15 +91,10 @@ namespace PlayScopeSdk.Core.Session
             {
                 var json = $"{{\"state\":\"{state}\",\"ts\":\"{DateTime.UtcNow:O}\"}}";
                 File.WriteAllText(tmp, json);
-                // File.Replace is atomic at the filesystem level on both NTFS
-                // and APFS/HFS+ — there's no observable window where the
-                // destination is missing (the previous Delete+Move sequence
-                // left exactly that window: a crash between Delete and Move
-                // left the file gone and SessionRecovery then mis-classified
-                // an otherwise-clean exit as "unknown crash"). When the
-                // destination doesn't exist yet (first write of the session),
-                // fall back to Move because Replace requires both files to
-                // exist.
+                // File.Replace is atomic (NTFS/APFS) — no window where the dest is
+                // missing. The old Delete+Move left exactly that window and a
+                // crash inside it mis-classified a clean exit as "unknown crash".
+                // Move fallback for the first write (Replace needs both files).
                 if (File.Exists(path))
                 {
                     File.Replace(tmp, path, destinationBackupFileName: null);
@@ -129,20 +118,11 @@ namespace PlayScopeSdk.Core.Session
         }
 
         /// <summary>
-        /// Reads the last persisted lifecycle state on next launch.
-        /// Returns (state, ts, intent) where:
-        ///   state  = "foreground" / "background" / "user_close" / null
-        ///   ts     = UTC timestamp of the last write
-        ///   intent = true ONLY when the native (Java/iOS) lifecycle hook
-        ///            wrote the file in response to a precise close signal
-        ///            (Android onActivityDestroyed with isFinishing=true,
-        ///            iOS UIApplicationWillTerminateNotification). The C#
-        ///            OnApplicationPause / Application.quitting paths
-        ///            always write intent=false (the field is omitted).
-        ///
-        /// Null state means the file didn't exist (clean exit) or was
-        /// corrupt — in both cases SessionRecovery treats the previous
-        /// session as unknown / pessimistically crashed.
+        /// Reads the last persisted lifecycle state. Returns (state, ts, intent):
+        /// state = foreground / background / user_close / null; intent = true ONLY
+        /// when the native hook wrote it on a precise close signal (Android
+        /// isFinishing, iOS WillTerminate) — the C# paths always omit it.
+        /// Null state (missing or corrupt) is treated as unknown / pessimistic crash.
         /// </summary>
         internal static (string state, DateTime? ts, bool intent) TryReadLifecycleState()
         {

@@ -5,26 +5,16 @@ namespace PlayScopeSdk.Internal
     // record_type values
     internal enum RecordType { Event, Log, Metric }
 
-    // Indicates whether this record triggers critical flush. Critical records
-    // finalize the current chunk immediately (the WriterWorker run-loop calls
-    // FinalizeChunk for them right away; non-critical records flush at the
-    // size / time threshold). The instant-upload wake is fired from inside
-    // FinalizeChunkInternal itself for every finalization path, so the
-    // signal lands server-side even if the process dies seconds later.
-    // anr/anr_recovered
-    // are critical for the same reason errors are: if the OS kills the app
-    // during the freeze the anr_recovered event never comes and we want at
-    // least the anr entry event already on the wire.
+    // Critical records finalize the current chunk immediately (others flush at
+    // the size/time threshold) so the signal reaches the server even if the
+    // process dies seconds later. anr / memory_warning are critical for the same
+    // reason as errors: the app may be killed before any follow-up event arrives.
     internal static class CriticalRecords
     {
         internal static bool IsCritical(string eventType) =>
             eventType is "session_end" or "session_abnormal_end"
                 or "error" or "exception"
                 or "anr" or "anr_recovered"
-                // memory_warning: OS-level low-memory signal. Same rationale
-                // as anr — the process is at elevated risk of being killed
-                // within seconds, so we want the warning already on the wire
-                // even if no further events follow.
                 or "memory_warning";
         internal static bool IsLogCritical(string level) =>
             level is "error" or "exception";

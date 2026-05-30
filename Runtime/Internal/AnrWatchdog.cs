@@ -7,83 +7,42 @@ using UnityEngine;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// Main-thread watchdog. Detects "Application Not Responding" stalls —
-    /// any stretch of time where the Unity main thread fails to update its
-    /// heartbeat for longer than <c>thresholdMs</c>.
-    ///
-    /// <para>
-    /// Design:
-    /// </para>
-    /// <list type="bullet">
-    /// <item>A <see cref="System.Threading.Timer"/> ticks on a threadpool
-    ///       worker every <c>PeriodMs</c>; the worker is independent of the
-    ///       main thread so it keeps running even when Update() is blocked.</item>
-    /// <item><see cref="RecordHeartbeat"/> is called by
-    ///       <c>PlayScopeMonoBehaviour.Update</c> every frame. It writes the
-    ///       current <c>DateTime.UtcNow.Ticks</c> to a volatile long.</item>
-    /// <item>The timer callback computes <c>UtcNow - lastHeartbeat</c>. If
-    ///       it exceeds <c>thresholdMs</c> we transition into the "in-anr"
-    ///       state and emit the <c>anr</c> event once. When the main thread
-    ///       resumes and the next heartbeat arrives, we transition out and
-    ///       emit <c>anr_recovered</c> with the total stuck duration.</item>
-    /// </list>
-    ///
-    /// <para>
-    /// Why not Time.realtimeSinceStartup or similar: those are main-thread-
-    /// only reads. The whole point is to observe stalls from OUTSIDE the
-    /// main thread.
-    /// </para>
-    ///
-    /// <para>
-    /// Background-pause integration: when <see cref="Suspend"/> is called
-    /// (from <c>OnApplicationPause(true)</c>), the watchdog stops sampling
-    /// — otherwise every backgrounded app would report itself as ANR.
-    /// <see cref="Resume"/> on foreground re-arms it AND refreshes the
-    /// heartbeat so the first 500 ms post-resume don't false-positive.
-    /// </para>
+    /// Main-thread ANR watchdog. A threadpool <see cref="System.Threading.Timer"/>
+    /// (independent of the main thread, so it runs while Update() is blocked)
+    /// compares now against the last heartbeat written by
+    /// <see cref="RecordHeartbeat"/> every frame; exceeding <c>thresholdMs</c>
+    /// emits <c>anr</c> once, and the next heartbeat emits <c>anr_recovered</c>
+    /// with the total stuck duration. Time.realtimeSinceStartup can't be used —
+    /// it's a main-thread-only read, and the point is to observe from outside.
+    /// <see cref="Suspend"/> stops sampling while backgrounded (else every
+    /// backgrounded app reports ANR); <see cref="Resume"/> re-arms + refreshes
+    /// the heartbeat so the first 500 ms post-resume don't false-positive.
     /// </summary>
     internal sealed class AnrWatchdog
     {
-        // Faster check interval than 1 s — at threshold=2000ms a 1-second
-        // poll would mean we observe a stall anywhere between 2.0 and 3.0
-        // seconds after it begins. 500 ms tightens that to 2.0–2.5 s,
-        // which materially improves the reported stuck_for_ms accuracy.
+        // 500 ms (not 1 s): at threshold 2000ms a 1 s poll observes the stall
+        // anywhere in 2.0–3.0 s; 500 ms tightens stuck_for_ms accuracy to 2.0–2.5 s.
         private const int PeriodMs = 500;
 
         private readonly int _thresholdMs;
         private readonly EventPipeline _pipeline;
 
-        // Two heartbeat slots, both written from the main-thread Update tick:
-        //   * _heartbeatStopwatchTicks — Stopwatch.GetTimestamp() at the moment
-        //     of the heartbeat. ALL elapsed-time arithmetic uses this slot —
-        //     Stopwatch is hardware-monotonic and immune to NTP rewinds, DST
-        //     jumps, manual clock changes. Using DateTime.UtcNow here would
-        //     let a 30-second NTP correction during the session either
-        //     suppress all ANR detection (negative elapsed) or report a phantom
-        //     ANR on a forward jump.
-        //   * _heartbeatWallTicks — DateTime.UtcNow.Ticks. Only used to stamp
-        //     human-readable `started_at` / `recovered_at` strings in the
-        //     emitted event metadata.
-        // Interlocked.Read / Exchange on long for 32-bit safety against torn reads.
+        // Two slots, both written from the main-thread Update tick.
+        // _heartbeatStopwatchTicks drives ALL elapsed arithmetic — Stopwatch is
+        // monotonic, so an NTP/DST/manual clock change can't suppress detection
+        // (negative elapsed) or fake an ANR (forward jump). _heartbeatWallTicks
+        // only stamps human-readable started_at / recovered_at.
+        // Interlocked.Read/Exchange for 32-bit torn-read safety.
         private long _heartbeatStopwatchTicks;
         private long _heartbeatWallTicks;
 
         private Timer? _timer;
 
-        // Latched state — flipped on enter-anr, cleared on recovery.
-        // Volatile so the main-thread Resume read sees the latest writer
-        // value without a lock.
         private volatile bool _inAnr;
-        // Suspend flag — set when the app is backgrounded so the timer
-        // callback skips its check entirely.
         private volatile bool _suspended;
-        // Stopwatch / wall-clock ticks at the moment we noticed the stall began.
-        // Used to stamp anr_recovered's total_stuck_ms (from Stopwatch) and
-        // human-readable started_at (from wall clock).
         private long _stallStartStopwatchTicks;
         private long _stallStartWallTicks;
-        // Whether we've already emitted the entry-anr event for the current
-        // stall — guards against the timer firing a second time mid-stall.
+        // Guards against the timer firing a second time mid-stall.
         private bool _entryEventEmitted;
 
         internal AnrWatchdog(EventPipeline pipeline, int thresholdMs)
@@ -112,28 +71,19 @@ namespace PlayScopeSdk.Internal
             _timer = null;
         }
 
-        /// <summary>
-        /// Updates the heartbeat slot to "now". Called every frame from
-        /// the MonoBehaviour driver on the main thread. Cheap — one
-        /// Interlocked.Exchange and a DateTime read.
-        /// </summary>
+        /// <summary>Updates the heartbeat to now. Called every frame on the main thread.</summary>
         internal void RecordHeartbeat()
         {
             Interlocked.Exchange(ref _heartbeatStopwatchTicks, Stopwatch.GetTimestamp());
             Interlocked.Exchange(ref _heartbeatWallTicks, DateTime.UtcNow.Ticks);
         }
 
-        /// <summary>
-        /// Pause checking. Called when the app goes to background — the OS
-        /// freezes Update() entirely and we'd otherwise mis-classify the
-        /// backgrounded state as a multi-minute ANR.
-        /// </summary>
+        /// <summary>Pause checking on background — else the frozen Update() reads as a multi-minute ANR.</summary>
         internal void Suspend() => _suspended = true;
 
         /// <summary>
-        /// Resume checking. Refreshes the heartbeat before un-suspending so
-        /// the half-second between Resume and the first post-foreground
-        /// Update() tick doesn't get reported as a 500 ms freeze.
+        /// Resume checking, refreshing the heartbeat first so the gap before the
+        /// first post-foreground Update() isn't reported as a freeze.
         /// </summary>
         internal void Resume()
         {
@@ -168,9 +118,7 @@ namespace PlayScopeSdk.Internal
                 }
                 else if (_inAnr && elapsedMs < _thresholdMs)
                 {
-                    // Main thread recovered — heartbeat slot was updated
-                    // since we last looked, which means a Update() tick
-                    // landed. Emit recovery and reset latches.
+                    // Main thread recovered (a fresh heartbeat landed). Emit recovery, reset latches.
                     var totalStuckMs = (lastBeatSwTicks - _stallStartStopwatchTicks) * 1000L / Stopwatch.Frequency;
                     if (totalStuckMs < 0) totalStuckMs = 0;
                     EmitAnrRecovered(totalStuckMs, _stallStartWallTicks, lastBeatWallTicks);

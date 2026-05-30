@@ -6,25 +6,13 @@ using PlayScopeSdk.Storage;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// C# bridge that wires the platform-specific lifecycle hooks into the
-    /// SDK. Both implementations write to the SAME file the C# side already
-    /// writes (<see cref="PlayScopeDirectory.SessionLifecycle"/>) — the
-    /// platform hook just adds an extra <c>"intent":true</c> field with a
-    /// more precise state ("user_close") so SessionRecovery on the next
-    /// launch can tell the difference between
-    ///
-    ///   • a real swipe-from-recents (intent=true → user_close) and
-    ///   • a backgrounded OS kill (no intent file, state=background → background_kill)
-    ///
-    /// On Android the work is done by a small Java class compiled into the
-    /// consumer's APK from <c>Plugins/Android/PlayScopeLifecycle.java</c>.
-    /// On iOS by an Objective-C++ source in
-    /// <c>Plugins/iOS/PlayScopeLifecycle.mm</c>.
-    ///
-    /// Both calls are best-effort and idempotent — failure during install
-    /// silently falls back to the C# OnApplicationPause-driven lifecycle
-    /// state, which still gives us correct (just less precise) recovery
-    /// classification.
+    /// Wires platform lifecycle hooks (Android Java, iOS .mm) into the SDK. Both
+    /// write to the same <see cref="PlayScopeDirectory.SessionLifecycle"/> file
+    /// the C# side does, adding <c>"intent":true</c> ("user_close") so recovery
+    /// distinguishes a swipe-from-recents (intent → user_close) from a
+    /// backgrounded OS kill (no intent → background_kill). Best-effort and
+    /// idempotent — install failure falls back to the C# OnApplicationPause path
+    /// (correct, just less precise).
     /// </summary>
     internal static class NativeLifecycleBridge
     {
@@ -34,18 +22,14 @@ namespace PlayScopeSdk.Internal
 #endif
 
         /// <summary>
-        /// True iff Install() successfully wired the platform-specific
-        /// lifecycle hook (Java ActivityLifecycleCallbacks on Android,
-        /// WillTerminate observer on iOS). Stamped into every session_start
-        /// metadata so the dashboard can verify the hook landed in the
-        /// build without needing adb logcat.
+        /// True iff Install() wired the platform hook. Stamped into session_start
+        /// so the dashboard verifies the hook landed without adb logcat.
         /// </summary>
         internal static bool IsInstalled { get; private set; }
 
         /// <summary>
-        /// Last error string from the most recent failed Install() attempt.
-        /// Null on success. Surfaced in session_start metadata so the
-        /// dashboard shows it next to <c>lifecycle_hook_installed=false</c>.
+        /// Last Install() error (null on success). Surfaced in session_start next
+        /// to <c>lifecycle_hook_installed=false</c>.
         /// </summary>
         internal static string LastError { get; private set; }
 
@@ -62,10 +46,8 @@ namespace PlayScopeSdk.Internal
 #elif UNITY_IOS && !UNITY_EDITOR
                 InstallIOS(path);
 #else
-                // Editor / Standalone / WebGL — no platform-specific hook
-                // needed. C# OnApplicationPause / Application.quitting still
-                // drive the managed-level lifecycle file write. Flag stays
-                // false so the dashboard shows it correctly as not installed.
+                // No native hook on Editor/Standalone/WebGL — the C# lifecycle
+                // path covers it; flag stays false (correctly "not installed").
                 LastError = "no_native_hook_on_this_platform";
                 PlayScopeLog.Info("NativeLifecycleBridge: no native hook on this platform (Editor/Standalone/WebGL).");
 #endif
@@ -81,9 +63,7 @@ namespace PlayScopeSdk.Internal
 #if UNITY_ANDROID && !UNITY_EDITOR
         private static void InstallAndroid(string lifecyclePath)
         {
-            // Resolve current Activity from UnityPlayer. Wrapped so that if
-            // the host app uses a custom UnityPlayerActivity subclass we
-            // still pick up the running instance.
+            // Resolve current Activity (works with custom UnityPlayerActivity subclasses).
             AndroidJavaClass unityPlayer = null;
             AndroidJavaObject activity = null;
             AndroidJavaClass lifecycle = null;
@@ -97,10 +77,8 @@ namespace PlayScopeSdk.Internal
                     PlayScopeLog.Warning("NativeLifecycleBridge: UnityPlayer.currentActivity is null — Android lifecycle hook NOT installed.");
                     return;
                 }
-                // Try to resolve our Java class explicitly so we get a
-                // useful error if the .java file wasn't packed into the
-                // APK by Unity's Gradle plugin (e.g. PluginImporter
-                // platform checkbox left off).
+                // Resolve our class explicitly so a missing-from-APK case (PluginImporter
+                // Android checkbox off) surfaces a useful error, not a silent miss.
                 try
                 {
                     lifecycle = new AndroidJavaClass("com.playscope.sdk.PlayScopeLifecycle");
@@ -131,9 +109,8 @@ namespace PlayScopeSdk.Internal
 #if UNITY_IOS && !UNITY_EDITOR
         private static void InstallIOS(string lifecyclePath)
         {
-            // DllImport resolution at first call site — if the .mm wasn't
-            // packed into the Xcode project we'll get an EntryPointNotFoundException
-            // and surface it as a useful error rather than a silent miss.
+            // DllImport resolves here — a missing-from-Xcode .mm throws
+            // EntryPointNotFoundException, surfaced as a useful error.
             try
             {
                 _playscope_install_ios_lifecycle(lifecyclePath);

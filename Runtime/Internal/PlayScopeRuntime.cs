@@ -11,49 +11,38 @@ namespace PlayScopeSdk.Internal
     {
         internal const string SdkVersion = "0.6.12";
 
-        // PlayerPrefs key — stores the Application.version we last saw alive.
-        // Read once on Initialize so we can emit app_update_detected the first
-        // time a build with a different version starts up.
+        // PlayerPrefs key for the last-seen Application.version, so Initialize can
+        // emit app_update_detected the first time a different build starts up.
         private const string LastSeenAppVersionPrefKey = "playscope:last_app_version";
 
         private static volatile bool _initialized;
         private static volatile bool _disabled;
         private static int _initialStateSet; // 0/1 — Interlocked
         // Atomic mutex around Initialize / PerformRotation / TeardownInternal.
-        // Unity callbacks (Update, OnApplicationPause, Application.quitting)
-        // are nominally main-thread, but the ANR watchdog and worker tasks
-        // run elsewhere — and we've been bitten before by an OnApplicationQuit
-        // landing in the middle of a PerformRotation, racing two parallel
-        // teardowns and leaving one half-initialised. CompareExchange this
-        // gate so the second concurrent caller exits silently rather than
-        // spawning a duplicate Writer / Pipeline / Uploader.
+        // Unity callbacks are main-thread but the ANR watchdog and workers aren't,
+        // and an OnApplicationQuit landing mid-PerformRotation raced two parallel
+        // teardowns into a half-initialised state. CompareExchange so the second
+        // concurrent caller exits silently rather than spawning a duplicate
+        // Writer / Pipeline / Uploader.
         private static int _lifecycleBusy; // 0/1 — Interlocked
 
         // Lifecycle state machine — feeds duration_in_prev_state_ms on every
-        // background_start / foreground transition. Initialized to "foreground"
-        // on session_start so the first transition out of it carries a real
-        // delta (entire startup spent in foreground, etc.).
+        // background_start / foreground transition. Seeded "foreground" on
+        // session_start so the first transition out carries a real delta.
         private static string _currentLifecycleState = "foreground";
-        // Wall-clock anchor for the metadata (so the dashboard sees an actual
-        // UTC time of state-change) AND a monotonic Stopwatch anchor for
-        // duration arithmetic. We MUST NOT compute "how long in background"
-        // from DateTime.UtcNow.Ticks — if the user changes the device clock
-        // mid-background (NTP correction, manual change, DST jump) the
-        // result is negative or wildly inflated, breaking the 5-min rotation
-        // trigger. Same lesson WriterWorker.cs already documents at the top.
+        // Wall-clock anchor for the metadata UTC timestamp AND a monotonic
+        // Stopwatch anchor for duration arithmetic. Durations MUST come from the
+        // Stopwatch, never DateTime.UtcNow.Ticks: a device clock change mid-
+        // background (NTP, manual, DST) yields negative/inflated deltas that
+        // break the 5-min rotation trigger. Same lesson as WriterWorker.cs top.
         private static long _currentLifecycleStateEnteredAtTicks;
         private static long _currentLifecycleStateEnteredAtStopwatchTicks;
-        // Captures `DateTime.UtcNow.Ticks` at the most recent transition INTO
-        // the "background" state. Survives the foreground transition that
-        // schedules a rotation — RecordLifecycle's existing
-        // _currentLifecycleStateEnteredAtTicks gets overwritten with the
-        // foreground-return time at scheduling, so this separate field is
-        // the only place that still remembers when the player actually
-        // backgrounded. PerformRotation backdates session_end to this
-        // timestamp so the old session's duration reflects pure foreground
-        // engagement (~minutes) instead of foreground + 30+ minutes of
-        // sleep (the time the OS held the process before the user came
-        // back).
+        // DateTime.UtcNow.Ticks at the most recent transition INTO background.
+        // RecordLifecycle overwrites _currentLifecycleStateEnteredAtTicks with the
+        // foreground-return time when scheduling rotation, so this is the only
+        // field that still remembers when the player actually backgrounded.
+        // PerformRotation backdates session_end here so the old session's duration
+        // reflects pure foreground engagement, not foreground + OS sleep time.
         private static long _lastBackgroundStartTicks;
 
         // Pipeline write gate, closed by RecordLifecycle for the rotation
@@ -63,32 +52,23 @@ namespace PlayScopeSdk.Internal
         // EventPipeline.Enqueue*.
         internal static volatile bool _acceptingEvents = true;
 
-        // Network reachability watchdog — sampled by MetricsSampler. When the
-        // value changes we emit a network_change event (separate from the
-        // periodic network_reachability metric so the timeline carries a
-        // discrete signal at the transition moment instead of a sample line
-        // crossing).
+        // Last sampled reachability; a change emits a discrete network_change
+        // event (vs the periodic network_reachability metric).
         private static int _lastNetworkReachability = int.MinValue;
 
-        // first_frame_rendered guard — flipped by MonoBehaviour on its first
-        // Update tick so we emit the event exactly once per session.
+        // first_frame_rendered guard — emit exactly once per session.
         private static int _firstFrameEmitted;
-        // Ticks at which first_frame_rendered fired. Used as the zero-point
-        // for first_input_latency so that metric measures "how long the
-        // player stared at a rendered screen before tapping anything" —
-        // a much more useful TTI signal than ms-since-session-start
-        // (which includes the headless pre-render initialisation).
+        // Zero-point for first_input_latency: measures time from a rendered screen
+        // to first tap, a better TTI signal than ms-since-session-start (which
+        // includes headless pre-render init).
         private static long _firstFrameTicks;
-        // first_input_latency guard — flipped by MonoBehaviour the first
-        // tick on which Unity reports any input (touch / mouse / key /
-        // gamepad button) after first_frame_rendered has already fired.
+        // first_input_latency guard — set on the first input tick after first_frame.
         private static int _firstInputEmitted;
 
         internal static bool IsInitialized => _initialized;
         internal static bool IsDisabled => _disabled;
-        // Exposed so the MonoBehaviour's per-frame input poll can fast-path
-        // out of the Input API after the event has fired — keeps the hot
-        // loop a single field read instead of a CompareExchange roundtrip.
+        // Lets the per-frame input poll fast-path out of the Input API with a
+        // single field read instead of a CompareExchange once the event fired.
         internal static bool HasEmittedFirstInputLatency => _firstInputEmitted != 0;
 
         internal static DeviceIdentity Device { get; private set; }
@@ -97,60 +77,42 @@ namespace PlayScopeSdk.Internal
         internal static EventQueue? Queue { get; private set; }
         internal static EventPipeline? Pipeline { get; private set; }
         internal static UploadQueue? UploadQueue { get; private set; }
-        // Repeats-collapsing buffer for absorbable log levels. Created
-        // alongside Pipeline; nulled on teardown so a re-Initialize starts
-        // fresh. MonoBehaviour.Update ticks it once per frame; FlushOnPause /
-        // TeardownInternal drain it so a backgrounded / shutting-down session
-        // can't strand the last few seconds of buffered logs.
+        // Repeats-collapsing buffer for absorbable log levels. Ticked by
+        // Update; drained on pause/teardown so a backgrounding session doesn't
+        // strand the last buffered logs.
         internal static LogDedupBuffer? LogDedupBuffer { get; private set; }
-        // Single shared coalescer for state_patch debouncing. Lives for the
-        // session lifetime — flushed on pause / shutdown so its buffer never
-        // strands a patch.
         internal static StatePatchCoalescer StatePatchCoalescer { get; } = new();
-        // Parallel coalescer for session_data_* events. Independent buffer
-        // from profile-state so a periodic device sample never overwrites a
-        // gameplay key. Wider window (1 s vs 100 ms) folds init-burst patches.
+        // Independent buffer from profile-state so a periodic device sample never
+        // overwrites a gameplay key. Wider window (1 s vs 100 ms) folds init bursts.
         internal static SessionDataCoalescer SessionDataCoalescer { get; } = new();
         private static WriterWorker? _writer;
         private static HeartbeatWorker? _heartbeat;
         internal static UploaderWorker? _uploader;
-        // Main-thread ANR watchdog. Null when disabled (Editor, or via
-        // PlayScopeContext.AnrDetectionEnabled = false) so the MonoBehaviour
+        // Null when disabled (Editor, or AnrDetectionEnabled = false) so the
         // heartbeat call short-circuits without overhead.
         internal static AnrWatchdog? AnrWatchdog { get; private set; }
         private static GameObject? _driverGo;
         private static bool _quittingSubscribed;
         private static bool _logCaptureSubscribed;
-        // Application.lowMemory subscription state — tracked separately so
-        // TeardownInternal can unhook it without poking the handler if we
-        // never subscribed (e.g. ForceDisable on partial init).
+        // Tracked so TeardownInternal only unhooks if we actually subscribed
+        // (ForceDisable on partial init may not have).
         private static bool _lowMemorySubscribed;
         private static LogLevel _autoCaptureMinLevel;
 
-        // Background-timeout session rotation:
-        //
-        // A "play session" in our billing/analytics model ends when the player
-        // backgrounds the app for longer than this threshold. Returning after a
-        // longer absence starts a NEW session (new session_id, sequence_num
-        // reset, fresh chunks). Hardcoded — exposing this as a per-project
-        // config would let a customer set it to "10 hours" and effectively
-        // bill for DAU instead of sessions, breaking the pricing model. Same
-        // value applies to every plan tier.
-        //
-        // See BILLING_AND_PLANS.md §4 for the long-form rationale.
+        // A play session ends when the player backgrounds longer than this;
+        // returning after a longer absence starts a NEW session. Hardcoded across
+        // all tiers — per-project config would let a customer set "10 hours" and
+        // effectively bill for DAU instead of sessions. See BILLING_AND_PLANS.md §4.
         private const long BackgroundSessionTimeoutMs = 5 * 60 * 1000L; // 5 minutes
 
-        // The context handed to Initialize() — held so RotateSession() can
-        // re-construct an identical runtime on the new session. NEVER mutated
-        // after first Initialize; treated as read-only by the rotation path.
+        // The Initialize() context, held so RotateSession() rebuilds an identical
+        // runtime. NEVER mutated after first Initialize.
         private static PlayScopeContext? _context;
 
-        // Set by RecordLifecycle when a Foreground transition after a long
-        // background triggers session rotation. Consumed by PlayScopeMonoBehaviour
-        // on its next Update tick so the rotation runs OUTSIDE any
-        // OnApplicationPause / OnFocusChanged callback chain — TeardownInternal
-        // destroys the driver GameObject and we don't want to do that from
-        // inside that GameObject's own callback.
+        // Set by RecordLifecycle, consumed by the MonoBehaviour on its next Update
+        // so rotation runs OUTSIDE the OnApplicationPause / OnFocusChanged callback
+        // chain — TeardownInternal destroys the driver GameObject, which we can't
+        // do from inside that GameObject's own callback.
         private static volatile bool _pendingRotation;
 
         /// <summary>
@@ -164,13 +126,9 @@ namespace PlayScopeSdk.Internal
         {
             TeardownInternal(emitSessionEnd: false);
             _disabled = true;
-            // Defensive: clear the lifecycle gate so a later Initialize on
-            // the same process (e.g. user retries with corrected settings,
-            // or "Disable Domain Reload" in Editor leaves statics intact
-            // across Play Mode restarts) is not permanently dead-ended by
-            // an in-flight flag that ForceDisable interrupted. Without this,
-            // `Initialize` would see _lifecycleBusy == 1 from the prior
-            // failed run and silently no-op forever.
+            // Clear the lifecycle gate so a later Initialize (retry with fixed
+            // settings, or Editor "Disable Domain Reload") isn't dead-ended by a
+            // _lifecycleBusy == 1 left over from the interrupted run.
             Interlocked.Exchange(ref _lifecycleBusy, 0);
             // Do NOT set _initialized — IsInitialized stays false so API guards return early.
         }
@@ -199,11 +157,10 @@ namespace PlayScopeSdk.Internal
         // Called by PlayScope.Initialize()
         internal static void Initialize(PlayScopeContext context)
         {
-            // Atomic admission — only ONE thread proceeds past this point.
-            // The previous `if (_initialized || _disabled)` check was a
-            // non-atomic read-then-act and could let two callers (e.g.
-            // user-code calling PlayScope.Initialize() while PerformRotation
-            // is mid-flight) both pass the check and both spin up workers.
+            // Atomic admission — only ONE thread proceeds. A plain
+            // `if (_initialized || _disabled)` is read-then-act and let two
+            // callers (user Initialize racing a mid-flight PerformRotation)
+            // both pass and both spin up workers.
             if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
             {
                 PlayScopeLog.Warning("Initialize called while another lifecycle op is in flight — ignored.");
@@ -227,25 +184,16 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            // Reset every piece of session-scoped state UP-FRONT, before any
-            // MonoBehaviour driver is created or any worker thread is started.
-            // Otherwise a re-Initialize after Shutdown (test runners, scene
-            // reload tooling) would see stale flag values — e.g.
-            // _firstFrameEmitted still 1 from the prior session → first_frame
-            // event never re-emitted; SequenceCounter at its end-of-prior-session
-            // value → mixed-up sequence numbers on early events.
+            // Reset session-scoped state UP-FRONT, before any driver or worker
+            // starts. A re-Initialize after Shutdown (test runners, scene reload)
+            // would otherwise see stale flags — _firstFrameEmitted still 1 → event
+            // never re-emitted; SequenceCounter mid-stream → mixed sequence numbers.
             SensitiveKeyFilter.ResetWarnings();
-            // Wire PII value-mask toggle from context. Default is true on the
-            // filter side too, so a partial Initialize that crashes before
-            // reaching here still gets safe-by-default behaviour.
+            // Default true filter-side too, so a partial Initialize that crashes
+            // before here still masks by default.
             SensitiveKeyFilter.SetPiiValueMasksEnabled(context?.PiiValueMasksEnabled ?? true);
-            // Wire SDK-internal log gating to the same MinLogLevel the
-            // consumer set on PlayScopeSettings (mapped via context as
-            // AutoCaptureMinLevel). With this in place, MinLogLevel=Warning
-            // suppresses our chatty Info lines (orphan-chunk rescue,
-            // session_end sync-write notice, lifecycle hook install OK)
-            // from the Editor Console — they're useful when debugging the
-            // SDK but pure noise during normal integration work.
+            // MinLogLevel=Warning suppresses our chatty Info lines (orphan-chunk
+            // rescue, etc.) — useful when debugging the SDK, noise otherwise.
             PlayScopeLog.SetMinLevel(context?.AutoCaptureMinLevel ?? LogLevel.Info);
             _initialStateSet = 0;
             _currentLifecycleState = "foreground";
@@ -255,21 +203,13 @@ namespace PlayScopeSdk.Internal
             _firstFrameTicks = 0;
             _firstInputEmitted = 0;
             _lastNetworkReachability = int.MinValue;
-            // Clear any in-flight rotation request — could only be non-zero if
-            // RotateSession ran AND the MonoBehaviour managed to schedule a
-            // SECOND rotation in the same frame (impossible today, defensive).
             _pendingRotation = false;
-            // Reset so an Initialize after a thrown rotation can't strand
-            // the gate closed.
+            // Reset so an Initialize after a thrown rotation can't strand the gate closed.
             _acceptingEvents = true;
             SequenceCounter.Reset();
-            // Reset coalescer state — both are static singletons that survive
-            // PlayScopeRuntime teardowns (auto-init only once at class load).
-            // Without this, the new session's first SessionDataCoalescer.Add
-            // emits session_data_patch against a baseline that exists only in
-            // the OLD session, and the dashboard's state view is corrupt for
-            // every rotated session. StatePatchCoalescer's stale buffer would
-            // also leak old-session keys into the new session's first flush.
+            // Both coalescers are static singletons that survive teardown. Without
+            // this reset the new session's first patch emits against the OLD
+            // session's baseline and leaks old-session keys into the first flush.
             StatePatchCoalescer.ResetForNewSession();
             SessionDataCoalescer.ResetForNewSession();
             PlayScope.ResetSessionScopedState();
@@ -282,10 +222,8 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            // Store the context for RotateSession() to reuse on background-timeout
-            // rotation. Captured BEFORE any subsystem creation so that even if
-            // Initialize bails partway through, we still know how to re-init the
-            // SDK identically on the next rotation attempt.
+            // Captured BEFORE subsystem creation so even a partial Initialize
+            // still knows how to re-init identically on the next rotation.
             _context = context;
 
             // Step 2: Ensure directories exist (wrap disk-write sections — never throw to caller)
@@ -312,11 +250,10 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            // Step 3.5: Initialise the native crash collector BEFORE
-            // SessionRecovery runs — recovery reads back any crash files
-            // the prior process wrote and turns them into exception log
-            // records. PreInit ensures the crash dir exists; on Android
-            // OnSessionInitialized below installs the signal handler.
+            // Step 3.5: Crash collector PreInit BEFORE SessionRecovery — recovery
+            // reads back prior-process crash files as exception records. PreInit
+            // ensures the crash dir exists; the Android signal handler installs in
+            // OnSessionInitialized below.
             try
             {
                 PlayScopeCrashCollector.PreInit();
@@ -398,25 +335,16 @@ namespace PlayScopeSdk.Internal
             _writer.Start();
 
             _uploader.Start();
-            // If SessionRecovery just enqueued chunks from a prior unclean
-            // exit (synthetic session_abnormal_end for swipe-killed sessions,
-            // orphan chunks from completed_sessions/), wake the uploader
-            // immediately. Without this, the first ProcessQueueAsync pass
-            // waits ~30 s (PollingIntervalSeconds + jitter) — and if the
-            // user swipe-kills again within those 30 s, the synthetic
-            // events never reach the backend. Observed in production:
-            // sessions stayed EndStatus=unknown forever because each
-            // launch's recovery fired but uploader never drained before
-            // the next swipe.
+            // Wake the uploader now if recovery just enqueued chunks: otherwise
+            // the first pass waits ~30 s, and a swipe-kill within that window
+            // stranded the synthetic events (sessions stuck EndStatus=unknown).
             if (UploadQueue.Count > 0) _uploader.TriggerInstantUpload();
 
             _heartbeat = new HeartbeatWorker();
             _heartbeat.Start();
 
-            // ANR watchdog — disabled in Editor by default since IDE
-            // breakpoints would generate false positives. Batch mode is
-            // OK because there's no debugger attached. Disabled entirely
-            // when the caller opted out via PlayScopeContext.
+            // Disabled in Editor (breakpoints = false positives), except batch
+            // mode (no debugger). Off entirely when the caller opted out.
             if (context.AnrDetectionEnabled && (!Application.isEditor || Application.isBatchMode))
             {
                 try
@@ -446,14 +374,10 @@ namespace PlayScopeSdk.Internal
                 }
             }
 
-            // OS low-memory hook. Application.lowMemory is cross-platform —
-            // fires on Android (Activity.onTrimMemory TRIM_MEMORY_RUNNING_*)
-            // and iOS (UIApplicationDidReceiveMemoryWarning) without needing
-            // a native plugin on either side. The callback runs on the Unity
-            // main thread so it's safe to read Profiler / SystemInfo APIs
-            // from inside it. We emit a critical-priority memory_warning
-            // event so the chunk gets flushed immediately — if the OS kills
-            // the app a moment later the signal still lands server-side.
+            // Application.lowMemory is cross-platform (Android onTrimMemory, iOS
+            // memory warning) with no native plugin, and runs on the main thread
+            // (safe for Profiler/SystemInfo). The handler emits a critical
+            // memory_warning so the chunk flushes before a possible OS kill.
             try
             {
                 Application.lowMemory += OnLowMemoryWarning;
@@ -474,19 +398,15 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Warning("Failed to install PlayScopeMonoBehaviour driver", ex);
             }
 
-            // Open the gate ONLY now — every subsystem above is wired and
-            // every state field has been reset. Subsequent public API calls
-            // hit a coherent SDK; events emitted from inside this method
-            // (session_start, app_update_detected, session_data seed) use the
-            // Pipeline directly and don't go through the IsInitialized guard
-            // so the ordering here is intentional.
+            // Open the gate only now — every subsystem is wired and every field
+            // reset. Events emitted below (session_start, app_update_detected,
+            // session_data seed) use the Pipeline directly, bypassing the
+            // IsInitialized guard, so this ordering is intentional.
             _initialized = true;
 
-            // is_editor / is_development_build are intrinsic — set by us, no
-            // user override. Dashboard slices on them to keep editor / dev-build
-            // noise out of customer-facing CFS% aggregates.
-            // environment is user-overridable via PlayScopeContext.Metadata;
-            // default derived from Debug.isDebugBuild.
+            // is_editor / is_development_build are intrinsic (no user override) —
+            // the dashboard slices on them to keep editor/dev noise out of CFS%.
+            // environment is user-overridable via Metadata; default from isDebugBuild.
             bool isEditor           = UnityEngine.Application.isEditor;
             bool isDevelopmentBuild = UnityEngine.Debug.isDebugBuild;
 
@@ -534,9 +454,8 @@ namespace PlayScopeSdk.Internal
             if (!NativeLifecycleBridge.IsInstalled && !string.IsNullOrEmpty(NativeLifecycleBridge.LastError))
                 sessionMeta["lifecycle_hook_error"] = NativeLifecycleBridge.LastError;
 
-            // Symmetric with session_end in TeardownInternal — direct-write
-            // bypasses Pipeline so the gate / null-Pipeline / queue-not-wired
-            // can't lose the lifecycle marker.
+            // Symmetric with session_end — direct-write bypasses Pipeline so the
+            // gate / null-Pipeline / unwired-queue can't lose the lifecycle marker.
             if (_writer != null)
             {
                 var sessionStartRec = new EventRecord
@@ -559,12 +478,10 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Warning("session_start skipped — WriterWorker null after init (unreachable).");
             }
 
-            // Reset sampler sentinels at every fresh session_start. Today the
-            // rotation path destroys the MonoBehaviour so this is usually a no-op
-            // (the new MB has no sampler yet); harmless then. If we ever keep the
-            // MB alive across rotations, this prevents emit-on-change metrics
-            // (is_charging, network_reachability, available_disk_mb) from being
-            // suppressed because _prev* sentinels carry the prior session's value.
+            // Guards against emit-on-change metrics (is_charging,
+            // network_reachability, available_disk_mb) being suppressed by _prev*
+            // sentinels carrying the prior session's value, if the MB ever
+            // survives a rotation (today rotation destroys it, so usually no-op).
             _driverGo?.GetComponent<PlayScopeMonoBehaviour>()?.ResetSamplerForNewSession();
 
             // app_update_detected — emit only on a real version change.
@@ -596,12 +513,9 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Warning("app_update_detected check failed", ex);
             }
 
-            // Seed session_data with diagnostic fields the dashboard needs but
-            // didn't get into session_start. These describe the runtime that
-            // sessions can later patch on top of (Addressables locators after
-            // their init, periodic disk samples, etc.) — see UpdateSessionData.
-            // We push through the coalescer so the first wave of bootstrap
-            // pushes from wrappers folds into one session_data_initial row.
+            // Seed session_data with diagnostic fields not in session_start.
+            // Through the coalescer so the bootstrap wave folds into one
+            // session_data_initial row.
             try
             {
                 var systemInfo = new System.Collections.Generic.Dictionary<string, object>
@@ -633,22 +547,12 @@ namespace PlayScopeSdk.Internal
         internal static void Shutdown()
         {
             Debug.Log($"[PlayScope/diag] Shutdown() entry — _initialized={_initialized} _disabled={_disabled} _lifecycleBusy={_lifecycleBusy}");
-            // Bracket the teardown with the same lifecycle lock as Initialize /
-            // PerformRotation. If a rotation is mid-flight when Application.quitting
-            // fires, the rotation finishes first (it's still in the middle of
-            // emitting session_end + spinning a new session) and Shutdown gets
-            // skipped — that's the correct outcome, the new session's eventual
-            // Shutdown is the last chance to emit session_end before the OS
-            // kills the process. If a rotation is mid-flight, we MUST wait
-            // for it (briefly) rather than silently skipping — the post-
-            // rotation session has no other path to emit its session_end.
-            //
-            // Spin-wait up to ShutdownLockWaitMs for the lock. Unity's
-            // Application.quitting handler does not give us an unbounded
-            // budget (typically <2 s before SIGKILL on iOS / Android), so
-            // we cap the wait at 500 ms — enough for any sane rotation
-            // to finish, short enough that we still have time to write
-            // session_end before the OS pulls the rug.
+            // Brackets teardown with the same lifecycle lock as Initialize /
+            // PerformRotation. Spin-wait (not skip) for an in-flight rotation: the
+            // post-rotation session has no other path to emit its session_end.
+            // Capped at 500 ms because Application.quitting gives <~2 s before
+            // SIGKILL on mobile — long enough for a sane rotation, short enough to
+            // still write session_end.
             const int ShutdownLockWaitMs = 500;
             const int SpinSleepMs = 5;
             int waited = 0;
@@ -662,17 +566,10 @@ namespace PlayScopeSdk.Internal
                 }
                 if (waited >= ShutdownLockWaitMs)
                 {
-                    // Rotation is still in flight after 500 ms. DO NOT force
-                    // the gate — barging in would let TeardownInternal run
-                    // concurrently with InitializeLocked, leaving subsystems
-                    // half-initialised (driver GO destroyed by us, new
-                    // workers spinning up from rotation, mutual corruption).
-                    // Better to lose a session_end than to corrupt state on
-                    // the way out. The rotation's OWN finally-block will
-                    // eventually release the gate, and the OS will then kill
-                    // the process — session_end for the post-rotation
-                    // session lands on next launch's SessionRecovery as a
-                    // synthetic abnormal_end with reason=foreground_crash.
+                    // Don't force the gate — barging in would run TeardownInternal
+                    // concurrently with InitializeLocked and corrupt half the
+                    // subsystems. Losing this session_end is the safer trade; it
+                    // lands on next launch as a synthetic foreground_crash.
                     PlayScopeLog.Warning(
                         $"Shutdown: lifecycle lock not released within {ShutdownLockWaitMs} ms — " +
                         "skipping teardown to avoid corrupting in-flight rotation. " +
@@ -700,31 +597,21 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Idempotent teardown shared by Shutdown (normal end), ForceDisable
-        /// (partial-init failure), and RotateSession (background timeout).
-        /// Every operation is null-guarded so it can safely run on a
-        /// half-initialised SDK where some subsystems were constructed and
-        /// others weren't.
+        /// Idempotent, fully null-guarded teardown shared by Shutdown (normal),
+        /// ForceDisable (partial-init failure), and RotateSession (background
+        /// timeout) — safe on a half-initialised SDK.
         /// </summary>
-        /// <param name="endStatus">Legacy <c>end_status</c> value
-        /// ("normal" | "abnormal" | "background_timeout"). Kept for back-compat
-        /// with the dashboard's existing badge logic.</param>
-        /// <param name="reason">Fine-grained <c>reason</c> on the session_end
-        /// event metadata. One of: <c>normal</c> (clean Application.quitting),
-        /// <c>background_timeout</c> (our 5-min rotation),
-        /// <c>background_kill</c> (recovered: was backgrounded — likely
-        /// swipe-kill or low-memory kill — NOT a real crash),
-        /// <c>foreground_crash</c> (recovered: was foregrounded with no
-        /// clean exit — likely a crash or ANR),
-        /// <c>unknown</c> (recovered, lifecycle file missing — pessimistic
-        /// fallback). Backend uses this for the corrected CFS% formula that
-        /// excludes swipe-kills from the crash count.</param>
-        /// <param name="endTimestampOverride">When non-null, the emitted
-        /// session_end record carries this UTC time instead of
-        /// <c>DateTime.UtcNow</c>. Used by PerformRotation to backdate the
-        /// old session's end to <c>_lastBackgroundStartTicks</c> so the
-        /// dashboard's duration reflects pure foreground engagement
-        /// rather than foreground + sleep time.</param>
+        /// <param name="endStatus">Legacy <c>end_status</c>
+        /// ("normal" | "abnormal" | "background_timeout") for the dashboard badge.</param>
+        /// <param name="reason">Fine-grained session_end <c>reason</c>:
+        /// <c>normal</c> (clean quit), <c>background_timeout</c> (5-min rotation),
+        /// <c>background_kill</c> (recovered, was backgrounded — swipe/low-mem
+        /// kill, NOT a crash), <c>foreground_crash</c> (recovered, foregrounded
+        /// with no clean exit — crash/ANR), <c>unknown</c> (recovered, lifecycle
+        /// file missing). Backend's corrected CFS% excludes swipe-kills.</param>
+        /// <param name="endTimestampOverride">When non-null, session_end uses this
+        /// UTC time instead of now — PerformRotation backdates to
+        /// <c>_lastBackgroundStartTicks</c> so duration is pure foreground.</param>
         private static void TeardownInternal(bool emitSessionEnd, string endStatus = "normal", string reason = "normal",
             DateTime? endTimestampOverride = null)
         {
@@ -768,27 +655,18 @@ namespace PlayScopeSdk.Internal
             // would otherwise strand the last buffered first-of-key samples.
             LogDedupBuffer?.FlushNow();
 
-            // Emit session_end and finalize the chunk in ONE synchronous step
-            // so the rotation-vs-async-worker race that lost session_end on
-            // 2026-05-21 cannot recur. We bypass Pipeline.EnqueueEvent entirely
-            // for this critical record — building it directly and handing it
-            // to WriterWorker.WriteCriticalAndFinalizeSync ensures the
-            // {drain → append → flush → rename} sequence happens under a
-            // single lock acquisition, with no opportunity for RunAsync to
-            // sneak in and finalize an empty chunk between our flush and
-            // rename. Pipeline.EnqueueEvent for non-shutdown emit paths is
-            // unchanged.
+            // Emit session_end + finalize in ONE sync step via
+            // WriteCriticalAndFinalizeSync, bypassing Pipeline.EnqueueEvent, so
+            // {drain → append → flush → rename} runs under a single lock and
+            // RunAsync can't finalize an empty chunk between our flush and rename
+            // (that race lost session_end in a past version).
             if (emitSessionEnd)
             {
                 Debug.Log($"[PlayScope/diag] TeardownInternal: emitSessionEnd=true endStatus={endStatus} reason={reason} writerIsNull={_writer == null}");
                 if (_writer != null)
                 {
-                    // Backdate session_end to the supplied override when the
-                    // caller is doing a background-timeout rotation — the
-                    // session "really" ended when the player backgrounded
-                    // the app, not when we finally got CPU back to notice.
-                    // For normal shutdown / forced disable, override is
-                    // null and we keep the now-timestamp.
+                    // Background-timeout rotation backdates to when the player
+                    // backgrounded; normal shutdown passes null = now.
                     var endTs = endTimestampOverride ?? DateTime.UtcNow;
                     if (endTs.Kind != DateTimeKind.Utc) endTs = endTs.ToUniversalTime();
                     var rec = new EventRecord
@@ -801,15 +679,10 @@ namespace PlayScopeSdk.Internal
                         MetadataJson = $"{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\"}}",
                         IsCritical = true,
                     };
-                    // Run the sync write on a thread-pool worker with a
-                    // bounded wait — the lock + file I/O can hang past
-                    // Unity's quit budget on a slow or sandboxed disk
-                    // (network volume on iOS background-task suspension,
-                    // Android with full storage). If we exceed 500 ms we
-                    // abandon the call; next launch's SessionRecovery
-                    // synthesises an abnormal_end. Worst case: a duplicate
-                    // session_end if the abandoned task eventually
-                    // succeeds before process kill.
+                    // Bounded wait on a worker — lock + file I/O can hang past the
+                    // quit budget on a slow/sandboxed disk. Over 500 ms we abandon;
+                    // next launch synthesises abnormal_end. Worst case: a duplicate
+                    // session_end if the abandoned task later succeeds.
                     var writer = _writer; // capture for closure
                     var task = System.Threading.Tasks.Task.Run(() => writer.WriteCriticalAndFinalizeSync(rec));
                     bool ok;
@@ -851,58 +724,45 @@ namespace PlayScopeSdk.Internal
             _writer?.Stop();
             _writer = null;
 
-            // After writer finalizes the session_end chunk it lands in UploadQueue —
-            // signal the uploader to flush immediately. The uploader's RunAsync
-            // is now (post-2026-05-21 race fix) guaranteed to run one ProcessQueueAsync
-            // pass after the wake even if Stop() races in, so the session_end chunk
-            // gets at least one upload shot from THIS process. If the network
-            // request is killed mid-flight by Unity's quit deadline, the chunk
-            // stays on disk for next launch's SessionRecovery to relocate to
-            // completed_sessions/ and upload under the correct session_id.
+            // Wake the uploader so the just-finalized session_end chunk gets at
+            // least one upload shot from this process (RunAsync guarantees one
+            // pass after wake even if Stop races in). If the request is killed by
+            // the quit deadline, next launch's SessionRecovery re-uploads it.
             _uploader?.TriggerInstantUpload();
             _uploader?.Stop();
             _uploader = null;
 
-            // Null out Pipeline/Queue so a subsequent Initialize starts fresh.
-            // Without this, a re-Initialize would create a NEW Pipeline but the
-            // persistent PlayScopeMonoBehaviour (see below) keeps a reference
-            // to the OLD one and routes future Update-ticks through the dead
-            // pipeline — silent metric loss + unbounded queue growth.
+            // Without nulling these, a re-Initialize's persistent MonoBehaviour
+            // would keep routing Update-ticks through the OLD Pipeline — silent
+            // metric loss + unbounded queue growth.
             Pipeline = null;
             Queue = null;
             LogDedupBuffer = null;
 
-            // Destroy the MonoBehaviour driver. Otherwise the GameObject
-            // persists DontDestroyOnLoad and EnsureDriver's early-return on
-            // _driverGo != null skips re-attachment. The next Initialize would
-            // be ticked by a stale MonoBehaviour with a frozen _sampler.
+            // Destroy the driver — else the DontDestroyOnLoad GameObject persists,
+            // EnsureDriver early-returns, and the next Initialize is ticked by a
+            // stale MonoBehaviour with a frozen _sampler.
             if (_driverGo != null)
             {
                 try { UnityEngine.Object.Destroy(_driverGo); } catch { /* best-effort */ }
                 _driverGo = null;
             }
 
-            // Discard any in-flight scene-load progress entries — they hold
-            // AsyncOperation references that keep their target scenes pinned
-            // in memory, which we don't want bleeding across sessions.
+            // Discard in-flight scene-load entries — they pin AsyncOperation
+            // references (and their scenes) in memory across sessions.
             SceneLoadProgressTracker.ClearAll();
 
             try { SessionFiles.DeleteSessionLock(); } catch { /* best-effort */ }
-            // Lifecycle file deleted on a clean teardown — its presence on
-            // next launch is the signal that we died uncleanly.
+            // Deleted on clean teardown — its presence next launch signals an unclean death.
             try { SessionFiles.DeleteLifecycleState(); } catch { /* best-effort */ }
             _initialized = false;
             PlayScopeLog.Info("Shutdown complete.");
             Debug.Log("[PlayScope/diag] Shutdown complete — session.lock + session.lifecycle deleted, _initialized=false.");
         }
 
-        // Runtime check beats the compile-time defines because UNITY_ANDROID /
-        // UNITY_IOS are defined whenever the *build target* is set to that
-        // platform — including in-Editor play with Android selected. Without
-        // the isEditor guard a test run from the Editor would report itself
-        // as "android" while device_model still showed the desktop name,
-        // producing confusing dashboard rows. Order: editor wins, then the
-        // actual deployed platform via the existing compile-time chain.
+        // isEditor must win: UNITY_ANDROID/IOS are defined whenever the build
+        // target is set, so in-Editor play with Android selected would report
+        // "android" while device_model shows the desktop name.
         private static string GetPlatformString()
         {
             if (UnityEngine.Application.isEditor) return "editor";
@@ -915,15 +775,10 @@ namespace PlayScopeSdk.Internal
 #endif
         }
 
-        // The build_number stamped on session_start MUST match the value the
-        // Editor symbol uploader sends with the symbols.zip — otherwise the
-        // dashboard shows two unrelated identifiers (session vs symbol bundle)
-        // and symbol resolution can't confirm the uploaded symbols belong to
-        // the crashing compile. The uploader uses Android bundleVersionCode /
-        // iOS CFBundleVersion (PlayScopeSymbolUploader), so we read the same
-        // native value at runtime. Order: explicit integrator override →
-        // native version code → Application.buildGUID (last-resort fallback so
-        // the field is never empty).
+        // Must match the build_number the symbol uploader sends with symbols.zip,
+        // or symbol resolution can't confirm the symbols belong to the crashing
+        // compile. Both read the native versionCode (PlayScopeSymbolUploader).
+        // Order: integrator override → native version code → buildGUID fallback.
         private static string ResolveBuildNumber(PlayScopeContext context)
         {
             if (context?.Metadata != null
@@ -938,10 +793,9 @@ namespace PlayScopeSdk.Internal
             return UnityEngine.Application.buildGUID;
         }
 
-        // Android: PackageManager versionCode (== PlayerSettings.Android.
-        // bundleVersionCode baked into the APK). iOS CFBundleVersion isn't
-        // exposed by UnityEngine at runtime — that needs a native read, so iOS
-        // falls back to buildGUID for now (symbols still match by app_version).
+        // Android: PackageManager versionCode (== bundleVersionCode in the APK).
+        // iOS CFBundleVersion isn't exposed at runtime, so iOS falls back to
+        // buildGUID (symbols still match by app_version).
         private static string TryReadNativeBuildNumber()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -969,22 +823,18 @@ namespace PlayScopeSdk.Internal
 #endif
         }
 
-        // Called from OnApplicationPause / focus lost. Flushes both the patch
-        // coalescer (so its buffer doesn't sit through a background period
-        // that may end with the OS killing the app) and the writer.
+        // From OnApplicationPause / focus lost. Flushes coalescers + writer so
+        // nothing strands in a buffer through a background period that may end
+        // in an OS kill.
         internal static void FlushOnPause()
         {
             StatePatchCoalescer.FlushNow();
             SessionDataCoalescer.FlushNow();
-            // Drain buffered log dedup entries before background — the OS may
-            // kill us at any point during the pause window and we don't want
-            // up to 5 s of buffered first-of-key samples disappearing with it.
             LogDedupBuffer?.FlushNow();
             _writer?.FlushImmediate();
-            // The OS will stop running Update() in a moment — suspending
-            // the watchdog now keeps it from reporting the backgrounded
-            // state as a multi-minute ANR. Re-armed on the matching
-            // foreground transition via the RecordLifecycle path.
+            // Update() stops in a moment — suspend the watchdog so the
+            // backgrounded stretch isn't mis-reported as a multi-minute ANR.
+            // Re-armed on foreground via RecordLifecycle.
             AnrWatchdog?.Suspend();
         }
 
@@ -998,22 +848,15 @@ namespace PlayScopeSdk.Internal
         {
             if (!_initialized || _disabled) return;
             var nextState = t == LifecycleTransition.BackgroundStart ? "background" : "foreground";
-            // Drop no-op transitions. On iOS / Android the OS frequently
-            // fires BOTH OnApplicationPause(true) AND OnFocusChanged(false)
-            // for the same backgrounding event — the prior implementation
-            // emitted two back-to-back rows (background → background_start)
-            // with a near-zero duration that was meaningless. Now the
-            // second call is silently swallowed.
+            // Drop no-op transitions: iOS/Android often fire both
+            // OnApplicationPause(true) and OnFocusChanged(false) for one
+            // backgrounding, which used to emit two near-zero-duration rows.
             if (nextState == _currentLifecycleState) return;
 
             var nowTicks = DateTime.UtcNow.Ticks;
-            // Duration MUST be Stopwatch-derived. Computing it from
-            // DateTime.UtcNow.Ticks lets a device-clock change between
-            // background-start and foreground produce a negative or wildly
-            // inflated delta — negative skips the rotation trigger entirely
-            // (player resumes after hours, never gets a new session, and
-            // we silently keep racking up DAU under one billing-session);
-            // forward jump rotates after a 30-second pause.
+            // Duration MUST be Stopwatch-derived: a device-clock change mid-
+            // background yields a negative delta (skips rotation → player keeps
+            // one billing-session forever) or a forward jump (rotates after 30 s).
             var nowStopwatchTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             long durationMs;
             if (_currentLifecycleStateEnteredAtStopwatchTicks == 0)
@@ -1028,17 +871,10 @@ namespace PlayScopeSdk.Internal
             }
             var prevState = _currentLifecycleState;
 
-            // Background-timeout session rotation. Transitioning from background
-            // → foreground after more than BackgroundSessionTimeoutMs of absence
-            // means we treat the resumed app as a NEW session (new session_id,
-            // fresh chunks, sequence_num reset). The actual rotation runs on the
-            // next MonoBehaviour Update tick — we can't destroy / recreate the
-            // driver GameObject from inside its own OnApplicationPause callback.
-            //
-            // We deliberately SKIP emitting the lifecycle event in this case:
-            // the upcoming session_end (end_status="background_timeout") plus
-            // the new session_start convey the same information more clearly
-            // than a transient foreground row on a session about to be closed.
+            // Background → foreground after > BackgroundSessionTimeoutMs starts a
+            // NEW session. Rotation runs on the next Update (can't recreate the
+            // driver GameObject from inside its own OnApplicationPause callback).
+            // No lifecycle event here — the session_end + new session_start say it.
             if (t == LifecycleTransition.Foreground &&
                 prevState == "background" &&
                 durationMs >= BackgroundSessionTimeoutMs)
@@ -1046,25 +882,13 @@ namespace PlayScopeSdk.Internal
                 PlayScopeLog.Info(
                     $"Background timeout ({durationMs} ms ≥ {BackgroundSessionTimeoutMs} ms) — " +
                     "scheduling session rotation.");
-                // FIRST close the pipeline so nothing else lands in the
-                // doomed session between now and PerformRotation. Without
-                // this, Application.lowMemory firing in the same frame as
-                // the resume — and wrapper code running during this
-                // Update tick — both happily enqueued into the old
-                // session, distorting its event count and (because
-                // session_end took the now-timestamp) its duration.
-                // Restored to true at the end of PerformRotation.
+                // Close the pipeline first so nothing (lowMemory in the same
+                // frame, wrapper code this tick) lands in the doomed session.
+                // Restored at the end of PerformRotation.
                 _acceptingEvents = false;
-                // CRITICAL: advance the lifecycle state BEFORE setting the
-                // pending-rotation flag. If the rotation later fails (lock
-                // contention, transient init exception), the next
-                // RecordLifecycle call would otherwise still see
-                // prevState == "background" with durationMs > timeout and
-                // re-schedule rotation forever — an infinite loop where
-                // every Update tick triggers PerformRotation. Advancing
-                // the state here means the second observation sees
-                // prevState == "foreground" and falls through to the
-                // normal emit path.
+                // Advance the state BEFORE the pending flag: if rotation later
+                // fails, the next RecordLifecycle must not still see
+                // background+over-timeout and re-schedule forever.
                 _currentLifecycleState = nextState;
                 _currentLifecycleStateEnteredAtTicks = nowTicks;
                 _currentLifecycleStateEnteredAtStopwatchTicks = nowStopwatchTicks;
@@ -1083,29 +907,21 @@ namespace PlayScopeSdk.Internal
             _currentLifecycleState = nextState;
             _currentLifecycleStateEnteredAtTicks = nowTicks;
             _currentLifecycleStateEnteredAtStopwatchTicks = nowStopwatchTicks;
-            // Capture the wall-clock moment we entered background so
-            // PerformRotation can backdate session_end to here on a
-            // background-timeout — the canonical
-            // _currentLifecycleStateEnteredAtTicks gets overwritten with
-            // the foreground-return ticks at scheduling time, so a separate
-            // field is the only place this survives.
+            // The only field that survives for PerformRotation to backdate
+            // session_end to — _currentLifecycleStateEnteredAtTicks gets
+            // overwritten with the foreground-return time at scheduling.
             if (nextState == "background")
             {
                 _lastBackgroundStartTicks = nowTicks;
             }
-            // Mirror the new state to disk so SessionRecovery on the next
-            // launch can classify an unclean death by where we were last:
-            // foreground → likely crash/ANR, background → likely swipe-kill
-            // or OS low-memory kill. Best-effort I/O — never throw out of
-            // the lifecycle hot path.
+            // Mirror to disk so next launch's recovery can classify an unclean
+            // death: foreground → likely crash/ANR, background → likely swipe/
+            // low-mem kill. Best-effort — never throw from the lifecycle hot path.
             try { SessionFiles.WriteLifecycleState(nextState); }
             catch (Exception ex) { PlayScopeLog.Warning("RecordLifecycle: lifecycle persist failed", ex); }
 
-            // ANR watchdog state follows the OS: suspended while the app
-            // is backgrounded (Update() doesn't run, so a long stretch
-            // with no heartbeat would mis-classify as a freeze), re-armed
-            // on foreground with a refreshed heartbeat so the first
-            // half-second post-resume can't false-positive.
+            // Suspend the watchdog while backgrounded (no Update → no heartbeat
+            // → would mis-classify as a freeze); re-arm refreshed on foreground.
             if (nextState == "background") AnrWatchdog?.Suspend();
             else                            AnrWatchdog?.Resume();
         }
@@ -1125,27 +941,18 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Closes the current session with end_status="background_timeout" and
-        /// re-runs Initialize() with the originally-supplied context. Result:
-        /// a brand new session_id, sequence_num reset to 0, fresh chunks dir
-        /// state — billing counts this as a separate session.
-        ///
-        /// <para>
-        /// MUST be called from outside any OnApplicationPause / OnFocusChanged
-        /// callback chain: TeardownInternal destroys the driver GameObject,
-        /// which would be a destroy-self if called from inside that GO's own
-        /// MonoBehaviour callback. Currently invoked from MB.Update via
-        /// ConsumePendingRotation.
-        /// </para>
+        /// Closes the current session (end_status="background_timeout") and
+        /// re-runs Initialize() with the stored context — new session_id,
+        /// sequence_num reset, billed as a separate session. MUST be called
+        /// outside any OnApplicationPause / OnFocusChanged chain (TeardownInternal
+        /// destroys the driver GameObject, a destroy-self from inside its own
+        /// callback). Invoked from MB.Update via ConsumePendingRotation.
         /// </summary>
         internal static void PerformRotation()
         {
-            // Claim the lifecycle lock for the WHOLE rotation — teardown +
-            // re-init must be atomic w.r.t. any other Initialize / Shutdown
-            // caller. Without this, an OnApplicationQuit landing between
-            // TeardownInternal and Initialize would let Shutdown observe
-            // _initialized=false and skip, leaving the SDK with no live
-            // session.
+            // Lock the WHOLE rotation — teardown + re-init must be atomic vs any
+            // other Initialize/Shutdown. Else an OnApplicationQuit between the two
+            // sees _initialized=false, skips, and leaves no live session.
             if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
             {
                 PlayScopeLog.Warning("PerformRotation skipped — another lifecycle op is already in flight.");
@@ -1154,13 +961,9 @@ namespace PlayScopeSdk.Internal
             try
             {
                 if (!_initialized || _disabled) return;
-                // Captured background_start moment is the "real" end of the
-                // old session — the player put the app to sleep here, the
-                // 30+ minutes that followed are OS-held suspension, not
-                // gameplay. Falls through to DateTime.UtcNow inside
-                // TeardownInternal when the captured value is 0 (we got
-                // here without ever transitioning to background — unusual,
-                // but defensive).
+                // background_start is the "real" end of the old session — the
+                // suspension after it isn't gameplay. 0 (never backgrounded)
+                // falls through to now inside TeardownInternal.
                 DateTime? backdatedEnd = _lastBackgroundStartTicks > 0
                     ? new DateTime(_lastBackgroundStartTicks, DateTimeKind.Utc)
                     : (DateTime?)null;
@@ -1176,36 +979,29 @@ namespace PlayScopeSdk.Internal
                 }
                 TeardownInternal(emitSessionEnd: true, endStatus: "background_timeout", reason: "background_timeout",
                     endTimestampOverride: backdatedEnd);
-                // Bypass the Initialize() admission gate — we already hold
-                // the lifecycle lock for the whole rotation.
+                // Bypass the admission gate — we already hold the lifecycle lock.
                 InitializeLocked(ctx);
             }
             finally
             {
-                // Re-open the pipeline gate. From this point any new event
-                // (which will now arrive in the freshly-initialised session)
-                // is accepted again. Even if InitializeLocked threw, we
-                // restore the gate — otherwise a partially-init'd SDK would
-                // silently swallow every subsequent event forever.
+                // Re-open the gate even if InitializeLocked threw, else a
+                // partially-init'd SDK swallows every event forever.
                 _acceptingEvents = true;
                 Interlocked.Exchange(ref _lifecycleBusy, 0);
             }
         }
 
         /// <summary>
-        /// Emits a one-shot <c>first_frame_rendered</c> event on the first
-        /// Update() tick after Initialize. Carries the elapsed ms since
-        /// Initialize so the dashboard can plot TTI (time-to-interactive)
-        /// across builds. Guard via Interlocked so a worker thread can't
-        /// double-emit on a rare second-MB-instantiation path.
+        /// One-shot <c>first_frame_rendered</c> on the first Update() tick after
+        /// Initialize, carrying elapsed ms since Initialize for TTI plotting.
+        /// Interlocked-guarded against a rare double-emit.
         /// </summary>
         internal static void EmitFirstFrameRenderedOnce()
         {
             if (!_initialized || _disabled) return;
             if (Interlocked.CompareExchange(ref _firstFrameEmitted, 1, 0) != 0) return;
-            // Stamp the first-frame moment so first_input_latency below can
-            // measure from "player saw the screen" instead of from session_start
-            // (which folds in headless init time).
+            // Stamp first-frame so first_input_latency measures from "player saw
+            // the screen", not session_start (which folds in headless init).
             _firstFrameTicks = DateTime.UtcNow.Ticks;
             var elapsedMs = _currentLifecycleStateEnteredAtTicks == 0
                 ? 0
@@ -1219,22 +1015,11 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Emits a one-shot <c>first_input_latency</c> event the first frame
-        /// on which Unity reports any input after <c>first_frame_rendered</c>
-        /// has fired. Carries the elapsed ms since first-frame as
-        /// <c>latency_ms</c> plus the input kind that tripped it.
-        ///
-        /// <para>
-        /// The MonoBehaviour driver polls this once per Update; this method
-        /// is the no-op fast path when either guard is set, or when the first
-        /// frame hasn't been emitted yet. Cheap to call every frame.
-        /// </para>
-        ///
-        /// <para>
-        /// Editor / headless / batch-mode sessions where the user never
-        /// taps anything simply never emit the event — that's correct,
-        /// "no input ever arrived" is not a sample worth recording.
-        /// </para>
+        /// One-shot <c>first_input_latency</c> on the first input after
+        /// <c>first_frame_rendered</c>, carrying ms-since-first-frame and the
+        /// input kind. Polled every Update — cheap no-op once fired or before
+        /// first frame. Sessions with no input (Editor/headless) never emit,
+        /// which is correct.
         /// </summary>
         internal static void EmitFirstInputLatencyIfFired(string inputKind)
         {
@@ -1242,10 +1027,7 @@ namespace PlayScopeSdk.Internal
             if (_firstFrameEmitted == 0) return; // wait for first frame
             if (Interlocked.CompareExchange(ref _firstInputEmitted, 1, 0) != 0) return;
             var nowTicks = DateTime.UtcNow.Ticks;
-            // Defensive: if first-frame ticks somehow weren't stamped (race
-            // we don't expect, but the field defaults to 0), report a
-            // latency of 0 instead of an absurdly large number derived
-            // from epoch-start.
+            // 0 if first-frame ticks weren't stamped, not an epoch-derived number.
             var latencyMs = _firstFrameTicks == 0
                 ? 0L
                 : Math.Max(0L, (nowTicks - _firstFrameTicks) / TimeSpan.TicksPerMillisecond);
@@ -1259,10 +1041,8 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Emits a <c>network_change</c> event when reachability flips. Called
-        /// from MetricsSampler with the current <see cref="Application.internetReachability"/>
-        /// value (cast to int). First-ever sample initializes the watchdog
-        /// without emitting — we have no "previous" to compare against.
+        /// Emits <c>network_change</c> when reachability flips. The first sample
+        /// just initializes the baseline (no "previous" to compare).
         /// </summary>
         internal static void RecordNetworkReachabilityIfChanged(int currentReachability)
         {
@@ -1296,12 +1076,11 @@ namespace PlayScopeSdk.Internal
 
         private static void EnsureDriver()
         {
-            // Only create a real driver when we're running inside Unity play mode.
-            // In Edit-mode tests or batch tooling, skip GameObject creation — Shutdown
-            // can still be invoked manually if the test wants it.
+            // Only create a GameObject driver in play mode; Edit-mode/batch can
+            // still invoke Shutdown manually.
             if (!Application.isPlaying)
             {
-                // Subscribe to Application.quitting so Editor batch runs still finalize cleanly.
+                // Application.quitting so Editor batch runs still finalize cleanly.
                 if (!_quittingSubscribed)
                 {
                     try
@@ -1369,12 +1148,8 @@ namespace PlayScopeSdk.Internal
         }
 
         // ── Application.lowMemory handler ──────────────────────────────────────
-        //
-        // Fired by the OS on Android (Activity.onTrimMemory at TRIM_MEMORY_*
-        // levels) and iOS (UIApplicationDidReceiveMemoryWarning). Runs on the
-        // Unity main thread so it's safe to read Profiler / SystemInfo here.
-        // We don't dedupe: a burst of warnings in quick succession is itself
-        // signal (escalating memory pressure → likely OOM kill imminent).
+        // Not deduped: a burst of warnings is itself signal (escalating pressure
+        // → likely imminent OOM kill).
         private static void OnLowMemoryWarning()
         {
             if (!_initialized || _disabled) return;

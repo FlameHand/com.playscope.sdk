@@ -8,28 +8,14 @@ using PlayScopeSdk.Storage;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// Owns the C# side of native crash capture. Installs the Android
-    /// signal handler via the <c>PlayScopeCrash</c> JNI bridge (Java side
-    /// in <c>Plugins/Android/PlayScopeCrash.java</c>, native side in
-    /// <c>libplayscope_crash.so</c>), reads back the JSON crash records
-    /// the handler wrote on the prior process death, and serialises them
-    /// into <c>exception</c> log records that <see cref="SessionRecovery"/>
-    /// can append to the recovered session's chunks.
-    ///
-    /// <para>
-    /// Lifetime: process-wide statics. <see cref="PreInit"/> runs once on
-    /// SDK init (before <see cref="SessionRecovery"/>); subsequent calls
-    /// are no-ops. <see cref="OnSessionInitialized"/> runs after every
-    /// session_id is determined (initial init AND every rotation) so the
-    /// native handler always writes the in-flight session_id into the
-    /// crash file.
-    /// </para>
-    ///
-    /// <para>
-    /// Editor / iOS / WebGL / standalone are no-op paths: the crash dir
-    /// still gets created (harmless), no native handler is installed,
-    /// recovery scans the dir and finds nothing.
-    /// </para>
+    /// C# side of native crash capture. Installs the Android signal handler via
+    /// the <c>PlayScopeCrash</c> JNI bridge, reads back the JSON crash records the
+    /// handler wrote on the prior death, and serializes them into <c>exception</c>
+    /// log records for <see cref="SessionRecovery"/> to append.
+    /// <see cref="PreInit"/> runs once on init (before recovery);
+    /// <see cref="OnSessionInitialized"/> runs after every session_id is set
+    /// (init + rotation) so the handler always writes the in-flight session_id.
+    /// Android-only at runtime; other platforms create the dir and no-op.
     /// </summary>
     internal static class PlayScopeCrashCollector
     {
@@ -46,11 +32,8 @@ namespace PlayScopeSdk.Internal
             new HashSet<string>(StringComparer.Ordinal);
 
         /// <summary>
-        /// Absolute path to the crash directory under
-        /// <c>Application.persistentDataPath/PlayScope/crash/</c>. Empty
-        /// string when <see cref="PreInit"/> has not yet succeeded — never
-        /// null, so callers can pass it through to native APIs without
-        /// guarding.
+        /// Crash dir path. Empty string (never null) before <see cref="PreInit"/>
+        /// succeeds, so callers can pass it to native APIs unguarded.
         /// </summary>
         internal static string CrashDir => _crashDir ?? string.Empty;
 
@@ -119,12 +102,8 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Returns the parsed crash record for the given session_id (if a
-        /// matching file is present and well-formed), and deletes the
-        /// file. Returns null when nothing matches OR the file was
-        /// malformed and got pruned. Safe to call concurrently with
-        /// nothing — every state mutation here happens during recovery,
-        /// which runs single-threaded before workers start.
+        /// Returns + deletes the crash record for this session_id, or null if none
+        /// matches / it was malformed. Runs single-threaded during recovery.
         /// </summary>
         internal static NativeCrashRecord TryConsumeCrashFor(string sessionId)
         {
@@ -155,11 +134,8 @@ namespace PlayScopeSdk.Internal
                 return null;
             }
             var record = ReadAndDelete(path, expectedSessionId: sessionId);
-            // Mark BOTH the filename stem AND the parsed JSON session_id —
-            // they normally match (C++ handler writes session_id from the
-            // same C# string used as filename), but if a future divergence
-            // ever lands a file under stem != json sid, DrainOrphans must
-            // still skip the already-consumed file by its filename key.
+            // Mark both the filename stem and the parsed JSON session_id so
+            // DrainOrphans skips this file even if the two ever diverge.
             _consumedSessionIds.Add(sessionId);
             if (record != null && !string.IsNullOrEmpty(record.SessionId))
             {
@@ -238,16 +214,9 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Guards a string that will be used as a path segment derived from
-        /// either a crash-file filename or a JSON session_id field. Real
-        /// SDK session ids are <see cref="Guid"/> strings (32-char N format
-        /// or 36-char D format with dashes). Rejects anything containing
-        /// path separators or relative-traversal sequences so a corrupted
-        /// or malicious crash file can't escape the crash dir / completed
-        /// sessions dir at write time. Cheap defense in depth — the SDK
-        /// is the only writer of the crash dir on a real device, but a
-        /// future C++ regression or a developer's copy-pasted test file
-        /// won't be able to weaponize this path.
+        /// Guards a session-id-derived path segment: real session ids are GUID
+        /// strings, so reject anything with separators or traversal sequences so a
+        /// corrupt/malicious crash file can't escape the crash dir. Defense in depth.
         /// </summary>
         private static bool IsSafeSessionIdSegment(string value)
         {
@@ -272,11 +241,9 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Builds the JSON metadata blob attached to the emitted exception
-        /// event, matching the shape Day 3 backend ingestion expects.
-        /// Discriminator <c>native_source=playscope_crash</c> separates
-        /// these from managed exceptions captured by
-        /// <see cref="EventPipeline.EnqueueLog"/>.
+        /// Builds the exception-event metadata blob. The
+        /// <c>native_source=playscope_crash</c> discriminator separates these from
+        /// managed exceptions captured by <see cref="EventPipeline.EnqueueLog"/>.
         /// </summary>
         internal static string BuildExceptionMetadataJson(NativeCrashRecord record)
         {
@@ -600,13 +567,7 @@ namespace PlayScopeSdk.Internal
         }
     }
 
-    /// <summary>
-    /// Parsed shape of one crash file written by the native signal
-    /// handler. Held as a class (not struct) because instances cross
-    /// internal API boundaries and the field set is large enough that
-    /// copying by value would obscure intent rather than save allocations
-    /// — recovery runs at most a handful of times per launch.
-    /// </summary>
+    /// <summary>Parsed shape of one native crash file.</summary>
     internal sealed class NativeCrashRecord
     {
         internal string SessionId;
@@ -626,14 +587,10 @@ namespace PlayScopeSdk.Internal
     }
 
     /// <summary>
-    /// Tiny recursive-descent JSON parser that supports the subset the
-    /// crash file schema uses: objects, arrays, strings, numbers,
-    /// booleans, null. The shared <see cref="SimpleJson"/> parser is
-    /// flat-only (no nesting / arrays) so it can't read the
-    /// <c>frames:[…]</c> field. Newtonsoft.Json is not on the SDK runtime
-    /// asmdef refs — adding it for one cold-path parser would pull a
-    /// full assembly into every consumer build. Hand-rolled mini-parser
-    /// is the cheaper option.
+    /// Tiny recursive-descent JSON parser for the crash schema (objects, arrays,
+    /// strings, numbers, bools, null). The shared <see cref="SimpleJson"/> is
+    /// flat-only so it can't read <c>frames:[…]</c>, and pulling in Newtonsoft
+    /// for one cold-path parser would bloat every consumer build.
     /// </summary>
     internal sealed class MiniJsonParser
     {

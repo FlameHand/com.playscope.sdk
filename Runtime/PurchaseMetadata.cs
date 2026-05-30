@@ -7,19 +7,14 @@ using UnityEngine;
 namespace PlayScopeSdk
 {
     /// <summary>
-    /// Helpers for building the canonical purchase-event metadata dictionaries
-    /// the dashboard's PurchaseDetails renderer surfaces as first-class fields.
-    ///
-    /// The underlying <c>StartPurchase</c> / <c>EndPurchase</c> API still takes
-    /// an opaque <c>IReadOnlyDictionary&lt;string, object&gt;</c>, so these
-    /// helpers are additive — call them to get a dict with the right key
-    /// names (and a SHA-256-16 hashed transaction_id) rather than passing the
-    /// raw fields in by hand and risking a typo'd <c>"currancy"</c> that the
-    /// dashboard then doesn't know how to render.
+    /// Helpers for the canonical purchase-event metadata the dashboard's
+    /// PurchaseDetails renderer surfaces as first-class fields. Additive over the
+    /// opaque-dict <c>StartPurchase</c>/<c>EndPurchase</c> API — using them avoids
+    /// a typo'd key the dashboard can't render, and hashes the transaction_id.
     ///
     /// <para>
-    /// Field schema (must stay in lockstep with web's
-    /// <c>PurchaseDetails</c> renderer and any backend whitelist):
+    /// Field schema (keep in lockstep with web's <c>PurchaseDetails</c> renderer
+    /// and any backend whitelist):
     /// </para>
     /// <list type="bullet">
     /// <item><c>store</c>: <c>app_store</c> / <c>google_play</c> / <c>steam</c> / <c>amazon</c> / <c>other</c>. Auto-detected from <see cref="Application.platform"/> when <see cref="BuildStartMetadata"/> is called without an explicit override.</item>
@@ -143,9 +138,7 @@ namespace PlayScopeSdk
             if (string.IsNullOrEmpty(transactionId)) return string.Empty;
             using var sha = SHA256.Create();
             byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(transactionId));
-            // 8 bytes = 16 hex chars. Lower-case to match the dashboard's
-            // convention for hashed identifiers (mirrors how we stringify
-            // event_id / session_id).
+            // 8 bytes = 16 hex chars, lower-case to match dashboard hashed-id convention.
             var sb = new StringBuilder(16);
             for (int i = 0; i < 8; i++) sb.Append(hash[i].ToString("x2"));
             return sb.ToString();
@@ -181,11 +174,8 @@ namespace PlayScopeSdk
             foreach (var kv in extra)
             {
                 if (string.IsNullOrEmpty(kv.Key)) continue;
-                // Caller-supplied keys WIN on collision. Rationale: the
-                // hand-built helper sets sensible defaults, but if the game
-                // has a more accurate value (e.g. a hand-computed
-                // transaction_id_hash from a server-side ID), we want it to
-                // override rather than the helper's auto-derived value.
+                // Caller keys win — the game may have a more accurate value
+                // (e.g. a server-side transaction_id_hash) than the helper default.
                 dict[kv.Key] = kv.Value;
             }
         }

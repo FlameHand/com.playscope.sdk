@@ -4,37 +4,23 @@ using UnityEngine;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// Periodic sampler for in-flight scene loads. Callers register the
-    /// <see cref="AsyncOperation"/> returned by <c>SceneManager.LoadSceneAsync</c>
-    /// (or Addressables' scene loader) against a PlayScope <c>operationId</c>;
-    /// the MonoBehaviour driver ticks this sampler every frame and appends a
-    /// <see cref="AsyncOperation.progress"/> reading once every <see cref="SampleIntervalSec"/>
-    /// seconds. When the operation completes (or the caller calls
-    /// <see cref="DrainSamples"/> from CompleteOperation), the collected samples
-    /// are emitted as <c>scene_progress_samples</c> in metadata.
-    ///
-    /// <para>
-    /// Why a polling sampler rather than a callback: Unity's AsyncOperation
-    /// only fires <c>completed</c> at the very end. The dashboard wants to see
-    /// the shape of the load — slow ramp on remote scenes, near-instant on
-    /// cached, plateau-then-jump on dependency-heavy bundles. Sampling at
-    /// 250 ms is granular enough to see the shape without burying the
-    /// payload in a hundred values.
-    /// </para>
+    /// Periodic sampler for in-flight scene loads. Callers register an
+    /// <see cref="AsyncOperation"/> against an <c>operationId</c>; the
+    /// MonoBehaviour driver samples its <see cref="AsyncOperation.progress"/>
+    /// every <see cref="SampleIntervalSec"/>s and emits them as
+    /// <c>scene_progress_samples</c> on completion / <see cref="DrainSamples"/>.
+    /// Polling (not a callback) because AsyncOperation only fires <c>completed</c>
+    /// at the end, but the dashboard wants the load's shape (ramp / plateau /
+    /// jump). 250 ms is granular enough without burying the payload.
     /// </summary>
     internal static class SceneLoadProgressTracker
     {
         private const float SampleIntervalSec = 0.25f;
-        // Hard cap on samples kept per operation. A multi-minute scene load at
-        // 250 ms would otherwise push us past the 4 KB metadata limit on its
-        // own. 64 samples covers 16 s of load detail at full rate; longer
-        // loads gracefully degrade to "head + tail" by dropping middle samples.
+        // Cap per operation so a multi-minute load doesn't blow the 4 KB metadata
+        // limit. 64 = 16 s at full rate; longer loads degrade to head+tail.
         private const int MaxSamples = 64;
-        // Hard cap on concurrently-tracked operations. A caller that forgets
-        // to End() — or a code path where End() is unreachable — would otherwise
-        // grow _entries without bound. 64 is generous (a session almost never
-        // has more than a handful of scene loads truly in-flight at once);
-        // when exceeded we evict the oldest non-drained entry.
+        // Cap on concurrent operations so a forgotten End() can't grow _entries
+        // unbounded; over-cap evicts the oldest.
         private const int MaxEntries = 64;
 
         private sealed class Entry
@@ -45,9 +31,7 @@ namespace PlayScopeSdk.Internal
             internal readonly List<float> Samples = new();
         }
 
-        // operationId → entry. Synchronized on _gate because Start/End can
-        // run on worker threads (the SDK API surface is documented as
-        // thread-safe) while the sampler ticks on the Unity main thread.
+        // _gate guards against Begin/End on worker threads racing the main-thread sampler tick.
         private static readonly Dictionary<string, Entry> _entries = new();
         private static readonly object _gate = new();
 
@@ -103,18 +87,15 @@ namespace PlayScopeSdk.Internal
                 }
             }
             if (drained == null || drained.Count == 0) return null;
-            // Box into object so DictToJson's IList branch sees boxed floats
-            // and writes them via the numeric serializer (invariant culture).
+            // Box so DictToJson's IList branch serializes them as numbers.
             var boxed = new List<object>(drained.Count);
             for (int i = 0; i < drained.Count; i++) boxed.Add(drained[i]);
             return boxed;
         }
 
         /// <summary>
-        /// Discards every tracked entry. Called by <c>PlayScopeRuntime.Shutdown</c>
-        /// so a re-Initialize doesn't inherit half-finished loads from the
-        /// prior session, and so the underlying AsyncOperation references
-        /// (which may keep larger Unity objects alive) can be GCed.
+        /// Discards every tracked entry on Shutdown so a re-Initialize doesn't
+        /// inherit half-finished loads and the AsyncOperation refs can be GCed.
         /// </summary>
         internal static void ClearAll()
         {
@@ -125,16 +106,12 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Called from <c>PlayScopeMonoBehaviour.Update</c> every frame on the
-        /// Unity main thread. Walks active entries and appends a sample when
-        /// the per-entry timer has elapsed. We sample the bound AsyncOperation
-        /// directly here because AsyncOperation.progress is main-thread only.
+        /// Per-frame main-thread tick — appends a sample per entry when its timer
+        /// elapses. Sampled here because AsyncOperation.progress is main-thread only.
         /// </summary>
         internal static void TickAndMaybeSample()
         {
-            // Snapshot under the lock; sample outside the lock to keep the
-            // critical section tight even if .progress reads end up taking
-            // a few microseconds (they shouldn't, but Unity is Unity).
+            // Snapshot under the lock, sample outside it to keep the section tight.
             KeyValuePair<string, Entry>[] snapshot;
             lock (_gate)
             {
@@ -149,10 +126,7 @@ namespace PlayScopeSdk.Internal
                 var opId = snapshot[i].Key;
                 var entry = snapshot[i].Value;
                 if (entry.Op == null) continue;
-                // Stop sampling once the AsyncOperation has finished. Without
-                // this latch the per-frame tick keeps appending the final
-                // sample value forever (until DrainSamples is called) and
-                // wastes CPU on the head/middle-drop loop in AppendSample.
+                // Latch stops re-appending the final value forever after the op finishes.
                 if (entry.OpDone) continue;
                 if (now - entry.LastSampleTime < SampleIntervalSec) continue;
 
@@ -165,9 +139,7 @@ namespace PlayScopeSdk.Internal
                 }
                 catch
                 {
-                    // AsyncOperation is a plain managed object so this is the
-                    // rare case where the underlying native op got disposed
-                    // out from under us. Stop sampling this entry.
+                    // Native op disposed out from under us — stop sampling this entry.
                     lock (_gate)
                     {
                         if (_entries.TryGetValue(opId, out var live)) live.OpDone = true;
@@ -175,11 +147,9 @@ namespace PlayScopeSdk.Internal
                     continue;
                 }
 
-                // All state mutation goes inside the lock — re-resolve the
-                // entry by key so a concurrent DrainSamples/Begin that
-                // replaced or removed it doesn't get its data appended-to
-                // here. Without this, samples can leak into an orphaned
-                // Entry the caller has already drained from.
+                // Re-resolve by key inside the lock so a concurrent
+                // DrainSamples/Begin that replaced/removed it doesn't get
+                // samples leaked into an already-drained Entry.
                 lock (_gate)
                 {
                     if (!_entries.TryGetValue(opId, out var live)) continue;
@@ -196,22 +166,15 @@ namespace PlayScopeSdk.Internal
         {
             if (entry.Samples.Count >= MaxSamples)
             {
-                // Reservoir-style "drop the middle" to keep the head (boot
-                // ramp) and tail (final jump) of the load visible even on
-                // exotic long loads. We drop the median index so the kept
-                // samples remain ordered.
+                // Drop the median (keeps head ramp + tail jump visible, order intact).
                 entry.Samples.RemoveAt(entry.Samples.Count / 2);
             }
-            // Clamp + round to a stable 0..1 range. Unity sometimes reports
-            // 0.9f for the "ready to activate" plateau which we want to keep
-            // visible rather than mask as 1.0.
+            // Clamp to 0..1. Keep Unity's 0.9f "ready to activate" plateau, don't mask it as 1.0.
             entry.Samples.Add(Mathf.Clamp01(progress));
         }
 
-        // _gate must be held by the caller. Evicts the oldest entry (by
-        // insertion order — Dictionary in .NET Core preserves insertion order
-        // for enumeration in practice; we don't rely on a precise LRU since
-        // this is a fallback for a leak, not a hot path).
+        // _gate held by caller. Evicts the oldest-ish entry — not a precise LRU,
+        // this is a leak fallback, not a hot path.
         private static void EvictIfFull_NoLock()
         {
             if (_entries.Count < MaxEntries) return;

@@ -5,64 +5,35 @@ using System.Text.RegularExpressions;
 namespace PlayScopeSdk.Internal
 {
     /// <summary>
-    /// Value-level PII detection — complements <see cref="SensitiveKeyFilter"/>
-    /// which only filters by key name. Catches the case where a developer puts
-    /// PII inside a value of an innocent-looking key (e.g. an exception message
-    /// quoting the user's email, a log line including a JWT in a URL).
-    ///
-    /// <para>
-    /// Strategy is masking, not dropping. If a value matches one of the
-    /// patterns below, the matched substring is replaced with a placeholder
-    /// like <c>[redacted-email]</c> in-line — the surrounding context survives
-    /// so reviewers can still see the shape of the message. Dropping the whole
-    /// value would lose far more information than necessary.
-    /// </para>
-    ///
-    /// <para>
-    /// Patterns are intentionally conservative — overly aggressive matching
-    /// will eat legitimate product analytics (a <c>purchase_amount: 4242424242</c>
-    /// must NOT be mistaken for a credit card). The order matters: the more
-    /// specific patterns (JWT, bearer tokens) run before generic ones (long
-    /// digit runs) so a JWT isn't half-matched as a "long string of base64
-    /// junk".
-    /// </para>
-    ///
-    /// <para>
-    /// Performance: regexes are compiled and shared statically, so the per-
-    /// value cost on the metadata pipeline is a handful of Regex.Replace calls
-    /// on what's typically a short string. Not a hot path — events are
-    /// pipelined, not on the render loop.
-    /// </para>
+    /// Value-level PII detection complementing <see cref="SensitiveKeyFilter"/>
+    /// (key-name only) — catches PII in a value under an innocent key (an email
+    /// in an exception message, a JWT in a logged URL). Masks in-line with
+    /// placeholders like <c>[redacted-email]</c> rather than dropping, so context
+    /// survives. Patterns are conservative (a <c>purchase_amount: 4242424242</c>
+    /// must NOT match a card) and ordered specific-first (JWT/bearer before long
+    /// digit runs). Static compiled regexes; not a hot path.
     /// </summary>
     internal static class PiiValueScanner
     {
-        // RFC 5321 simplified — local-part allows letters/digits/dots/+/-/_,
-        // domain requires at least one dot. Word-boundary anchors prevent
-        // matching mid-token. We intentionally don't try to be RFC-correct
-        // (the real RFC accepts quoted strings, IP-literal domains, etc.) —
-        // missing some exotic forms is fine, false-positives on common ids
-        // are not.
+        // Simplified, not RFC-correct — missing exotic forms is fine,
+        // false-positives on common ids are not.
         private static readonly Regex EmailRx = new Regex(
             @"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        // JWT — three base64url segments separated by dots. The first segment
-        // must start with `eyJ` (base64 of `{"`) which gives us a cheap and
-        // very specific anchor; without it any "foo.bar.baz" matches.
+        // JWT — three base64url segments. First must start `eyJ` (base64 of `{"`),
+        // a specific anchor; without it any "foo.bar.baz" matches.
         private static readonly Regex JwtRx = new Regex(
             @"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        // Bearer / Basic auth headers — case-insensitive prefix + token chars.
-        // Captures whole "Bearer xyz" so the redaction reads naturally.
+        // Bearer / Basic auth headers — captures the whole "Bearer xyz" for natural redaction.
         private static readonly Regex AuthHeaderRx = new Regex(
             @"\b(Bearer|Basic|Token)\s+[A-Za-z0-9._\-=+/]+",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-        // Well-known cloud / service token prefixes. These have NO real chance
-        // of false positive — if someone's value starts with `ghp_` or
-        // `sk_live_`, it's a token. Catches them even when used outside an
-        // auth header. Update this list as new patterns become widely-used.
+        // Well-known token prefixes — ~no false-positive chance. Catches tokens
+        // used outside an auth header. Extend as new patterns spread.
         private static readonly Regex KnownTokenPrefixRx = new Regex(
             @"\b(" +
                 @"ghp|gho|ghu|ghs|ghr" +       // GitHub tokens
@@ -73,34 +44,24 @@ namespace PlayScopeSdk.Internal
                 @")_[A-Za-z0-9]{16,}\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        // Credit card — 13-19 digits, optionally separated by spaces or
-        // hyphens. We run a Luhn check on the digits-only form to suppress
-        // the false-positive avalanche (transaction IDs, sequence numbers,
-        // any long integer). Pattern uses non-capturing group to keep the
-        // replacement readable.
+        // Credit card — 13-19 digits with optional space/hyphen separators.
+        // Luhn-gated (see MaskString) to suppress the long-integer false-positive avalanche.
         private static readonly Regex CreditCardCandidateRx = new Regex(
             @"\b(?:\d[ \-]?){13,19}\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        // International phone numbers — `+` country code prefix + 7-15 digits
-        // with optional separators. The leading `+` anchor cuts out most
-        // false positives; bare "555-1234" style numbers are deliberately
-        // NOT matched because they collide with version strings, ticket IDs,
-        // etc. too easily.
+        // International phone — leading `+` anchor cuts false positives. Bare
+        // "555-1234" forms NOT matched (collide with versions / ticket IDs).
         private static readonly Regex PhoneRx = new Regex(
             @"\+\d[\d \-().]{6,18}\d",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        // IPv4 — four dot-separated octets, each 0-255. We don't redact
-        // private-range addresses (127., 10., 192.168., 172.16-31.) because
-        // those are usually telemetry-side debug info, not user PII.
+        // IPv4 — private ranges (127./10./192.168./172.16-31.) NOT redacted; they're debug info, not PII.
         private static readonly Regex Ipv4Rx = new Regex(
             @"\b(?<o1>\d{1,3})\.(?<o2>\d{1,3})\.(?<o3>\d{1,3})\.(?<o4>\d{1,3})\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        // Per-process emit-once guards. The first time a value is masked we
-        // log a single warning so the integrator knows the filter triggered;
-        // we don't want one per value or the console floods on a chatty log.
+        // Warn once per session on first mask — per-value would flood a chatty log.
         private static int _warningEmitted;
 
         /// <summary>
@@ -114,19 +75,13 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Returns the input string with any detected PII substrings replaced
-        /// by category placeholders. Null/empty input returns input unchanged.
-        /// The output is reference-equal to the input when nothing matched —
-        /// callers can use that as a "did anything get scrubbed?" check
-        /// without an extra flag.
+        /// Returns the input with detected PII substrings replaced by category
+        /// placeholders; reference-equal to the input when nothing matched.
         /// </summary>
         internal static string MaskString(string value)
         {
             if (string.IsNullOrEmpty(value)) return value;
-            // Cheap fast-path: most strings have neither `@` nor `eyJ` nor a
-            // leading `+` digit nor a 13+ digit run. Skip the regex storm
-            // when none of the anchors are present. This is a 100ns check
-            // vs a ~10µs regex sweep — pays for itself across every event.
+            // Fast-path: skip the ~10µs regex sweep when no anchor char is present (~100ns).
             if (!MightContainPii(value)) return value;
 
             string original = value;
@@ -138,9 +93,7 @@ namespace PlayScopeSdk.Internal
             result = KnownTokenPrefixRx.Replace(result, "[redacted-token]");
             result = EmailRx.Replace(result, "[redacted-email]");
 
-            // Credit card needs a Luhn gate to avoid eating every long
-            // integer. We use a MatchEvaluator that runs Luhn on the digits-
-            // only form and only replaces on a Luhn-valid match.
+            // Luhn gate so we don't eat every long integer.
             result = CreditCardCandidateRx.Replace(result, m =>
                 IsLuhnValid(StripNonDigits(m.Value))
                     ? "[redacted-card]"
@@ -171,10 +124,9 @@ namespace PlayScopeSdk.Internal
             if (value is IReadOnlyDictionary<string, object> dict)
             {
                 var output = new Dictionary<string, object>(dict.Count);
+                // Keys aren't re-checked — SensitiveKeyFilter does that, before us.
                 foreach (var kv in dict)
                 {
-                    // Note: we don't re-check the KEY here — that's
-                    // SensitiveKeyFilter's job and it runs before us.
                     output[kv.Key] = MaskValueDeep(kv.Value);
                 }
                 return output;
@@ -199,9 +151,7 @@ namespace PlayScopeSdk.Internal
 
         // ── Helpers ──────────────────────────────────────────────────────
 
-        // 100-nanosecond filter — bail out before touching the regex engine.
-        // Each char-class check is a single byte comparison; the whole pass
-        // is one branch-prediction-friendly loop.
+        // Cheap single-pass anchor scan — bail before touching the regex engine.
         private static bool MightContainPii(string s)
         {
             for (int i = 0; i < s.Length; i++)
@@ -211,12 +161,7 @@ namespace PlayScopeSdk.Internal
                 if (c == '@') return true;
                 // Phone anchor (+ followed by digit)
                 if (c == '+' && i + 1 < s.Length && char.IsDigit(s[i + 1])) return true;
-                // Digit — only worth firing the regex when we've seen
-                // a substantial digit run (≥10) for card / phone, or
-                // a dotted ipv4 pattern.
-                // Cheap heuristic: if there's any digit, let the regex
-                // pass decide. Filtering more aggressively here would
-                // duplicate the regex engine's job.
+                // Any digit — let the regex decide (card / phone / ipv4).
                 if (c >= '0' && c <= '9') return true;
                 // JWT anchor — eyJ at start of a token.
                 if (c == 'e' && i + 2 < s.Length && s[i + 1] == 'y' && s[i + 2] == 'J')
@@ -231,8 +176,7 @@ namespace PlayScopeSdk.Internal
             return false;
         }
 
-        // Standard Luhn — sum digits with every-other digit doubled (and >9
-        // wrapped). Result mod 10 == 0 for valid card numbers.
+        // Standard Luhn checksum.
         private static bool IsLuhnValid(string digitsOnly)
         {
             if (digitsOnly == null || digitsOnly.Length < 13 || digitsOnly.Length > 19) return false;

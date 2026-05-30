@@ -4,17 +4,14 @@ using PlayScopeSdk.Internal;
 namespace PlayScopeSdk
 {
     /// <summary>
-    /// Helpers for building the canonical ad-impression metadata dictionaries
-    /// the dashboard's /revenue and /errors renderers surface as first-class
-    /// fields. Structural mirror of <see cref="PurchaseMetadata"/> — the
-    /// underlying <see cref="PlayScope.StartAd"/> / <see cref="PlayScope.EndAd"/>
-    /// API still takes an opaque <c>IReadOnlyDictionary&lt;string, object&gt;</c>,
-    /// so these helpers are additive: call them to get a dict with the right
-    /// key names rather than typing them by hand.
+    /// Helpers for the canonical ad-impression metadata the dashboard's /revenue
+    /// and /errors renderers surface as first-class fields. Mirror of
+    /// <see cref="PurchaseMetadata"/> — additive over the opaque-dict
+    /// <see cref="PlayScope.StartAd"/> / <see cref="PlayScope.EndAd"/> API.
     ///
     /// <para>
-    /// Field schema (must stay in lockstep with web's revenue/errors renderers
-    /// and the backend allow-list):
+    /// Field schema (keep in lockstep with web's revenue/errors renderers and the
+    /// backend allow-list):
     /// </para>
     /// <list type="bullet">
     /// <item><c>network</c>: ad network identifier — see <see cref="Network"/>.</item>

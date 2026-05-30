@@ -5,25 +5,21 @@ namespace PlayScopeSdk
 {
     /// <summary>
     /// Configuration passed to <see cref="PlayScope.Initialize(PlayScopeContext)"/>.
-    /// In the typical flow you don't construct this yourself — call the
-    /// parameterless <see cref="PlayScope.Initialize()"/> overload and the
-    /// SDK builds a <c>PlayScopeContext</c> from your project's
-    /// <see cref="PlayScopeSettings"/> ScriptableObject (Resources‑loaded).
+    /// Usually you don't construct this — the parameterless
+    /// <see cref="PlayScope.Initialize()"/> builds it from your
+    /// <see cref="PlayScopeSettings"/> ScriptableObject.
     /// </summary>
     public sealed class PlayScopeContext
     {
         /// <summary>
         /// Required. SDK key from the PlayScope dashboard (ps_live_...).
-        /// If null or empty, SDK enters disabled state — all calls become
-        /// no-ops. Renamed from <c>ApiKey</c> for parity with the dashboard
-        /// terminology; <c>ApiKey</c> remains as an obsolete alias.
+        /// If null or empty, the SDK enters disabled state — all calls no-op.
         /// </summary>
         public string SdkKey { get; set; }
 
         /// <summary>
-        /// Obsolete: use <see cref="SdkKey"/>. Kept as a setter/getter
-        /// pass-through so existing <c>new PlayScopeContext { ApiKey = "…" }</c>
-        /// initialisers keep compiling. Will be removed in a future major.
+        /// Obsolete: use <see cref="SdkKey"/>. Pass-through alias so existing
+        /// <c>new PlayScopeContext { ApiKey = "…" }</c> initialisers keep compiling.
         /// </summary>
         [Obsolete("Renamed to SdkKey. The old name remains as an alias for back-compat.")]
         public string ApiKey
@@ -56,40 +52,30 @@ namespace PlayScopeSdk
 
         /// <summary>
         /// Enable the ANR (Application Not Responding) watchdog. Default true.
-        /// When the main thread stops responding (e.g. blocked Update, sync
-        /// asset load, deadlocked native call) for longer than
-        /// <see cref="AnrThresholdMs"/>, the SDK emits an <c>anr</c> event;
-        /// on recovery it emits <c>anr_recovered</c> with the total stuck
-        /// duration. The watchdog auto-disables in the Unity Editor — see
-        /// the comment on AnrThresholdMs.
+        /// When the main thread stalls longer than <see cref="AnrThresholdMs"/>,
+        /// the SDK emits an <c>anr</c> event; on recovery, <c>anr_recovered</c>
+        /// with the total stuck duration. Auto-disabled in the Unity Editor.
         /// </summary>
         public bool AnrDetectionEnabled { get; set; } = true;
 
         /// <summary>
-        /// Threshold in milliseconds before a main-thread stall is reported
-        /// as an ANR. Default 2000 ms. Tune up to 5000 ms to match Android's
-        /// OS-level ANR threshold (less noise on GC spikes); tune down to
-        /// 1000 ms on hard-60-fps games where any visible hitch is critical.
-        /// Ignored when <see cref="AnrDetectionEnabled"/> is false or when
-        /// running in the Unity Editor (false positives from breakpoints).
+        /// Threshold in milliseconds before a main-thread stall is reported as
+        /// an ANR. Default 2000 ms. Tune up to 5000 ms to match Android's OS-level
+        /// threshold (less GC-spike noise); down to 1000 ms on hard-60-fps games.
+        /// Ignored when <see cref="AnrDetectionEnabled"/> is false or in the
+        /// Editor (breakpoints cause false positives).
         /// </summary>
         public int AnrThresholdMs { get; set; } = 2000;
 
         /// <summary>
         /// Enables value-level PII regex masking on metadata and state values
         /// (in addition to the always-on key-name filter). When true, string
-        /// values are scanned for emails, JWTs, bearer/basic tokens,
-        /// well-known service tokens (GitHub/Stripe/Slack/AWS), Luhn-valid
-        /// credit-card numbers, international phone numbers, and public
-        /// IPv4 addresses. Matches are replaced in-line with placeholders
-        /// like <c>[redacted-email]</c> — surrounding context is preserved.
-        ///
-        /// <para>
-        /// Default true. Disable only if your game absolutely needs raw
-        /// values to flow through (e.g. you're testing the masks themselves
-        /// in CI). Disabling exposes you to GDPR / CCPA risk if user data
-        /// ends up in metadata accidentally.
-        /// </para>
+        /// values are scanned for emails, JWTs, bearer/basic tokens, well-known
+        /// service tokens (GitHub/Stripe/Slack/AWS), Luhn-valid credit cards,
+        /// international phone numbers, and public IPv4 addresses; matches are
+        /// replaced in-line with placeholders like <c>[redacted-email]</c>.
+        /// Default true. Disabling exposes you to GDPR / CCPA risk if user data
+        /// accidentally ends up in metadata.
         /// </summary>
         public bool PiiValueMasksEnabled { get; set; } = true;
     }

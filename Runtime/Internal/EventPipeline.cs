@@ -20,20 +20,12 @@ namespace PlayScopeSdk.Internal
         internal const int MaxStatePatchKeys = 64;
 
         private readonly EventQueue _queue;
-        // Read on the writer worker thread, written from any thread that
-        // calls SetScreen / SetAction (typically Unity main-thread, but
-        // wrapper code may call from coroutines or background tasks). Plain
-        // reference assignment is atomic in .NET but there's no memory
-        // barrier — a write here can be invisible to the writer for several
-        // hundred ms, producing events tagged with the previous screen.
-        // Volatile fields force the necessary ordering.
+        // Volatile: written by SetScreen/SetAction (any thread), read on the
+        // writer thread. Without the barrier a write can stay invisible for
+        // hundreds of ms, tagging events with the previous screen.
         private volatile string _currentScreen = "";
         private volatile string _currentAction = "";
-        // Optional dedup buffer for absorbable log levels (debug/info/warning).
-        // Wired in by PlayScopeRuntime after construction so the pipeline stays
-        // usable in tests without the buffer present. When null, every log
-        // record goes straight to the queue — the dedup feature is purely an
-        // additive optimisation, never a correctness requirement.
+        // Optional — null = every log goes straight to the queue (dedup is purely additive).
         private LogDedupBuffer? _logDedup;
 
         internal EventPipeline(EventQueue queue) => _queue = queue;
@@ -46,24 +38,13 @@ namespace PlayScopeSdk.Internal
         internal void EnqueueEvent(string eventType, string? operationId = null, string? operationType = null,
             string? metadataJson = null, string? statePatchJson = null)
         {
-            // Pipeline write gate — flipped to false during the rotation
-            // race window so memory_warning / wrapper operation_start /
-            // anything else firing between OnApplicationPause(false) and
-            // PerformRotation can't stamp itself into the doomed old
-            // session. Silently drop — caller doesn't care; the matching
-            // session_end (with the backdated timestamp) closes the old
-            // session cleanly and the new session is about to open. The
-            // gate is closed for ~1 frame at most.
+            // Write gate — closed (~1 frame) during the rotation race window so
+            // nothing stamps itself into the doomed old session. Silent drop.
             if (!PlayScopeRuntime._acceptingEvents) return;
 
-            // Enforce metadata size cap (spec: 4 KB). Oversized metadata
-            // used to drop the entire event — losing the signal that the
-            // event happened at all (and its sequence_num / screen /
-            // action / operation_id context). Replace with a tiny
-            // truncation sentinel so the event still lands; the dashboard
-            // can render a "metadata truncated" badge by reading
-            // _playscope.metadata_truncated. Sentinel is ~70 bytes and
-            // trivially fits the cap.
+            // Oversized metadata: emit a small truncation sentinel instead of
+            // dropping the whole event, so sequence_num / screen / action /
+            // operation_id context survives and the dashboard can badge it.
             if (!string.IsNullOrEmpty(metadataJson))
             {
                 int originalSize = Encoding.UTF8.GetByteCount(metadataJson);
@@ -78,8 +59,7 @@ namespace PlayScopeSdk.Internal
                 }
             }
 
-            // Enforce state_patch size + key-count cap (spec: 8 KB, 64 keys). On violation we
-            // drop the state_patch but still emit the event so the rest of the signal is intact.
+            // state_patch cap (8 KB, 64 keys): on violation drop the patch but still emit the event.
             if (!string.IsNullOrEmpty(statePatchJson))
             {
                 int patchBytes = Encoding.UTF8.GetByteCount(statePatchJson);
@@ -117,16 +97,11 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Counts top-level JSON keys in a flat object literal. Naïve scanner — only counts
-        /// quoted keys followed by ':' at brace-depth 1. Good enough for the size guard: it
-        /// will not over-count nested object keys.
+        /// Counts DISTINCT top-level keys at brace-depth 1. Distinct because the
+        /// server parser dedupes last-write-wins, so `{"a":1,...,"a":70}` caps as 1.
         /// </summary>
         internal static int CountTopLevelJsonKeys(string json)
         {
-            // Counts DISTINCT top-level keys. A caller passing
-            // `{"a":1,"a":2,"a":3,...,"a":70}` shouldn't get 70 — System.Text.Json
-            // and the server JSON parser both dedupe last-write-wins, so the
-            // effective key count for cap purposes is 1.
             if (string.IsNullOrEmpty(json)) return 0;
             int depth = 0;
             var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -145,9 +120,7 @@ namespace PlayScopeSdk.Internal
                         inString = false;
                         if (depth == 1 && keyStringStart >= 0)
                         {
-                            // Capture the key substring (between the opening "
-                            // and the closing " — note keyStringStart points
-                            // to char AFTER the opening quote).
+                            // keyStringStart points to the char after the opening quote.
                             lastTopLevelKey = json.Substring(keyStringStart, i - keyStringStart);
                             keyJustClosed = true;
                         }
@@ -186,20 +159,12 @@ namespace PlayScopeSdk.Internal
 
         internal void EnqueueLog(string level, string message, string? stackTrace = null, string? metadataJson = null)
         {
-            // Pipeline write gate (see comment in EnqueueEvent). Drops
-            // every log level — including error/exception — during the
-            // rotation window. That's intentional: anything happening in
-            // that ~1-frame window is "about to be in the new session"
-            // already; dropping it keeps the doomed old session free of
-            // post-mortem noise.
+            // Write gate (see EnqueueEvent) — drops even error/exception during
+            // the rotation window; they belong to the about-to-open new session.
             if (!PlayScopeRuntime._acceptingEvents) return;
 
-            // Truncate per spec: message 2048, stack_trace 8192.
-            // Substring cuts on char index; a slice at a UTF-16 high-surrogate
-            // boundary leaves an unpaired surrogate which System.Text.Json
-            // (and most strict JSON parsers) reject. Back the cut up to the
-            // last full code point before the limit so the JSON line is
-            // always valid.
+            // Truncate (message 2048, stack 8192) — surrogate-safe so a cut at a
+            // UTF-16 boundary can't leave an unpaired surrogate that breaks the JSON.
             if (message.Length > 2048) message = SafeTruncate(message, 2048) + "...[truncated]";
             if (stackTrace != null && stackTrace.Length > 8192)
                 stackTrace = SafeTruncate(stackTrace, 8192) + "...[truncated]";
@@ -217,14 +182,9 @@ namespace PlayScopeSdk.Internal
                 MetadataJson = metadataJson,
                 IsCritical = CriticalRecords.IsLogCritical(level)
             };
-            // Critical levels (error / exception) bypass dedup entirely —
-            // every error matters individually and we never want to delay
-            // its arrival by the 5 s dedup window. Records with a stack
-            // trace also bypass: dedup keys on (level, message) only, so
-            // collapsing two records with different stacks into one would
-            // lose information. Everything else (debug/info/warning) is
-            // offered to the buffer, which either absorbs the record as a
-            // repeat or holds it as the first-of-key sample.
+            // Criticals bypass dedup (no 5 s delay). Stack-trace records also
+            // bypass: dedup keys on (level, message) only, so collapsing two
+            // different stacks would lose information.
             if (_logDedup != null && !r.IsCritical && string.IsNullOrEmpty(stackTrace))
             {
                 _logDedup.Add(r);
@@ -238,13 +198,9 @@ namespace PlayScopeSdk.Internal
             // Pipeline write gate (see comment in EnqueueEvent).
             if (!PlayScopeRuntime._acceptingEvents) return;
 
-            // Drop NaN / ±Infinity at the door. The backend's MetricRecord
-            // DTO is non-nullable `double` and System.Text.Json refuses to
-            // deserialize JSON `null` into it → the whole envelope is
-            // rejected as invalid_body and the SDK retries forever until
-            // dead-letter. One bad value (e.g. accidental div-by-zero in a
-            // metric callback) used to kill ~10 000 events + ~5 000 logs.
-            // Safer to silently drop the metric than to torpedo the batch.
+            // Drop NaN / ±Infinity here — the backend's non-nullable double DTO
+            // rejects JSON null, failing the whole envelope (one bad value once
+            // killed ~10k events). Safer to drop the one metric than the batch.
             if (!double.IsFinite(value))
             {
                 PlayScopeLog.Warning(
@@ -262,15 +218,9 @@ namespace PlayScopeSdk.Internal
             _queue.Enqueue(r);
         }
 
-        // Hand-rolled JSON producer for the SDK's metadata / state-patch
-        // payloads. RFC 8259 compliant for the inputs we accept:
-        //   - keys and string values are fully escaped (including the C0
-        //     control range  .., which strict parsers reject)
-        //   - non-finite doubles (NaN / Infinity) collapse to JSON null
-        //     rather than the invalid literals NaN/Infinity that some
-        //     parsers reject and others silently treat as undefined
-        //   - dict graph depth is bounded; cyclic refs surface as "null"
-        //     instead of running off the stack (uncatchable SOE in Unity)
+        // Hand-rolled RFC 8259 JSON producer for metadata / state-patch payloads:
+        // full C0-control escaping, non-finite doubles → null, depth-bounded so a
+        // cyclic graph surfaces as "null" instead of an uncatchable Unity SOE.
         internal const int MaxJsonDepth = 16;
 
         internal static string DictToJson(IReadOnlyDictionary<string, object> dict)
@@ -303,20 +253,15 @@ namespace PlayScopeSdk.Internal
                 AppendEscapedString(sb, s);
                 return sb.ToString();
             }
-            // Integer types — straightforward invariant-culture conversion.
             if (v is int or long or short or sbyte or uint or ulong or ushort or byte)
                 return Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
-            // Floating-point — reject NaN / Infinity which aren't valid JSON
-            // literals. A single bad sample (div-by-zero, Mathf.Infinity)
-            // would otherwise corrupt an entire envelope and the backend
-            // would dead-letter all events in the batch.
+            // Reject NaN / Infinity → null; one bad sample would dead-letter the batch.
             if (v is float f)
                 return float.IsFinite(f) ? Convert.ToString(f, System.Globalization.CultureInfo.InvariantCulture) : "null";
             if (v is double d2)
                 return double.IsFinite(d2) ? Convert.ToString(d2, System.Globalization.CultureInfo.InvariantCulture) : "null";
             if (v is decimal dec) return Convert.ToString(dec, System.Globalization.CultureInfo.InvariantCulture);
-            // Recursive containers — depth-bounded so cyclic graphs can't SOE.
-            if (depth >= MaxJsonDepth) return "null";
+            if (depth >= MaxJsonDepth) return "null"; // depth-bounded vs cyclic-graph SOE
             if (v is IReadOnlyDictionary<string, object> d) return DictToJson(d, depth);
             if (v is Dictionary<string, object> dd) return DictToJson(dd, depth);
             if (v is System.Collections.IList list)
@@ -332,24 +277,15 @@ namespace PlayScopeSdk.Internal
                 sb2.Append(']');
                 return sb2.ToString();
             }
-            // Fallback: ToString() then escape. Same path the old code took,
-            // now safe against unusual chars in the resulting string.
+            // Fallback: ToString() then escape (safe against unusual chars).
             var sbF = new StringBuilder();
             AppendEscapedString(sbF, v.ToString() ?? "");
             return sbF.ToString();
         }
 
         /// <summary>
-        /// Appends <paramref name="s"/> as a properly-escaped JSON string
-        /// (including the leading/trailing quote chars). Handles backslash,
-        /// quote, the four named whitespace escapes, AND every C0 control
-        /// character via \u00XX so the output passes strict RFC 8259
-        /// parsers. Shared by key and value paths.
-        /// </summary>
-        /// <summary>
         /// Truncates to at most <paramref name="maxChars"/> chars without
-        /// landing in the middle of a UTF-16 surrogate pair. If the char at
-        /// position <c>maxChars-1</c> is a high surrogate, back up by one.
+        /// splitting a UTF-16 surrogate pair.
         /// </summary>
         private static string SafeTruncate(string s, int maxChars)
         {
@@ -359,6 +295,7 @@ namespace PlayScopeSdk.Internal
             return s.Substring(0, cut);
         }
 
+        // Appends s as a quoted, RFC 8259-escaped JSON string (C0 controls via \u00XX). Shared by key + value paths.
         internal static void AppendEscapedString(StringBuilder sb, string s)
         {
             sb.Append('"');

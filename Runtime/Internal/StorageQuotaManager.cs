@@ -14,9 +14,7 @@ namespace PlayScopeSdk.Internal
         private const long DefaultCapBytes = 50L * 1024 * 1024;   // 50 MB
         private const long HardCapBytes    = 100L * 1024 * 1024;  // 100 MB
 
-        // ── Cached storage size (issue #16) ───────────────────────────────────────
-        // Avoid rescanning the whole tree on every flush. We track running total via
-        // append/delete notifications and re-baseline every 60 seconds for drift.
+        // Avoid rescanning the tree every flush: track a running total and re-baseline every 60 s.
         private static readonly object _sizeLock = new object();
         private static long _cachedTotalBytes = -1;            // -1 == uninitialised
         private static DateTime _lastFullScanUtc = DateTime.MinValue;
@@ -36,13 +34,11 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Called by WriterWorker when a chunk is finalized (renamed). The byte count
-        /// is unchanged but the file count changes — included for future use.
+        /// Called by WriterWorker when a chunk is finalized. No-op for byte accounting
+        /// (a rename keeps the bytes) — kept as a hook for future callers.
         /// </summary>
         internal static void NotifyChunkFinalized(string finalizedPath)
         {
-            // Currently a no-op for byte accounting (rename keeps the bytes), but kept as
-            // a hook so callers don't need to change later.
             _ = finalizedPath;
         }
 
@@ -316,15 +312,9 @@ namespace PlayScopeSdk.Internal
             var dir = PlayScopeDirectory.UploadQueue;
             if (!Directory.Exists(dir)) return;
 
-            // Gather retryable (is_uploaded: false) chunks, oldest-first.
-            // Bug H8: previously we only checked the is_uploaded flag. A
-            // chunk that had failed retry once and was sitting in its backoff
-            // window (state.next_retry_at > now) was still eligible for
-            // deletion — quota pressure could silently drop a chunk the
-            // uploader was about to retry, and no server-side trace was
-            // ever produced. Now we also skip chunks whose next_retry_at is
-            // in the future: they have a pending retry slot and must not be
-            // pruned out from under it.
+            // Retryable (is_uploaded=false) chunks, oldest-first — but skip any
+            // mid-backoff (next_retry_at > now), else quota pressure silently drops
+            // a chunk the uploader is about to retry, with no server-side trace.
             var candidates = new List<(string chunkPath, string stateFile, DateTime lastWrite)>();
             var now = DateTime.UtcNow;
             try
@@ -339,9 +329,6 @@ namespace PlayScopeSdk.Internal
                         // Only retryable (is_uploaded == false)
                         if (dict.TryGetValue("is_uploaded", out var iu) && iu is true) continue;
 
-                        // Skip chunks that are mid-backoff with a future
-                        // next_retry_at — the uploader is going to retry
-                        // them on the next pass and they must not vanish.
                         if (dict.TryGetValue("next_retry_at", out var nra) && nra is string nraStr &&
                             DateTime.TryParse(nraStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var nraDt) &&
                             nraDt > now)
