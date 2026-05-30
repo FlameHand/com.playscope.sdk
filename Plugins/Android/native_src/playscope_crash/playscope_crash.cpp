@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dlfcn.h>
+#include <link.h>      // dl_iterate_phdr, dl_phdr_info, ElfW, PT_LOAD
 #include <stdio.h>     // rename(2) prototype
 #include <string.h>
 #include <stdint.h>
@@ -321,6 +322,63 @@ namespace
 #endif
     }
 
+    // Resolve a runtime pc to (module path, ELF-vaddr offset).
+    //
+    // We must NOT use dladdr for the offset. dladdr's dli_fbase is the base of
+    // the *mapping*, which on Android with extractNativeLibs=false (the modern
+    // default — libs mmap'd straight from the APK) is the shared APK mapping,
+    // not the individual library. So `pc - dli_fbase` comes out wildly inflated
+    // for app libs (libunity / libil2cpp) — observed ~1.05 GB offsets into a
+    // 78 MB .so — and llvm-symbolizer can't resolve a thing.
+    //
+    // dl_iterate_phdr walks every loaded object and exposes its true load bias
+    // (dlpi_addr); `pc - dlpi_addr` is the ELF virtual address the symbolizer
+    // expects. Same loader-lock posture as the dladdr call it replaces (both
+    // take the linker lock), so this adds no new async-signal-safety risk.
+    struct ModuleLookup
+    {
+        uintptr_t pc;
+        uintptr_t base;     // dlpi_addr of the containing object
+        const char* name;   // dlpi_name (linker-owned, stable for process life)
+        bool found;
+    };
+
+    int module_lookup_cb(struct dl_phdr_info* info, size_t /*size*/, void* data)
+    {
+        ModuleLookup* m = static_cast<ModuleLookup*>(data);
+        for (int i = 0; i < info->dlpi_phnum; ++i)
+        {
+            const ElfW(Phdr)* ph = &info->dlpi_phdr[i];
+            if (ph->p_type != PT_LOAD)
+            {
+                continue;
+            }
+            uintptr_t seg_start = static_cast<uintptr_t>(info->dlpi_addr) + ph->p_vaddr;
+            uintptr_t seg_end = seg_start + ph->p_memsz;
+            if (m->pc >= seg_start && m->pc < seg_end)
+            {
+                m->base = static_cast<uintptr_t>(info->dlpi_addr);
+                m->name = info->dlpi_name;
+                m->found = true;
+                return 1; // stop iteration — found the containing object
+            }
+        }
+        return 0;
+    }
+
+    bool resolve_frame(uintptr_t pc, const char** module, uint64_t* offset)
+    {
+        ModuleLookup m = { pc, 0, nullptr, false };
+        dl_iterate_phdr(module_lookup_cb, &m);
+        if (!m.found)
+        {
+            return false;
+        }
+        *module = (m.name != nullptr) ? m.name : "";
+        *offset = static_cast<uint64_t>(pc) - m.base;
+        return true;
+    }
+
     // -------- file write --------
 
     // Build "{crash_dir}/{session_id}.json[.tmp]" into out. Returns false
@@ -480,13 +538,20 @@ namespace
                 append(g_scratch, SCRATCH_SIZE, &pos, ",");
             }
             uintptr_t pc = g_frames[i];
-            Dl_info info;
             const char* module = "";
             uint64_t offset = 0;
-            if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fname != nullptr)
+            if (!resolve_frame(pc, &module, &offset))
             {
-                module = info.dli_fname;
-                offset = static_cast<uint64_t>(pc) - reinterpret_cast<uintptr_t>(info.dli_fbase);
+                // No PT_LOAD covered pc (anon/JIT mapping, or a lib mid-unload).
+                // Fall back to dladdr — its dli_fbase is the mapping base so the
+                // offset is less accurate for APK-packed libs, but a labelled
+                // frame still beats dropping it.
+                Dl_info info;
+                if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fname != nullptr)
+                {
+                    module = info.dli_fname;
+                    offset = static_cast<uint64_t>(pc) - reinterpret_cast<uintptr_t>(info.dli_fbase);
+                }
             }
             append(g_scratch, SCRATCH_SIZE, &pos, "{\"pc\":");
             append_hex_quoted(g_scratch, SCRATCH_SIZE, &pos, static_cast<uint64_t>(pc));
