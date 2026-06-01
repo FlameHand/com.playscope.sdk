@@ -434,10 +434,13 @@ namespace PlayScopeSdk.Internal
                 env = isEditor ? "editor" : (isDevelopmentBuild ? "development" : "production");
             }
 
+            var buildInfo = PlayScopeBuildInfo.Load();
             var sessionMeta = new System.Collections.Generic.Dictionary<string, object>
             {
                 ["app_version"] = UnityEngine.Application.version,
                 ["build_number"] = ResolveBuildNumber(context),
+                ["build_commit"] = buildInfo != null ? (buildInfo.BuildCommit ?? "") : "",
+                ["build_branch"] = buildInfo != null ? (buildInfo.BuildBranch ?? "") : "",
                 ["environment"] = env,
                 ["is_editor"] = isEditor,
                 ["is_development_build"] = isDevelopmentBuild,
