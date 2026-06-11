@@ -164,12 +164,18 @@ namespace PlayScopeSdk.Internal
                     if (state == null) continue;
                     if (state.IsUploaded) continue;
 
+                    var chunk = ChunkPathFromStateFile(stateFile, state);
+
                     // Ownership check: a PRIOR session's leftover state file must not
                     // pull its chunk into THIS session's loop, or it uploads under our
                     // envelope and commingles sessions. Non-matching prefix → drop the
                     // state file (stop re-checking); the chunk stays for SessionRecovery.
+                    // Completed-session chunks are EXEMPT: they attribute via their
+                    // bundled manifest, and purging their state would reset Attempts/TTL
+                    // on every pass (crash data got one attempt per launch).
                     var chunkId = state.ChunkId ?? "";
-                    if (!chunkId.StartsWith(ownPrefix, StringComparison.Ordinal))
+                    if (!IsUnderCompletedSessions(chunk) &&
+                        !chunkId.StartsWith(ownPrefix, StringComparison.Ordinal))
                     {
                         PlayScopeLog.Warning(
                             $"UploaderWorker: dropping orphan state file '{Path.GetFileName(stateFile)}' " +
@@ -185,8 +191,7 @@ namespace PlayScopeSdk.Internal
                     if (ttlAnchor.HasValue &&
                         (now - ttlAnchor.Value).TotalDays >= RetryTtlDays)
                     {
-                        var chunkForState = ChunkPathFromStateFile(stateFile);
-                        MoveToDeadLetter(chunkForState, stateFile);
+                        MoveToDeadLetter(chunk, stateFile);
                         continue;
                     }
 
@@ -194,7 +199,6 @@ namespace PlayScopeSdk.Internal
                     if (state.NextRetryAt.HasValue && state.NextRetryAt.Value > now)
                         continue; // still waiting
 
-                    var chunk = ChunkPathFromStateFile(stateFile);
                     if (File.Exists(chunk) && !paths.Contains(chunk))
                         paths.Add(chunk);
                 }
@@ -216,6 +220,9 @@ namespace PlayScopeSdk.Internal
             // anchors the 7-day retry TTL (issue #9).
             var state = LoadState(stateFilePath) ?? new UploadState { ChunkId = chunkName, CreatedAt = DateTime.UtcNow };
             if (!state.CreatedAt.HasValue) state.CreatedAt = DateTime.UtcNow;
+            // Record where the chunk actually lives (root-relative) — recovered chunks
+            // sit under completed_sessions/, not chunks/, and retry passes must find them there.
+            state.ChunkDirRel = ToRootRelativeDir(chunkPath);
 
             // Build envelope
             byte[] payload;
@@ -593,14 +600,92 @@ namespace PlayScopeSdk.Internal
             }
         }
 
-        private static string ChunkPathFromStateFile(string stateFilePath)
+        private static string ChunkPathFromStateFile(string stateFilePath, UploadState state)
         {
             // stateFilePath: .../upload_queue/chunk_abc_000001.jsonl.state.json
-            // chunkPath:     .../chunks/chunk_abc_000001.jsonl
             var stateFileName = Path.GetFileName(stateFilePath);
             // strip ".state.json" suffix
             var chunkFileName = stateFileName.Substring(0, stateFileName.Length - ".state.json".Length);
-            return Path.Combine(PlayScopeDirectory.Chunks, chunkFileName);
+            return Path.Combine(ResolveChunkDir(state), chunkFileName);
+        }
+
+        /// <summary>
+        /// Resolves the directory a state file's chunk lives in from the location
+        /// recorded at upload time. Legacy state files (no chunk_dir) resolve to the
+        /// live chunks/ dir — the pre-recording behavior.
+        /// </summary>
+        private static string ResolveChunkDir(UploadState state)
+        {
+            var rel = state?.ChunkDirRel;
+            if (string.IsNullOrEmpty(rel)) return PlayScopeDirectory.Chunks;
+            try
+            {
+                var combined = Path.GetFullPath(Path.Combine(PlayScopeDirectory.Root, rel));
+                var root = Path.GetFullPath(PlayScopeDirectory.Root);
+                // Containment guard — a corrupt chunk_dir must not resolve outside PlayScope storage.
+                if (!IsContainedIn(combined, root))
+                {
+                    PlayScopeLog.Warning(
+                        $"UploaderWorker: state chunk_dir '{rel}' escapes the PlayScope root — falling back to chunks/.");
+                    return PlayScopeDirectory.Chunks;
+                }
+                return combined;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning(
+                    $"UploaderWorker: failed to resolve state chunk_dir '{rel}': {ex.Message} — falling back to chunks/.");
+                return PlayScopeDirectory.Chunks;
+            }
+        }
+
+        /// <summary>
+        /// Root-relative directory of a chunk, stored with '/' separators so a state
+        /// file written on one launch resolves even if the absolute data path moves
+        /// (iOS app-container UUID changes across updates). Empty when the chunk is
+        /// outside the PlayScope root or the path cannot be resolved.
+        /// </summary>
+        private static string ToRootRelativeDir(string chunkPath)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(chunkPath);
+                if (string.IsNullOrEmpty(dir)) return "";
+                var fullDir = Path.GetFullPath(dir);
+                var fullRoot = Path.GetFullPath(PlayScopeDirectory.Root);
+                if (!IsContainedIn(fullDir, fullRoot)) return "";
+                var rel = fullDir.Substring(fullRoot.Length)
+                    .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                return rel.Replace('\\', '/');
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static bool IsUnderCompletedSessions(string path)
+        {
+            try
+            {
+                return IsContainedIn(
+                    Path.GetFullPath(path),
+                    Path.GetFullPath(PlayScopeDirectory.CompletedSessions));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Plain StartsWith would let a sibling dir sharing the prefix through
+        // ("...\PlayScopeEvil" vs "...\PlayScope") — require the separator.
+        private static bool IsContainedIn(string fullPath, string parentDir)
+        {
+            var parent = parentDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.Equals(fullPath, parent, StringComparison.OrdinalIgnoreCase)) return true;
+            return fullPath.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                   fullPath.StartsWith(parent + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
         }
 
         // ── Orphan self-rescue ────────────────────────────────────────────────────
@@ -804,6 +889,9 @@ namespace PlayScopeSdk.Internal
         private sealed class UploadState
         {
             internal string ChunkId = "";
+            // Root-relative dir of the chunk ('/'-separated). Empty on legacy state
+            // files → resolves to chunks/.
+            internal string ChunkDirRel = "";
             internal int Attempts;
             internal DateTime? CreatedAt;
             internal DateTime? LastAttemptAt;
@@ -821,7 +909,8 @@ namespace PlayScopeSdk.Internal
                 var next = NextRetryAt.HasValue
                     ? "\"" + NextRetryAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + "\""
                     : "null";
-                return $"{{\"chunk_id\":\"{EscapeJsonString(ChunkId)}\",\"attempts\":{Attempts}," +
+                return $"{{\"chunk_id\":\"{EscapeJsonString(ChunkId)}\"," +
+                       $"\"chunk_dir\":\"{EscapeJsonString(ChunkDirRel)}\",\"attempts\":{Attempts}," +
                        $"\"created_at\":{created},\"last_attempt_at\":{last},\"next_retry_at\":{next}," +
                        $"\"is_uploaded\":{(IsUploaded ? "true" : "false")}}}";
             }
@@ -832,6 +921,7 @@ namespace PlayScopeSdk.Internal
                 if (dict == null) return null;
                 var state = new UploadState();
                 if (dict.TryGetValue("chunk_id", out var ci) && ci is string ciStr) state.ChunkId = ciStr;
+                if (dict.TryGetValue("chunk_dir", out var cd) && cd is string cdStr) state.ChunkDirRel = cdStr;
                 if (dict.TryGetValue("attempts", out var att)) state.Attempts = ParseInt(att);
                 if (dict.TryGetValue("created_at", out var ca) && ca is string caStr && caStr != "null" && !string.IsNullOrEmpty(caStr))
                     state.CreatedAt = DateTime.TryParse(caStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var caVal) ? caVal : (DateTime?)null;

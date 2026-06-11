@@ -55,6 +55,26 @@ namespace PlayScopeSdk.Internal
             return Filter(input, ref _metadataWarningEmitted, "metadata");
         }
 
+        /// <summary>
+        /// Masks PII substrings in free-form log/exception text. Honors the
+        /// <c>PiiValueMasksEnabled</c> toggle; reference-equal to the input when
+        /// nothing matched. Never throws — on scanner failure the original text
+        /// is returned so the record is still enqueued.
+        /// </summary>
+        internal static string MaskLogText(string text)
+        {
+            if (!_piiValueMasksEnabled) return text;
+            try
+            {
+                return PiiValueScanner.MaskString(text);
+            }
+            catch (System.Exception ex)
+            {
+                PlayScopeLog.Warning("MaskLogText: PII scan failed; recording text unmasked", ex);
+                return text;
+            }
+        }
+
         internal static bool IsSensitiveKey(string key)
         {
             if (string.IsNullOrEmpty(key)) return false;

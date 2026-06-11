@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
@@ -8,38 +9,63 @@ namespace PlayScopeSdk.Internal
     internal sealed class PlayScopeMonoBehaviour : MonoBehaviour
     {
         private MetricsSampler? _sampler;
+        // Warn-once for the per-frame backstop — a component faulting every tick
+        // would otherwise spam a warning per frame for the rest of the session.
+        private bool _updateFaultWarned;
 
         private void Awake()
         {
-            Application.focusChanged += OnFocusChanged;
+            try
+            {
+                Application.focusChanged += OnFocusChanged;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("PlayScopeMonoBehaviour.Awake failed", ex);
+            }
         }
 
         private void Update()
         {
-            // Rotation runs here the tick after the flag was set. PerformRotation
-            // destroys this GameObject, so we MUST return immediately — further
-            // code would run against a half-destroyed sampler / pipeline.
-            if (PlayScopeRuntime.ConsumePendingRotation())
+            try
             {
-                PlayScopeRuntime.PerformRotation();
-                return;
-            }
+                // Rotation runs here the tick after the flag was set. PerformRotation
+                // destroys this GameObject, so we MUST return immediately — further
+                // code would run against a half-destroyed sampler / pipeline.
+                if (PlayScopeRuntime.ConsumePendingRotation())
+                {
+                    PlayScopeRuntime.PerformRotation();
+                    return;
+                }
 
-            if (PlayScopeRuntime.Pipeline != null && _sampler == null)
-                _sampler = new MetricsSampler(PlayScopeRuntime.Pipeline);
-            if (PlayScopeRuntime.Pipeline == null)
-                _sampler = null;
-            // First Update == "player can see the game" (runtime guards once-only).
-            PlayScopeRuntime.EmitFirstFrameRenderedOnce();
-            PollFirstInputLatency();
-            // null-conditional skips when the watchdog is disabled (Editor / opted out).
-            PlayScopeRuntime.AnrWatchdog?.RecordHeartbeat();
-            _sampler?.Tick();
-            // Drive all window timers off the same frame pulse — no worker thread.
-            PlayScopeRuntime.StatePatchCoalescer.TickAndMaybeFlush();
-            PlayScopeRuntime.SessionDataCoalescer.TickAndMaybeFlush();
-            PlayScopeRuntime.LogDedupBuffer?.TickAndMaybeFlush();
-            SceneLoadProgressTracker.TickAndMaybeSample();
+                if (PlayScopeRuntime.Pipeline != null && _sampler == null)
+                {
+                    _sampler = new MetricsSampler(PlayScopeRuntime.Pipeline);
+                }
+                if (PlayScopeRuntime.Pipeline == null)
+                {
+                    _sampler = null;
+                }
+                // First Update == "player can see the game" (runtime guards once-only).
+                PlayScopeRuntime.EmitFirstFrameRenderedOnce();
+                PollFirstInputLatency();
+                // null-conditional skips when the watchdog is disabled (Editor / opted out).
+                PlayScopeRuntime.AnrWatchdog?.RecordHeartbeat();
+                _sampler?.Tick();
+                // Drive all window timers off the same frame pulse — no worker thread.
+                PlayScopeRuntime.StatePatchCoalescer.TickAndMaybeFlush();
+                PlayScopeRuntime.SessionDataCoalescer.TickAndMaybeFlush();
+                PlayScopeRuntime.LogDedupBuffer?.TickAndMaybeFlush();
+                SceneLoadProgressTracker.TickAndMaybeSample();
+            }
+            catch (Exception ex)
+            {
+                if (!_updateFaultWarned)
+                {
+                    _updateFaultWarned = true;
+                    PlayScopeLog.Warning("PlayScopeMonoBehaviour.Update failed (warn-once per driver lifetime)", ex);
+                }
+            }
         }
 
         /// <summary>
@@ -133,30 +159,62 @@ namespace PlayScopeSdk.Internal
 
         private void OnApplicationPause(bool isPaused)
         {
-            PlayScopeRuntime.FlushOnPause();
-            PlayScopeRuntime.RecordLifecycle(isPaused
-                ? LifecycleTransition.BackgroundStart
-                : LifecycleTransition.Foreground);
+            try
+            {
+                PlayScopeRuntime.FlushOnPause();
+                PlayScopeRuntime.RecordLifecycle(isPaused
+                    ? LifecycleTransition.BackgroundStart
+                    : LifecycleTransition.Foreground);
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("PlayScopeMonoBehaviour.OnApplicationPause failed", ex);
+            }
         }
 
         private void OnApplicationQuit()
         {
-            PlayScopeRuntime.Shutdown();
-            _sampler = null;
+            try
+            {
+                PlayScopeRuntime.Shutdown();
+                _sampler = null;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("PlayScopeMonoBehaviour.OnApplicationQuit failed", ex);
+            }
         }
 
+        // Application.focusChanged is a multicast delegate shared with the host
+        // game — an exception escaping here aborts the game's own subscribers.
         private void OnFocusChanged(bool hasFocus)
         {
-            if (!hasFocus)
-                PlayScopeRuntime.FlushOnPause();
-            PlayScopeRuntime.RecordLifecycle(hasFocus
-                ? LifecycleTransition.Foreground
-                : LifecycleTransition.BackgroundStart);
+            try
+            {
+                if (!hasFocus)
+                {
+                    PlayScopeRuntime.FlushOnPause();
+                }
+                PlayScopeRuntime.RecordLifecycle(hasFocus
+                    ? LifecycleTransition.Foreground
+                    : LifecycleTransition.BackgroundStart);
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("PlayScopeMonoBehaviour.OnFocusChanged failed", ex);
+            }
         }
 
         private void OnDestroy()
         {
-            Application.focusChanged -= OnFocusChanged;
+            try
+            {
+                Application.focusChanged -= OnFocusChanged;
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning("PlayScopeMonoBehaviour.OnDestroy failed", ex);
+            }
         }
     }
 }

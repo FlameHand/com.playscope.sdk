@@ -80,7 +80,20 @@ namespace PlayScopeSdk
         /// </summary>
         public static void Initialize()
         {
-            var settings = PlayScopeSettings.Load();
+            PlayScopeSettings settings;
+            try
+            {
+                // Resources.Load is main-thread-only — honor the never-throws
+                // contract. Not ForceDisable: a later main-thread call must work.
+                settings = PlayScopeSettings.Load();
+            }
+            catch (Exception ex)
+            {
+                PlayScopeLog.Warning(
+                    "Initialize: PlayScopeSettings.Load threw (called off the main thread?) — " +
+                    "SDK not initialized. Call Initialize from the main thread.", ex);
+                return;
+            }
             if (settings == null)
             {
                 PlayScopeLog.Warning(
@@ -112,11 +125,35 @@ namespace PlayScopeSdk
             }
         }
 
+        // Warn-once guard for off-main-thread Settings reads — wrapper code may poll.
+        private static int _settingsLoadThrewWarned;
+
         /// <summary>
         /// Loaded <see cref="PlayScopeSettings"/> asset, or null if absent.
         /// Lets wrapper code mirror the SDK's <c>MinLogLevel</c> without re-loading Resources.
+        /// Returns null (never throws) when read off the main thread before the
+        /// asset was first loaded; after a main-thread load the cached instance
+        /// is returned from any thread.
         /// </summary>
-        public static PlayScopeSettings Settings => PlayScopeSettings.Load();
+        public static PlayScopeSettings Settings
+        {
+            get
+            {
+                try
+                {
+                    return PlayScopeSettings.Load();
+                }
+                catch (Exception ex)
+                {
+                    if (Interlocked.CompareExchange(ref _settingsLoadThrewWarned, 1, 0) == 0)
+                    {
+                        PlayScopeLog.Warning(
+                            "Settings: PlayScopeSettings.Load threw (read off the main thread?) — returning null.", ex);
+                    }
+                    return null;
+                }
+            }
+        }
 
         private static PlayScopeContext BuildContextFromSettings(PlayScopeSettings s)
         {

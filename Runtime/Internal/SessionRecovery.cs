@@ -573,11 +573,30 @@ namespace PlayScopeSdk.Internal
                         continue;
 
                     EnqueueJsonlFilesInDir(dir, queue);
+                    TryDeleteEmptySessionDir(dir);
                 }
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[PlayScope] SessionRecovery: error scanning completed_sessions: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Removes a completed-session dir with no .jsonl left (everything uploaded
+        /// on a prior run) — otherwise manifest-only dirs accumulate forever.
+        /// </summary>
+        private static void TryDeleteEmptySessionDir(string dir)
+        {
+            try
+            {
+                if (Directory.GetFiles(dir, "*.jsonl").Length > 0) return;
+                Directory.Delete(dir, recursive: true);
+                PlayScopeLog.Info($"SessionRecovery: removed empty completed-session dir '{Path.GetFileName(dir)}'.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] SessionRecovery: failed to delete empty completed dir '{dir}': {ex.Message}");
             }
         }
 

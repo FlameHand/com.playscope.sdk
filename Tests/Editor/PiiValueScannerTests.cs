@@ -222,5 +222,75 @@ namespace PlayScopeSdk.Tests.Editor
             Assert.AreEqual(3.14, PiiValueScanner.MaskValueDeep(3.14));
             Assert.IsNull(PiiValueScanner.MaskValueDeep(null));
         }
+
+        // ── End-to-end: EventPipeline.EnqueueLog choke point ──────────────
+        // Covers TrackLog / TrackException / Unity auto-capture alike: all
+        // three funnel through EnqueueLog, where the mask is applied.
+
+        private static EventPipeline CreatePipeline(out EventQueue queue)
+        {
+            PlayScopeRuntime._acceptingEvents = true;
+            SensitiveKeyFilter.SetPiiValueMasksEnabled(true);
+            queue = new EventQueue();
+            return new EventPipeline(queue);
+        }
+
+        [Test]
+        public void EnqueueLog_MasksPiiInLogMessage()
+        {
+            var pipeline = CreatePipeline(out var queue);
+
+            pipeline.EnqueueLog("error", "login failed for john.doe@example.com");
+
+            Assert.IsTrue(queue.TryDequeue(out var record));
+            Assert.AreEqual("login failed for [redacted-email]", record.Message);
+        }
+
+        [Test]
+        public void EnqueueLog_MasksPiiInExceptionMessageAndStackTrace()
+        {
+            var pipeline = CreatePipeline(out var queue);
+
+            pipeline.EnqueueLog(
+                "exception",
+                "AuthException: rejected for user a@b.com",
+                "at AuthService.Login(header: Bearer abc123def456ghi789)\nat GameFlow.Start()");
+
+            Assert.IsTrue(queue.TryDequeue(out var record));
+            Assert.AreEqual("AuthException: rejected for user [redacted-email]", record.Message);
+            StringAssert.Contains("Bearer [redacted]", record.StackTrace);
+            StringAssert.Contains("at GameFlow.Start()", record.StackTrace);
+        }
+
+        [Test]
+        public void EnqueueLog_LeavesCleanTextUntouched()
+        {
+            var pipeline = CreatePipeline(out var queue);
+
+            pipeline.EnqueueLog("exception", "NullReferenceException: object not set",
+                "at Enemy.TakeDamage()\nat Bullet.OnHit()");
+
+            Assert.IsTrue(queue.TryDequeue(out var record));
+            Assert.AreEqual("NullReferenceException: object not set", record.Message);
+            Assert.AreEqual("at Enemy.TakeDamage()\nat Bullet.OnHit()", record.StackTrace);
+        }
+
+        [Test]
+        public void EnqueueLog_RespectsPiiMasksDisabledToggle()
+        {
+            var pipeline = CreatePipeline(out var queue);
+            SensitiveKeyFilter.SetPiiValueMasksEnabled(false);
+            try
+            {
+                pipeline.EnqueueLog("error", "contact a@b.com");
+
+                Assert.IsTrue(queue.TryDequeue(out var record));
+                Assert.AreEqual("contact a@b.com", record.Message);
+            }
+            finally
+            {
+                SensitiveKeyFilter.SetPiiValueMasksEnabled(true);
+            }
+        }
     }
 }

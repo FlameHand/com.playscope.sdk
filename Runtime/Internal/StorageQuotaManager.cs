@@ -100,6 +100,7 @@ namespace PlayScopeSdk.Internal
             total += SumDirectory(PlayScopeDirectory.Chunks);
             total += SumDirectory(PlayScopeDirectory.UploadQueue);
             total += SumDirectory(PlayScopeDirectory.DeadLetter);
+            total += SumDirectory(PlayScopeDirectory.CompletedSessions);
             // Also count root-level files (device.json, etc.)
             total += SumDirectory(PlayScopeDirectory.Root, topLevelOnly: true);
             total += SumDirectory(PlayScopeDirectory.CurrentSession, topLevelOnly: true);
@@ -183,12 +184,20 @@ namespace PlayScopeSdk.Internal
             if (bytesToFree > 0)
             {
                 bytesToFree = DeleteOldestChunksInChunksDir(bytesToFree, ref droppedChunkCount);
-                if (bytesToFree > 0)
-                    DeleteOldestChunksInUploadQueue(bytesToFree, ref droppedChunkCount);
+            }
+            if (bytesToFree > 0)
+            {
+                bytesToFree = DeleteOldestChunksInUploadQueue(bytesToFree, ref droppedChunkCount);
+            }
+            if (bytesToFree > 0)
+            {
+                PruneCompletedSessions(bytesToFree);
             }
 
             if (droppedChunkCount > 0)
+            {
                 WritePartialMarker(PlayScopeDirectory.Chunks, droppedChunkCount);
+            }
         }
 
         /// <summary>
@@ -307,10 +316,10 @@ namespace PlayScopeSdk.Internal
 
         // ── Phase 3 ───────────────────────────────────────────────────────────────
 
-        private static void DeleteOldestChunksInUploadQueue(long bytesToFree, ref int droppedCount)
+        private static long DeleteOldestChunksInUploadQueue(long bytesToFree, ref int droppedCount)
         {
             var dir = PlayScopeDirectory.UploadQueue;
-            if (!Directory.Exists(dir)) return;
+            if (!Directory.Exists(dir)) return bytesToFree;
 
             // Retryable (is_uploaded=false) chunks, oldest-first — but skip any
             // mid-backoff (next_retry_at > now), else quota pressure silently drops
@@ -352,7 +361,7 @@ namespace PlayScopeSdk.Internal
             catch (Exception ex)
             {
                 Debug.LogWarning("[PlayScope] QuotaManager: error scanning upload queue for retryable chunks: " + ex.Message);
-                return;
+                return bytesToFree;
             }
 
             candidates.Sort((a, b) => a.lastWrite.CompareTo(b.lastWrite));
@@ -369,6 +378,132 @@ namespace PlayScopeSdk.Internal
                     droppedCount++;
                 }
             }
+
+            return bytesToFree;
+        }
+
+        // ── Phase 4: completed sessions ───────────────────────────────────────────
+
+        /// <summary>
+        /// Last prune phase — completed_sessions/ holds recovered crash data, the most
+        /// valuable class, so it is touched only after every live-chunk phase failed
+        /// to free enough. Pass 1 drops non-critical chunks inside each session dir
+        /// (oldest dir first, partial marker written so the backend sees the loss);
+        /// pass 2 deletes whole oldest session dirs — criticals included — as the
+        /// absolute backstop that keeps an offline device's disk bounded.
+        /// </summary>
+        private static long PruneCompletedSessions(long bytesToFree)
+        {
+            var root = PlayScopeDirectory.CompletedSessions;
+            if (!Directory.Exists(root)) return bytesToFree;
+
+            string[] sessionDirs;
+            try
+            {
+                sessionDirs = Directory.GetDirectories(root);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[PlayScope] QuotaManager: error listing completed_sessions: " + ex.Message);
+                return bytesToFree;
+            }
+            if (sessionDirs.Length == 0) return bytesToFree;
+
+            var ordered = new List<(string dir, DateTime lastWrite)>(sessionDirs.Length);
+            for (int i = 0; i < sessionDirs.Length; i++)
+            {
+                DateTime lastWrite;
+                try { lastWrite = Directory.GetLastWriteTimeUtc(sessionDirs[i]); }
+                catch { lastWrite = DateTime.MinValue; }
+                ordered.Add((sessionDirs[i], lastWrite));
+            }
+            ordered.Sort((a, b) => a.lastWrite.CompareTo(b.lastWrite));
+
+            for (int i = 0; i < ordered.Count && bytesToFree > 0; i++)
+            {
+                bytesToFree = DropNonCriticalChunksInCompletedDir(ordered[i].dir, bytesToFree);
+            }
+
+            for (int i = 0; i < ordered.Count && bytesToFree > 0; i++)
+            {
+                bytesToFree -= TryDeleteCompletedSessionDir(ordered[i].dir);
+            }
+
+            return bytesToFree;
+        }
+
+        private static long DropNonCriticalChunksInCompletedDir(string sessionDir, long bytesToFree)
+        {
+            var candidates = new List<(string path, DateTime lastWrite)>();
+            try
+            {
+                foreach (var file in Directory.GetFiles(sessionDir, "*.jsonl"))
+                {
+                    if (Path.GetFileName(file).StartsWith("partial_marker_", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (IsChunkCritical(file)) continue;
+                    candidates.Add((file, File.GetLastWriteTimeUtc(file)));
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] QuotaManager: error scanning completed dir '{sessionDir}': {ex.Message}");
+                return bytesToFree;
+            }
+
+            candidates.Sort((a, b) => a.lastWrite.CompareTo(b.lastWrite));
+
+            int dropped = 0;
+            for (int i = 0; i < candidates.Count && bytesToFree > 0; i++)
+            {
+                long freed = TryDeleteFileAndGetSize(candidates[i].path);
+                if (freed <= 0) continue;
+                freed += DeleteChunkCompanionFiles(candidates[i].path);
+                bytesToFree -= freed;
+                dropped++;
+            }
+
+            if (dropped > 0)
+            {
+                WritePartialMarkerForCompletedSession(sessionDir, dropped);
+            }
+
+            return bytesToFree;
+        }
+
+        private static long TryDeleteCompletedSessionDir(string sessionDir)
+        {
+            long freed = 0;
+            try
+            {
+                foreach (var file in Directory.GetFiles(sessionDir, "*", SearchOption.AllDirectories))
+                {
+                    if (file.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
+                        freed += DeleteChunkCompanionFiles(file);
+                    freed += TryDeleteFileAndGetSize(file);
+                }
+                Directory.Delete(sessionDir, recursive: true);
+                Debug.LogWarning(
+                    $"[PlayScope] QuotaManager: storage cap exceeded — dropped completed session dir " +
+                    $"'{Path.GetFileName(sessionDir)}' ({freed} B, may include critical data).");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[PlayScope] QuotaManager: failed to delete completed session dir '{sessionDir}': {ex.Message}");
+            }
+            return freed;
+        }
+
+        /// <summary>
+        /// Deletes the upload_queue state file and .uploaded marker tied to a chunk so
+        /// a pruned chunk leaves no stale retry bookkeeping behind. Returns bytes freed.
+        /// </summary>
+        private static long DeleteChunkCompanionFiles(string chunkPath)
+        {
+            long freed = 0;
+            freed += TryDeleteFileAndGetSize(chunkPath + ".uploaded");
+            var stateFile = Path.Combine(PlayScopeDirectory.UploadQueue, Path.GetFileName(chunkPath) + ".state.json");
+            freed += TryDeleteFileAndGetSize(stateFile);
+            return freed;
         }
 
         // ── Partial marker ────────────────────────────────────────────────────────

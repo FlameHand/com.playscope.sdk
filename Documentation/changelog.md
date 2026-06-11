@@ -13,6 +13,9 @@ CI auto-bumps the patch version on every push to `main`, so intermediate version
 - **`AdMetadata`** helper — canonical `network` / `placement` / `ad_type` / `result` / `revenue` / `currency` schema, with `Network` / `AdType` / `AdResult` vocab constants. Negative revenue is clamped to 0 before leaving the device.
 - Native crash-collector groundwork on Android (`PlayScopeCrashCollector`, `PlayScopeCrash.java`, NDK `.so` delivery via the installer) — capture surface lands in a later milestone.
 
+### Fixed
+- **Recovered-session lifecycle** — `completed_sessions/` now counts toward the 50 MB storage quota and is pruned last (non-critical chunks first, whole oldest session dirs as the backstop), so offline devices no longer grow disk without bound. Upload state files record the chunk's directory (`chunk_dir`), so recovered crash chunks go through the normal retry/backoff/TTL machinery instead of getting one attempt per launch; their state files are no longer purged as foreign orphans. Fully-uploaded session dirs are cleaned up on the next launch.
+
 ---
 
 ## [0.4.x] — Device-state telemetry

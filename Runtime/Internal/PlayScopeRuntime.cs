@@ -682,13 +682,19 @@ namespace PlayScopeSdk.Internal
                         MetadataJson = $"{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\"}}",
                         IsCritical = true,
                     };
+                    var writer = _writer; // capture for closure
+                    bool ok;
+#if UNITY_WEBGL && !UNITY_EDITOR
+                    // WebGL: no thread pool — Task.Run never schedules, so
+                    // Wait(500) busy-blocks the tab and loses session_end.
+                    // The write is already synchronous and never throws.
+                    ok = writer.WriteCriticalAndFinalizeSync(rec);
+#else
                     // Bounded wait on a worker — lock + file I/O can hang past the
                     // quit budget on a slow/sandboxed disk. Over 500 ms we abandon;
                     // next launch synthesises abnormal_end. Worst case: a duplicate
                     // session_end if the abandoned task later succeeds.
-                    var writer = _writer; // capture for closure
                     var task = System.Threading.Tasks.Task.Run(() => writer.WriteCriticalAndFinalizeSync(rec));
-                    bool ok;
                     if (task.Wait(TimeSpan.FromMilliseconds(500)))
                     {
                         ok = task.Result;
@@ -700,6 +706,7 @@ namespace PlayScopeSdk.Internal
                             "Shutdown: WriteCriticalAndFinalizeSync exceeded 500 ms timeout — " +
                             "session_end may not have been flushed; SessionRecovery on next launch will synthesise it.");
                     }
+#endif
                     PlayScopeLog.Info(
                         $"Shutdown: session_end sync-write (end_status={endStatus}, reason={reason}, success={ok}).");
                     Debug.Log($"[PlayScope/diag] TeardownInternal: WriteCriticalAndFinalizeSync ok={ok}");
@@ -958,7 +965,13 @@ namespace PlayScopeSdk.Internal
             // sees _initialized=false, skips, and leaves no live session.
             if (Interlocked.CompareExchange(ref _lifecycleBusy, 1, 0) != 0)
             {
-                PlayScopeLog.Warning("PerformRotation skipped — another lifecycle op is already in flight.");
+                // ConsumePendingRotation already cleared the flag and the write
+                // gate is closed — bailing without re-arming would strand
+                // _acceptingEvents=false with no rotation ever coming (silent
+                // total event loss). Re-arm so the next Update retries.
+                _pendingRotation = true;
+                PlayScopeLog.Warning(
+                    "PerformRotation deferred — another lifecycle op is in flight; will retry next frame.");
                 return;
             }
             try
@@ -984,6 +997,12 @@ namespace PlayScopeSdk.Internal
                     endTimestampOverride: backdatedEnd);
                 // Bypass the admission gate — we already hold the lifecycle lock.
                 InitializeLocked(ctx);
+            }
+            catch (Exception ex)
+            {
+                // Never rethrow into Update — the finally below still re-opens
+                // the gate and releases the lifecycle lock.
+                PlayScopeLog.Error("PerformRotation failed", ex);
             }
             finally
             {

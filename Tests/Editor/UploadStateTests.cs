@@ -89,5 +89,103 @@ namespace PlayScopeSdk.Tests.Editor
                 .GetValue(parsed);
             Assert.IsTrue(lastAttempt.HasValue, "LastAttemptAt must round-trip");
         }
+
+        // ── chunk_dir (recorded chunk location) ───────────────────────────────────
+
+        private static Type StateType()
+        {
+            var stateType = typeof(UploaderWorker).GetNestedType("UploadState", BindingFlags.NonPublic);
+            Assert.NotNull(stateType, "UploadState nested type not found via reflection");
+            return stateType;
+        }
+
+        private static object NewState(string chunkDirRel)
+        {
+            var stateType = StateType();
+            var state = Activator.CreateInstance(stateType, nonPublic: true);
+            stateType.GetField("ChunkDirRel", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .SetValue(state, chunkDirRel);
+            return state;
+        }
+
+        private static string InvokeChunkPathFromStateFile(string stateFilePath, object state)
+        {
+            var method = typeof(UploaderWorker).GetMethod("ChunkPathFromStateFile",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method, "ChunkPathFromStateFile not found via reflection");
+            return (string)method!.Invoke(null, new[] { (object)stateFilePath, state });
+        }
+
+        [Test]
+        public void UploadState_RoundTrip_PreservesChunkDir()
+        {
+            var stateType = StateType();
+            var state = NewState("completed_sessions/abc-123");
+
+            var toJson = stateType.GetMethod("ToJson", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            var json = (string)toJson.Invoke(state, null);
+            StringAssert.Contains("\"chunk_dir\":\"completed_sessions/abc-123\"", json);
+
+            var fromJson = stateType.GetMethod("FromJson", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var parsed = fromJson.Invoke(null, new object[] { json });
+            Assert.NotNull(parsed);
+            var parsedDir = (string)stateType
+                .GetField("ChunkDirRel", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(parsed);
+            Assert.AreEqual("completed_sessions/abc-123", parsedDir);
+        }
+
+        [Test]
+        public void UploadState_LegacyWithoutChunkDir_ParsesWithEmptyDir()
+        {
+            var stateType = StateType();
+            var fromJson = stateType.GetMethod("FromJson", BindingFlags.NonPublic | BindingFlags.Static)!;
+
+            var legacyJson =
+                "{\"chunk_id\":\"chunk_x_000001.jsonl\",\"attempts\":3," +
+                "\"last_attempt_at\":\"2026-01-01T00:00:00.000Z\"," +
+                "\"next_retry_at\":null,\"is_uploaded\":false}";
+            var parsed = fromJson.Invoke(null, new object[] { legacyJson });
+            Assert.NotNull(parsed);
+
+            var chunkDir = (string)stateType
+                .GetField("ChunkDirRel", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(parsed);
+            Assert.IsTrue(string.IsNullOrEmpty(chunkDir), "Legacy state files must yield an empty chunk_dir");
+        }
+
+        [Test]
+        public void ChunkPathFromStateFile_LegacyState_ResolvesToChunksDir()
+        {
+            var path = InvokeChunkPathFromStateFile(
+                @"any\upload_queue\chunk_ab12cd34_000001.jsonl.state.json", NewState(""));
+            StringAssert.EndsWith("chunk_ab12cd34_000001.jsonl", path);
+            StringAssert.Contains("chunks", path);
+            Assert.IsFalse(path.Contains("completed_sessions"));
+        }
+
+        [Test]
+        public void ChunkPathFromStateFile_RecordedDir_ResolvesUnderCompletedSessions()
+        {
+            var path = InvokeChunkPathFromStateFile(
+                @"any\upload_queue\chunk_ab12cd34_000001.jsonl.state.json",
+                NewState("completed_sessions/abc-123"));
+            StringAssert.EndsWith("chunk_ab12cd34_000001.jsonl", path);
+            StringAssert.Contains("completed_sessions", path);
+            StringAssert.Contains("abc-123", path);
+        }
+
+        [Test]
+        public void ChunkPathFromStateFile_EscapingDir_FallsBackToChunksDir()
+        {
+            UnityEngine.TestTools.LogAssert.Expect(UnityEngine.LogType.Warning,
+                new System.Text.RegularExpressions.Regex("escapes the PlayScope root"));
+            var path = InvokeChunkPathFromStateFile(
+                @"any\upload_queue\chunk_ab12cd34_000001.jsonl.state.json",
+                NewState("../../outside"));
+            StringAssert.EndsWith("chunk_ab12cd34_000001.jsonl", path);
+            StringAssert.Contains("chunks", path);
+            Assert.IsFalse(path.Contains("outside"));
+        }
     }
 }

@@ -163,6 +163,25 @@ namespace PlayScopeSdk.Internal
             // the rotation window; they belong to the about-to-open new session.
             if (!PlayScopeRuntime._acceptingEvents) return;
 
+            // PII mask at the single choke point — covers TrackLog, TrackException
+            // and Unity auto-capture alike. Before the final truncation, so a cut
+            // can't split a PII token into an unmatchable (leaked) fragment — but
+            // pre-clamped to a safety bound so a pathological multi-MB string
+            // doesn't pay 7 regex passes over its full length.
+            if (message.Length > 32768)
+            {
+                message = SafeTruncate(message, 32768);
+            }
+            if (stackTrace != null && stackTrace.Length > 32768)
+            {
+                stackTrace = SafeTruncate(stackTrace, 32768);
+            }
+            message = SensitiveKeyFilter.MaskLogText(message);
+            if (stackTrace != null)
+            {
+                stackTrace = SensitiveKeyFilter.MaskLogText(stackTrace);
+            }
+
             // Truncate (message 2048, stack 8192) — surrogate-safe so a cut at a
             // UTF-16 boundary can't leave an unpaired surrogate that breaks the JSON.
             if (message.Length > 2048) message = SafeTruncate(message, 2048) + "...[truncated]";
