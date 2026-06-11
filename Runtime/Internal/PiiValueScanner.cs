@@ -35,19 +35,22 @@ namespace PlayScopeSdk.Internal
         // Well-known token prefixes — ~no false-positive chance. Catches tokens
         // used outside an auth header. Extend as new patterns spread.
         private static readonly Regex KnownTokenPrefixRx = new Regex(
-            @"\b(" +
-                @"ghp|gho|ghu|ghs|ghr" +       // GitHub tokens
+            @"\b(?:" +
+                @"(?:ghp|gho|ghu|ghs|ghr" +     // GitHub tokens
                 @"|npm" +                       // npm tokens
                 @"|sk_live|sk_test|pk_live|pk_test" + // Stripe
-                @"|xoxb|xoxa|xoxp|xoxs" +       // Slack
-                @"|AKIA|ASIA" +                 // AWS access keys
-                @")_[A-Za-z0-9]{16,}\b",
+                @")_[A-Za-z0-9]{16,}" +
+                @"|(?:AKIA|ASIA)[A-Z0-9]{16}" + // AWS access keys — no separator, fixed length
+                @"|xox[abps]-[A-Za-z0-9][A-Za-z0-9\-]{14,}[A-Za-z0-9]" + // Slack — hyphen-separated
+            @")\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // Credit card — 13-19 digits with optional space/hyphen separators.
         // Luhn-gated (see MaskString) to suppress the long-integer false-positive avalanche.
+        // Last element is a bare \d so the match ends ON a digit — `\d[ \-]?` as
+        // the final unit swallows a trailing separator/space into the redaction.
         private static readonly Regex CreditCardCandidateRx = new Regex(
-            @"\b(?:\d[ \-]?){13,19}\b",
+            @"\b(?:\d[ \-]?){12,18}\d\b",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         // International phone — leading `+` anchor cuts false positives. Bare
@@ -172,8 +175,55 @@ namespace PlayScopeSdk.Internal
                     if (string.Compare(s, i, "Bearer", 0, 6, StringComparison.OrdinalIgnoreCase) == 0) return true;
                     if (string.Compare(s, i, "Basic ", 0, 6, StringComparison.OrdinalIgnoreCase) == 0) return true;
                 }
+                // Known-token-prefix anchor — digit-free tokens (sk_test_aB…)
+                // never trip the digit anchor above. Word-start gate first so
+                // snake_case state keys (UpdateState hot path, up to 60 Hz)
+                // skip the forward check at every '_'-separated segment.
+                if ((c == 'g' || c == 'n' || c == 's' || c == 'p' || c == 'x' || c == 'A')
+                    && (i == 0 || !IsWordChar(s[i - 1]))
+                    && IsKnownTokenPrefixAt(s, i))
+                {
+                    return true;
+                }
             }
             return false;
+        }
+
+        private static bool IsWordChar(char c)
+        {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        }
+
+        // Forward check for the KnownTokenPrefixRx anchors — single pass, no
+        // allocation, no regex. Only called at a word start whose first char
+        // matched the dispatch set in MightContainPii.
+        private static bool IsKnownTokenPrefixAt(string s, int i)
+        {
+            char c = s[i];
+            if (c == 'g') // ghp_ gho_ ghu_ ghs_ ghr_
+            {
+                if (i + 3 >= s.Length || s[i + 1] != 'h' || s[i + 3] != '_') return false;
+                char k = s[i + 2];
+                return k == 'p' || k == 'o' || k == 'u' || k == 's' || k == 'r';
+            }
+            if (c == 'n') // npm_
+            {
+                return i + 3 < s.Length && s[i + 1] == 'p' && s[i + 2] == 'm' && s[i + 3] == '_';
+            }
+            if (c == 's' || c == 'p') // sk_live_ sk_test_ pk_live_ pk_test_
+            {
+                if (i + 7 >= s.Length || s[i + 1] != 'k' || s[i + 2] != '_' || s[i + 7] != '_') return false;
+                if (s[i + 3] == 'l' && s[i + 4] == 'i' && s[i + 5] == 'v' && s[i + 6] == 'e') return true;
+                return s[i + 3] == 't' && s[i + 4] == 'e' && s[i + 5] == 's' && s[i + 6] == 't';
+            }
+            if (c == 'x') // xoxb- xoxa- xoxp- xoxs-
+            {
+                if (i + 4 >= s.Length || s[i + 1] != 'o' || s[i + 2] != 'x' || s[i + 4] != '-') return false;
+                char k = s[i + 3];
+                return k == 'b' || k == 'a' || k == 'p' || k == 's';
+            }
+            // 'A' — AKIA / ASIA
+            return i + 3 < s.Length && (s[i + 1] == 'K' || s[i + 1] == 'S') && s[i + 2] == 'I' && s[i + 3] == 'A';
         }
 
         // Standard Luhn checksum.

@@ -1,7 +1,10 @@
 using System.IO;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using PlayScopeSdk.Core.Session;
 using PlayScopeSdk.Storage;
+using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace PlayScopeSdk.Tests.Editor
 {
@@ -42,6 +45,7 @@ namespace PlayScopeSdk.Tests.Editor
             // Arrange: write a corrupt device.json
             const string corrupt = "{ this is not valid json";
             File.WriteAllText(PlayScopeDirectory.DeviceFile, corrupt);
+            LogAssert.Expect(LogType.Error, new Regex(@"device\.json is corrupt"));
 
             // Act
             var identity = DeviceIdentity.LoadOrCreate();

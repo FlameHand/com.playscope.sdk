@@ -95,6 +95,56 @@ namespace PlayScopeSdk.Tests.Editor
             Assert.AreEqual("[redacted-token] in env", result);
         }
 
+        [Test]
+        public void MaskString_RedactsAwsAccessKey()
+        {
+            // AKIA + exactly 16 upper-alnum, no separator. Digit-free body so
+            // the fast-path gate must trigger on the prefix, not on a digit.
+            // Assembled at runtime (see MaskString_RedactsGitHubToken).
+            var key = "AKIA" + "ABCDEFGHIJKLMNOP";
+            var input = "creds leaked: " + key + " in log";
+            var result = PiiValueScanner.MaskString(input);
+            Assert.AreEqual("creds leaked: [redacted-token] in log", result);
+        }
+
+        [Test]
+        public void MaskString_DoesNotRedactAwsLookalikes()
+        {
+            // Too short after the prefix / plain English word — must pass through.
+            var input = "deployed to ASIA region, key ASIA1234 invalid";
+            var result = PiiValueScanner.MaskString(input);
+            Assert.AreEqual(input, result);
+        }
+
+        [Test]
+        public void MaskString_RedactsSlackToken()
+        {
+            // xox[abps]- with hyphen-separated body. Digit-free so the gate
+            // must anchor on the xox?- shape. Assembled at runtime.
+            var token = "xoxb" + "-NotARealTokenAbCd-EfGhIjKlMnOp";
+            var input = "slack auth: " + token + " rejected";
+            var result = PiiValueScanner.MaskString(input);
+            Assert.AreEqual("slack auth: [redacted-token] rejected", result);
+        }
+
+        [Test]
+        public void MaskString_DoesNotRedactShortSlackLookalike()
+        {
+            var input = "channel xoxb-short renamed";
+            var result = PiiValueScanner.MaskString(input);
+            Assert.AreEqual(input, result);
+        }
+
+        [Test]
+        public void MaskString_LeavesSnakeCaseStateKeysUntouched()
+        {
+            // Guard for the fast-path gate: snake_case segments starting with
+            // s/p/g/n must not be mistaken for token prefixes.
+            var input = "skill_points gained_health npm_audit pk_lookup sk_test_run";
+            var result = PiiValueScanner.MaskString(input);
+            Assert.AreEqual(input, result);
+        }
+
         // ── Credit cards (with Luhn check) ────────────────────────────────
 
         [Test]
