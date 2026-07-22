@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using Cysharp.Threading.Tasks;
+using System.Threading.Tasks;
 using UnityEngine;
 using Merge2048.Monetization;
 using PlayScopeSdk;
@@ -24,7 +24,7 @@ namespace Merge2048.App
             _fakeLeaderboardService = new FakeLeaderboardService();
         }
 
-        public async UniTask<bool> ShowRewardedContinueAdAsync(CancellationToken cancellationToken)
+        public async Task<bool> ShowRewardedContinueAdAsync(CancellationToken cancellationToken)
         {
             var opId = PlayScope.StartAd("Rewarded_GameOver", AdMetadata.BuildStartMetadata(
                 network: AdMetadata.Network.Other,
@@ -89,17 +89,17 @@ namespace Merge2048.App
             return result.Outcome == AdOutcome.Rewarded;
         }
 
-        public async UniTask<bool> PurchaseUndoPackAsync(CancellationToken cancellationToken)
+        public async Task<bool> PurchaseUndoPackAsync(CancellationToken cancellationToken)
         {
             return await PurchaseAsync("undo_pack_3", 1.99m, cancellationToken);
         }
 
-        public async UniTask<bool> PurchaseRemoveAdsAsync(CancellationToken cancellationToken)
+        public async Task<bool> PurchaseRemoveAdsAsync(CancellationToken cancellationToken)
         {
             return await PurchaseAsync("remove_ads", 4.99m, cancellationToken);
         }
 
-        private async UniTask<bool> PurchaseAsync(string productId, decimal priceAmount, CancellationToken cancellationToken)
+        private async Task<bool> PurchaseAsync(string productId, decimal priceAmount, CancellationToken cancellationToken)
         {
             var opId = PlayScope.StartPurchase(productId, PurchaseMetadata.BuildStartMetadata(
                 currency: "USD",
@@ -163,7 +163,7 @@ namespace Merge2048.App
             return result.Outcome == PurchaseOutcome.Success;
         }
 
-        public async UniTask SubmitScoreToLeaderboardAsync(int score, CancellationToken cancellationToken)
+        public async Task SubmitScoreToLeaderboardAsync(int score, CancellationToken cancellationToken)
         {
             var opId = PlayScope.StartHTTP("POST /leaderboard/submit");
 

@@ -1,6 +1,6 @@
 using System;
 using System.Threading;
-using Cysharp.Threading.Tasks;
+using System.Threading.Tasks;
 
 namespace Merge2048.Monetization
 {
@@ -32,9 +32,9 @@ namespace Merge2048.Monetization
         private const int MIN_RESPONSE_BYTES = 80;
         private const int MAX_RESPONSE_BYTES = 400;
 
-        public async UniTask<LeaderboardSubmitResult> SubmitScoreAsync(int score, CancellationToken cancellationToken)
+        public async Task<LeaderboardSubmitResult> SubmitScoreAsync(int score, CancellationToken cancellationToken)
         {
-            await UniTask.Delay(TimeSpan.FromSeconds(0.6), cancellationToken: cancellationToken);
+            await Task.Delay(TimeSpan.FromSeconds(0.6), cancellationToken);
 
             if (cancellationToken.IsCancellationRequested)
             {

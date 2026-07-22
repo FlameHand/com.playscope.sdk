@@ -1,6 +1,5 @@
 using System;
 using System.Threading;
-using Cysharp.Threading.Tasks;
 using UnityEngine;
 using Merge2048.Core;
 using Merge2048.Presentation;
@@ -22,6 +21,7 @@ namespace Merge2048.App
 
         private InputReader _inputReader;
         private BoardView _boardView;
+        private readonly CancellationTokenSource _lifetimeCts = new CancellationTokenSource();
         private CancellationToken _lifetimeToken;
 
         private bool _hasUndoSnapshot;
@@ -32,7 +32,7 @@ namespace Merge2048.App
 
         private void Awake()
         {
-            _lifetimeToken = this.GetCancellationTokenOnDestroy();
+            _lifetimeToken = _lifetimeCts.Token;
 
             ScreenFlow = GetComponent<ScreenFlow>() ?? gameObject.AddComponent<ScreenFlow>();
             _inputReader = gameObject.AddComponent<InputReader>();
@@ -74,6 +74,9 @@ namespace Merge2048.App
             }
 
             UnsubscribeFromModel();
+
+            _lifetimeCts.Cancel();
+            _lifetimeCts.Dispose();
         }
 
         private void OnPlayClicked()
@@ -212,7 +215,7 @@ namespace Merge2048.App
 
             ScreenFlow.Show(ScreenId.GameOver);
 
-            SubmitScoreAsync(Model.Score).Forget();
+            SubmitScoreAsync(Model.Score);
         }
 
         private void OnDirectionPerformed(Direction direction)
@@ -269,10 +272,10 @@ namespace Merge2048.App
 
         private void OnBuyUndoPackClicked()
         {
-            PurchaseUndoPackAsync().Forget();
+            PurchaseUndoPackAsync();
         }
 
-        private async UniTaskVoid PurchaseUndoPackAsync()
+        private async void PurchaseUndoPackAsync()
         {
             if (MonetizationFlows == null)
             {
@@ -295,10 +298,10 @@ namespace Merge2048.App
 
         private void OnRemoveAdsClicked()
         {
-            PurchaseRemoveAdsAsync().Forget();
+            PurchaseRemoveAdsAsync();
         }
 
-        private async UniTaskVoid PurchaseRemoveAdsAsync()
+        private async void PurchaseRemoveAdsAsync()
         {
             if (MonetizationFlows == null)
             {
@@ -325,10 +328,10 @@ namespace Merge2048.App
 
         private void OnContinueWithAdClicked()
         {
-            ContinueWithAdAsync().Forget();
+            ContinueWithAdAsync();
         }
 
-        private async UniTaskVoid ContinueWithAdAsync()
+        private async void ContinueWithAdAsync()
         {
             if (MonetizationFlows == null)
             {
@@ -400,7 +403,7 @@ namespace Merge2048.App
             }
         }
 
-        private async UniTaskVoid SubmitScoreAsync(int score)
+        private async void SubmitScoreAsync(int score)
         {
             if (MonetizationFlows == null)
             {

@@ -1,6 +1,6 @@
 using System;
 using System.Threading;
-using Cysharp.Threading.Tasks;
+using System.Threading.Tasks;
 
 namespace Merge2048.Monetization
 {
@@ -31,9 +31,9 @@ namespace Merge2048.Monetization
         private const float MIN_REVENUE_USD = 0.01f;
         private const float MAX_REVENUE_USD = 0.08f;
 
-        public async UniTask<AdShowResult> ShowRewardedAsync(CancellationToken cancellationToken)
+        public async Task<AdShowResult> ShowRewardedAsync(CancellationToken cancellationToken)
         {
-            await UniTask.Delay(TimeSpan.FromSeconds(1.5), cancellationToken: cancellationToken);
+            await Task.Delay(TimeSpan.FromSeconds(1.5), cancellationToken);
 
             if (cancellationToken.IsCancellationRequested)
             {

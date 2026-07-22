@@ -1,6 +1,6 @@
 using System;
 using System.Threading;
-using Cysharp.Threading.Tasks;
+using System.Threading.Tasks;
 
 namespace Merge2048.Monetization
 {
@@ -29,9 +29,9 @@ namespace Merge2048.Monetization
         private const float SUCCESS_WEIGHT = 0.75f;
         private const float USER_CANCELLED_WEIGHT = 0.15f;
 
-        public async UniTask<PurchaseAttemptResult> PurchaseAsync(string productId, CancellationToken cancellationToken)
+        public async Task<PurchaseAttemptResult> PurchaseAsync(string productId, CancellationToken cancellationToken)
         {
-            await UniTask.Delay(TimeSpan.FromSeconds(1.2), cancellationToken: cancellationToken);
+            await Task.Delay(TimeSpan.FromSeconds(1.2), cancellationToken);
 
             if (cancellationToken.IsCancellationRequested)
             {
