@@ -99,3 +99,12 @@ Everything else (crash capture, ANR detection, perf metrics, lifecycle events, l
 - [Configuration](configuration.md) — every `PlayScopeContext` field
 - [Dashboard Navigator](dashboard-navigator.md) — where to read what once data is flowing
 - [Changelog](changelog.md)
+
+## See a real integration
+
+**Package Manager → PlayScope SDK → Samples → 2048 Merge Demo → Import** —
+a playable 6×6 merge game covering almost the entire public API above,
+with a `README.md` that maps every SDK method to the exact file/line that
+calls it and why. Game logic never touches `PlayScope.*`; every call lives
+in one `Integration/` folder that subscribes to plain C# events — copy that
+architecture into your own project.

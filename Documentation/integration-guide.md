@@ -345,3 +345,13 @@ Both can be used together — auto-capture for the catch-all firehose, manual `T
 | Crash recovery & session resume |  |
 
 If you don't see something on the dashboard you expected, check [Dashboard Navigator](dashboard-navigator.md) — most events live on specific tabs rather than the main timeline.
+
+## See it working end-to-end
+
+Everything above is demonstrated together in a runnable sample: **Package
+Manager → PlayScope SDK → Samples → 2048 Merge Demo → Import**. It's a
+playable merge-mechanics game where game logic never calls `PlayScope.*` —
+all telemetry lives in one `Integration/` folder that subscribes to plain
+C# events, which is the pattern this guide has been describing in the
+abstract. See `Samples~/Merge2048/README.md` for the method-by-method
+walkthrough once imported.

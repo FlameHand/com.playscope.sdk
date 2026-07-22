@@ -1,0 +1,455 @@
+using System;
+using System.Threading;
+using Cysharp.Threading.Tasks;
+using UnityEngine;
+using Merge2048.Core;
+using Merge2048.Presentation;
+
+namespace Merge2048.App
+{
+    public sealed class MergeGameController : MonoBehaviour
+    {
+        public MergeGameModel Model { get; private set; }
+        public ScreenFlow ScreenFlow { get; private set; }
+        public MonetizationFlows MonetizationFlows { get; private set; }
+        public Difficulty SelectedDifficulty { get; private set; }
+        public int UndoCharges { get; private set; }
+        public bool AdsRemoved { get; private set; }
+
+        public event Action<bool> UndoAttempted;
+        public event Action<string> RestartRequested;
+        public event Action<Direction> DirectionInput;
+
+        private InputReader _inputReader;
+        private BoardView _boardView;
+        private CancellationToken _lifetimeToken;
+
+        private bool _hasUndoSnapshot;
+        private int[,] _undoSnapshotCells;
+        private int _undoSnapshotScore;
+        private int _undoSnapshotMoveCount;
+        private int _undoSnapshotHighestTile;
+
+        private void Awake()
+        {
+            _lifetimeToken = this.GetCancellationTokenOnDestroy();
+
+            ScreenFlow = GetComponent<ScreenFlow>() ?? gameObject.AddComponent<ScreenFlow>();
+            _inputReader = gameObject.AddComponent<InputReader>();
+            MonetizationFlows = gameObject.AddComponent<MonetizationFlows>();
+
+            ScreenFlow.PlayClicked += OnPlayClicked;
+            ScreenFlow.DifficultySelected += OnDifficultySelected;
+            ScreenFlow.UndoClicked += OnUndoClicked;
+            ScreenFlow.ContinueWithAdClicked += OnContinueWithAdClicked;
+            ScreenFlow.RestartClicked += OnRestartClicked;
+            ScreenFlow.OpenShopClicked += OnOpenShopClicked;
+            ScreenFlow.CloseShopClicked += OnCloseShopClicked;
+            ScreenFlow.BuyUndoPackClicked += OnBuyUndoPackClicked;
+            ScreenFlow.RemoveAdsClicked += OnRemoveAdsClicked;
+
+            _inputReader.DirectionPerformed += OnDirectionPerformed;
+
+            UpdateUndoHud();
+        }
+
+        private void OnDestroy()
+        {
+            if (ScreenFlow != null)
+            {
+                ScreenFlow.PlayClicked -= OnPlayClicked;
+                ScreenFlow.DifficultySelected -= OnDifficultySelected;
+                ScreenFlow.UndoClicked -= OnUndoClicked;
+                ScreenFlow.ContinueWithAdClicked -= OnContinueWithAdClicked;
+                ScreenFlow.RestartClicked -= OnRestartClicked;
+                ScreenFlow.OpenShopClicked -= OnOpenShopClicked;
+                ScreenFlow.CloseShopClicked -= OnCloseShopClicked;
+                ScreenFlow.BuyUndoPackClicked -= OnBuyUndoPackClicked;
+                ScreenFlow.RemoveAdsClicked -= OnRemoveAdsClicked;
+            }
+
+            if (_inputReader != null)
+            {
+                _inputReader.DirectionPerformed -= OnDirectionPerformed;
+            }
+
+            UnsubscribeFromModel();
+        }
+
+        private void OnPlayClicked()
+        {
+        }
+
+        private void OnOpenShopClicked()
+        {
+            if (ScreenFlow != null)
+            {
+                ScreenFlow.Show(ScreenId.Shop);
+            }
+        }
+
+        private void OnCloseShopClicked()
+        {
+            if (ScreenFlow != null)
+            {
+                ScreenFlow.Show(ScreenId.Gameplay);
+            }
+        }
+
+        private void OnDifficultySelected(Difficulty difficulty)
+        {
+            SelectedDifficulty = difficulty;
+
+            // Gameplay panel must be active BEFORE BoardView.Initialize() reads its
+            // RectTransform size — an inactive panel's layout is never rebuilt, so
+            // the grid container would still measure 0x0 at init time otherwise.
+            if (ScreenFlow != null)
+            {
+                ScreenFlow.Show(ScreenId.Gameplay);
+            }
+
+            StartNewGame(difficulty);
+        }
+
+        private void OnRestartClicked()
+        {
+            if (ScreenFlow != null)
+            {
+                ScreenFlow.Show(ScreenId.Gameplay);
+            }
+
+            StartNewGame(SelectedDifficulty);
+
+            RestartRequested?.Invoke("defeat_restart");
+        }
+
+        private void StartNewGame(Difficulty difficulty)
+        {
+            UnsubscribeFromModel();
+
+            Model = new MergeGameModel(difficulty, new Random());
+
+            if (_boardView == null && ScreenFlow != null && ScreenFlow.BoardContainer != null)
+            {
+                _boardView = ScreenFlow.BoardContainer.gameObject.AddComponent<BoardView>();
+                _boardView.Initialize();
+            }
+
+            _hasUndoSnapshot = false;
+            _undoSnapshotCells = null;
+
+            SubscribeToModel();
+
+            Model.Start();
+        }
+
+        private void SubscribeToModel()
+        {
+            if (Model == null)
+            {
+                return;
+            }
+
+            Model.Started += OnModelStarted;
+            Model.MoveApplied += OnModelMoveApplied;
+            Model.ScoreChanged += OnModelScoreChanged;
+            Model.HighestTileChanged += OnModelHighestTileChanged;
+            Model.GameOver += OnModelGameOver;
+        }
+
+        private void UnsubscribeFromModel()
+        {
+            if (Model == null)
+            {
+                return;
+            }
+
+            Model.Started -= OnModelStarted;
+            Model.MoveApplied -= OnModelMoveApplied;
+            Model.ScoreChanged -= OnModelScoreChanged;
+            Model.HighestTileChanged -= OnModelHighestTileChanged;
+            Model.GameOver -= OnModelGameOver;
+        }
+
+        private void OnModelStarted()
+        {
+            RenderBoard();
+            UpdateScoreHud(Model.Score);
+            UpdateHighestTileHud(Model.HighestTile);
+        }
+
+        private void OnModelMoveApplied(MoveResult result)
+        {
+            RenderBoard();
+        }
+
+        private void OnModelScoreChanged(int score)
+        {
+            UpdateScoreHud(score);
+        }
+
+        private void OnModelHighestTileChanged(int highestTile)
+        {
+            UpdateHighestTileHud(highestTile);
+        }
+
+        private void OnModelGameOver()
+        {
+            if (Model == null || ScreenFlow == null)
+            {
+                return;
+            }
+
+            if (ScreenFlow.GameOverFinalScoreText != null)
+            {
+                ScreenFlow.GameOverFinalScoreText.text = $"Score: {Model.Score}";
+            }
+
+            if (ScreenFlow.GameOverHighestTileText != null)
+            {
+                ScreenFlow.GameOverHighestTileText.text = $"Highest tile: {Model.HighestTile}";
+            }
+
+            ScreenFlow.Show(ScreenId.GameOver);
+
+            SubmitScoreAsync(Model.Score).Forget();
+        }
+
+        private void OnDirectionPerformed(Direction direction)
+        {
+            if (Model == null || ScreenFlow == null)
+            {
+                return;
+            }
+
+            if (ScreenFlow.Current != ScreenId.Gameplay || Model.IsGameOver)
+            {
+                return;
+            }
+
+            var preMoveCells = Model.Board.Snapshot();
+            int preMoveScore = Model.Score;
+            int preMoveMoveCount = Model.MoveCount;
+            int preMoveHighestTile = Model.HighestTile;
+
+            var result = Model.ApplyMove(direction);
+            DirectionInput?.Invoke(direction);
+
+            if (result.Changed)
+            {
+                _undoSnapshotCells = preMoveCells;
+                _undoSnapshotScore = preMoveScore;
+                _undoSnapshotMoveCount = preMoveMoveCount;
+                _undoSnapshotHighestTile = preMoveHighestTile;
+                _hasUndoSnapshot = true;
+            }
+        }
+
+        private void OnUndoClicked()
+        {
+            if (UndoCharges <= 0 || !_hasUndoSnapshot || Model == null)
+            {
+                UndoAttempted?.Invoke(false);
+                return;
+            }
+
+            UndoCharges--;
+            Model.RestoreSnapshot(_undoSnapshotCells, _undoSnapshotScore, _undoSnapshotMoveCount, _undoSnapshotHighestTile);
+
+            _hasUndoSnapshot = false;
+            _undoSnapshotCells = null;
+
+            RenderBoard();
+            UpdateScoreHud(Model.Score);
+            UpdateHighestTileHud(Model.HighestTile);
+            UpdateUndoHud();
+
+            UndoAttempted?.Invoke(true);
+        }
+
+        private void OnBuyUndoPackClicked()
+        {
+            PurchaseUndoPackAsync().Forget();
+        }
+
+        private async UniTaskVoid PurchaseUndoPackAsync()
+        {
+            if (MonetizationFlows == null)
+            {
+                return;
+            }
+
+            bool success = await MonetizationFlows.PurchaseUndoPackAsync(_lifetimeToken);
+
+            if (_lifetimeToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (success)
+            {
+                UndoCharges += 3;
+                UpdateUndoHud();
+            }
+        }
+
+        private void OnRemoveAdsClicked()
+        {
+            PurchaseRemoveAdsAsync().Forget();
+        }
+
+        private async UniTaskVoid PurchaseRemoveAdsAsync()
+        {
+            if (MonetizationFlows == null)
+            {
+                return;
+            }
+
+            bool success = await MonetizationFlows.PurchaseRemoveAdsAsync(_lifetimeToken);
+
+            if (_lifetimeToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (success)
+            {
+                AdsRemoved = true;
+
+                if (ScreenFlow != null && ScreenFlow.RemoveAdsButton != null)
+                {
+                    ScreenFlow.RemoveAdsButton.interactable = false;
+                }
+            }
+        }
+
+        private void OnContinueWithAdClicked()
+        {
+            ContinueWithAdAsync().Forget();
+        }
+
+        private async UniTaskVoid ContinueWithAdAsync()
+        {
+            if (MonetizationFlows == null)
+            {
+                return;
+            }
+
+            bool rewarded = await MonetizationFlows.ShowRewardedContinueAdAsync(_lifetimeToken);
+
+            if (_lifetimeToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (!rewarded)
+            {
+                return;
+            }
+
+            ApplyContinueEffect();
+
+            if (ScreenFlow != null)
+            {
+                ScreenFlow.Show(ScreenId.Gameplay);
+            }
+        }
+
+        private void ApplyContinueEffect()
+        {
+            if (Model == null)
+            {
+                return;
+            }
+
+            var cells = Model.Board.Snapshot();
+            ClearLowestNonZeroTile(cells);
+            ClearLowestNonZeroTile(cells);
+
+            Model.RestoreSnapshot(cells, Model.Score, Model.MoveCount, Model.HighestTile);
+
+            RenderBoard();
+            UpdateScoreHud(Model.Score);
+            UpdateHighestTileHud(Model.HighestTile);
+        }
+
+        private static void ClearLowestNonZeroTile(int[,] cells)
+        {
+            int size = Board.SIZE;
+            int lowestValue = int.MaxValue;
+            int lowestRow = -1;
+            int lowestCol = -1;
+
+            for (int row = 0; row < size; row++)
+            {
+                for (int col = 0; col < size; col++)
+                {
+                    int value = cells[row, col];
+                    if (value > 0 && value < lowestValue)
+                    {
+                        lowestValue = value;
+                        lowestRow = row;
+                        lowestCol = col;
+                    }
+                }
+            }
+
+            if (lowestRow >= 0)
+            {
+                cells[lowestRow, lowestCol] = 0;
+            }
+        }
+
+        private async UniTaskVoid SubmitScoreAsync(int score)
+        {
+            if (MonetizationFlows == null)
+            {
+                return;
+            }
+
+            await MonetizationFlows.SubmitScoreToLeaderboardAsync(score, _lifetimeToken);
+        }
+
+        private void RenderBoard()
+        {
+            if (_boardView != null && Model != null)
+            {
+                _boardView.Render(Model.Board);
+            }
+        }
+
+        private void UpdateScoreHud(int score)
+        {
+            if (ScreenFlow != null && ScreenFlow.ScoreValueText != null)
+            {
+                ScreenFlow.ScoreValueText.text = score.ToString();
+            }
+        }
+
+        private void UpdateHighestTileHud(int highestTile)
+        {
+            if (ScreenFlow != null && ScreenFlow.HighestTileValueText != null)
+            {
+                ScreenFlow.HighestTileValueText.text = highestTile.ToString();
+            }
+        }
+
+        private void UpdateUndoHud()
+        {
+            if (ScreenFlow == null)
+            {
+                return;
+            }
+
+            if (ScreenFlow.UndoChargeText != null)
+            {
+                ScreenFlow.UndoChargeText.text = UndoCharges.ToString();
+            }
+
+            if (ScreenFlow.UndoButton != null)
+            {
+                ScreenFlow.UndoButton.interactable = UndoCharges > 0;
+            }
+        }
+    }
+}

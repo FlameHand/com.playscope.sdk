@@ -21,5 +21,12 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/FlameHand/com.playscope.sdk.git"
-  }
+  },
+  "samples": [
+    {
+      "displayName": "2048 Merge Demo (6×6)",
+      "description": "Playable merge game showing end-to-end PlayScope SDK integration best practices.",
+      "path": "Samples~/Merge2048"
+    }
+  ]
 }
