@@ -36,7 +36,7 @@ namespace PlayScopeSdk.Internal
         private long _heartbeatStopwatchTicks;
         private long _heartbeatWallTicks;
 
-        private Timer? _timer;
+        private Timer _timer;
 
         private volatile bool _inAnr;
         private volatile bool _suspended;
@@ -94,7 +94,7 @@ namespace PlayScopeSdk.Internal
 
         // Timer callback on a threadpool worker. Must not touch any
         // UnityEngine API — we're not on the main thread.
-        private void TimerTick(object? state)
+        private void TimerTick(object state)
         {
             if (_suspended) return;
             try

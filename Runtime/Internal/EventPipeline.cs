@@ -26,17 +26,17 @@ namespace PlayScopeSdk.Internal
         private volatile string _currentScreen = "";
         private volatile string _currentAction = "";
         // Optional — null = every log goes straight to the queue (dedup is purely additive).
-        private LogDedupBuffer? _logDedup;
+        private LogDedupBuffer _logDedup;
 
         internal EventPipeline(EventQueue queue) => _queue = queue;
 
-        internal void SetLogDedupBuffer(LogDedupBuffer? buffer) => _logDedup = buffer;
+        internal void SetLogDedupBuffer(LogDedupBuffer buffer) => _logDedup = buffer;
 
         internal void SetScreen(string screen) => _currentScreen = screen ?? "";
         internal void SetAction(string action) => _currentAction = action ?? "";
 
-        internal void EnqueueEvent(string eventType, string? operationId = null, string? operationType = null,
-            string? metadataJson = null, string? statePatchJson = null)
+        internal void EnqueueEvent(string eventType, string operationId = null, string operationType = null,
+            string metadataJson = null, string statePatchJson = null)
         {
             // Write gate — closed (~1 frame) during the rotation race window so
             // nothing stamps itself into the doomed old session. Silent drop.
@@ -107,7 +107,7 @@ namespace PlayScopeSdk.Internal
             var seen = new HashSet<string>(StringComparer.Ordinal);
             bool inString = false;
             int keyStringStart = -1;
-            string? lastTopLevelKey = null;
+            string lastTopLevelKey = null;
             bool keyJustClosed = false;
             for (int i = 0; i < json.Length; i++)
             {
@@ -157,7 +157,7 @@ namespace PlayScopeSdk.Internal
             return seen.Count;
         }
 
-        internal void EnqueueLog(string level, string message, string? stackTrace = null, string? metadataJson = null)
+        internal void EnqueueLog(string level, string message, string stackTrace = null, string metadataJson = null)
         {
             // Write gate (see EnqueueEvent) — drops even error/exception during
             // the rotation window; they belong to the about-to-open new session.
@@ -263,7 +263,7 @@ namespace PlayScopeSdk.Internal
             return sb.ToString();
         }
 
-        private static string ValueToJson(object? v, int depth)
+        private static string ValueToJson(object v, int depth)
         {
             if (v == null) return "null";
             if (v is bool b) return b ? "true" : "false";

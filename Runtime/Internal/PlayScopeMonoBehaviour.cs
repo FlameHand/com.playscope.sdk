@@ -8,7 +8,7 @@ namespace PlayScopeSdk.Internal
 {
     internal sealed class PlayScopeMonoBehaviour : MonoBehaviour
     {
-        private MetricsSampler? _sampler;
+        private MetricsSampler _sampler;
         // Warn-once for the per-frame backstop — a component faulting every tick
         // would otherwise spam a warning per frame for the rest of the session.
         private bool _updateFaultWarned;

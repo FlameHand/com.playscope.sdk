@@ -7,7 +7,7 @@ namespace PlayScopeSdk.Internal
 {
     internal sealed class HeartbeatWorker
     {
-        private CancellationTokenSource? _cts;
+        private CancellationTokenSource _cts;
 
         internal void Start()
         {

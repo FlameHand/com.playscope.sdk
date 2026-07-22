@@ -27,18 +27,18 @@ namespace PlayScopeSdk.Internal
         internal string EventId = "";
         internal long SequenceNum;
         internal string Timestamp = "";       // ISO 8601 UTC
-        internal string? ScreenName;
-        internal string? ActionName;
-        internal string? OperationId;
-        internal string? OperationType;
-        internal string? MetadataJson;        // pre-serialized JSON string or null
-        internal string? StatePatchJson;      // for state events
+        internal string ScreenName;
+        internal string ActionName;
+        internal string OperationId;
+        internal string OperationType;
+        internal string MetadataJson;        // pre-serialized JSON string or null
+        internal string StatePatchJson;      // for state events
         // For logs:
-        internal string? Level;
-        internal string? Message;
-        internal string? StackTrace;
+        internal string Level;
+        internal string Message;
+        internal string StackTrace;
         // For metrics:
-        internal string? MetricType;
+        internal string MetricType;
         internal double MetricValue;
         // Critical flag
         internal bool IsCritical;

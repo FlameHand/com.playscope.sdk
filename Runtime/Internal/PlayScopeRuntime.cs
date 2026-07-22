@@ -74,24 +74,24 @@ namespace PlayScopeSdk.Internal
         internal static DeviceIdentity Device { get; private set; }
         internal static SessionInfo CurrentSession { get; private set; }
 
-        internal static EventQueue? Queue { get; private set; }
-        internal static EventPipeline? Pipeline { get; private set; }
-        internal static UploadQueue? UploadQueue { get; private set; }
+        internal static EventQueue Queue { get; private set; }
+        internal static EventPipeline Pipeline { get; private set; }
+        internal static UploadQueue UploadQueue { get; private set; }
         // Repeats-collapsing buffer for absorbable log levels. Ticked by
         // Update; drained on pause/teardown so a backgrounding session doesn't
         // strand the last buffered logs.
-        internal static LogDedupBuffer? LogDedupBuffer { get; private set; }
+        internal static LogDedupBuffer LogDedupBuffer { get; private set; }
         internal static StatePatchCoalescer StatePatchCoalescer { get; } = new();
         // Independent buffer from profile-state so a periodic device sample never
         // overwrites a gameplay key. Wider window (1 s vs 100 ms) folds init bursts.
         internal static SessionDataCoalescer SessionDataCoalescer { get; } = new();
-        private static WriterWorker? _writer;
-        private static HeartbeatWorker? _heartbeat;
-        internal static UploaderWorker? _uploader;
+        private static WriterWorker _writer;
+        private static HeartbeatWorker _heartbeat;
+        internal static UploaderWorker _uploader;
         // Null when disabled (Editor, or AnrDetectionEnabled = false) so the
         // heartbeat call short-circuits without overhead.
-        internal static AnrWatchdog? AnrWatchdog { get; private set; }
-        private static GameObject? _driverGo;
+        internal static AnrWatchdog AnrWatchdog { get; private set; }
+        private static GameObject _driverGo;
         private static bool _quittingSubscribed;
         private static bool _logCaptureSubscribed;
         // Tracked so TeardownInternal only unhooks if we actually subscribed
@@ -107,7 +107,7 @@ namespace PlayScopeSdk.Internal
 
         // The Initialize() context, held so RotateSession() rebuilds an identical
         // runtime. NEVER mutated after first Initialize.
-        private static PlayScopeContext? _context;
+        private static PlayScopeContext _context;
 
         // Set by RecordLifecycle, consumed by the MonoBehaviour on its next Update
         // so rotation runs OUTSIDE the OnApplicationPause / OnFocusChanged callback
@@ -349,7 +349,7 @@ namespace PlayScopeSdk.Internal
             {
                 try
                 {
-                    AnrWatchdog = new AnrWatchdog(Pipeline!, context.AnrThresholdMs);
+                    AnrWatchdog = new AnrWatchdog(Pipeline, context.AnrThresholdMs);
                     AnrWatchdog.Start();
                 }
                 catch (Exception ex)

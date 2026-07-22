@@ -74,12 +74,12 @@ namespace PlayScopeSdk.Internal
         /// <summary>Per-frame tick — emits entries whose 5 s window elapsed.</summary>
         internal void TickAndMaybeFlush()
         {
-            List<Entry>? toEmit = null;
+            List<Entry> toEmit = null;
             var nowTicks = DateTime.UtcNow.Ticks;
             lock (_gate)
             {
                 if (_entries.Count == 0) return;
-                List<string>? expiredKeys = null;
+                List<string> expiredKeys = null;
                 foreach (var kv in _entries)
                 {
                     var ageMs = (nowTicks - kv.Value.BufferedAtTicks) / TimeSpan.TicksPerMillisecond;
@@ -123,7 +123,7 @@ namespace PlayScopeSdk.Internal
         {
             if (_entries.Count < MaxEntries) return;
             // Emit the oldest to make room — not precise LRU, just a spam safety valve.
-            string? oldestKey = null;
+            string oldestKey = null;
             long oldestTicks = long.MaxValue;
             foreach (var kv in _entries)
             {
@@ -174,11 +174,11 @@ namespace PlayScopeSdk.Internal
 
         // Splices "repeat_count": N after the opening brace — hand-rolled because
         // the pipeline keeps metadata as serialized JSON throughout.
-        private static string InjectRepeatCount(string? metadataJson, int count)
+        private static string InjectRepeatCount(string metadataJson, int count)
         {
             if (string.IsNullOrEmpty(metadataJson) || metadataJson == "{}")
                 return "{\"repeat_count\":" + count + "}";
-            if (metadataJson![0] == '{')
+            if (metadataJson[0] == '{')
                 return "{\"repeat_count\":" + count + "," + metadataJson.Substring(1);
             // Unexpected shape — leave as-is rather than produce malformed JSON.
             return metadataJson;

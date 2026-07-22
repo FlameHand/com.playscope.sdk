@@ -17,8 +17,8 @@ namespace PlayScopeSdk.Internal
         private const int WindowMs = 100;
 
         private readonly object _gate = new();
-        private Dictionary<string, object>? _buffer;
-        private string? _bufferReason;
+        private Dictionary<string, object> _buffer;
+        private string _bufferReason;
         // Stopwatch-monotonic ms — Environment.TickCount (int) wraps after 49.7 days.
         private long _bufferStartTick;
 
@@ -30,7 +30,7 @@ namespace PlayScopeSdk.Internal
         /// Append a patch (thread-safe). The window is anchored on the FIRST
         /// patch in a buffer, so a burst emits in one ~100ms window, not sliding.
         /// </summary>
-        internal void Add(IReadOnlyDictionary<string, object>? patch, string? reason)
+        internal void Add(IReadOnlyDictionary<string, object> patch, string reason)
         {
             lock (_gate)
             {

@@ -26,7 +26,7 @@ namespace PlayScopeSdk.Internal
         private readonly PlayScopeContext _context;
         private readonly SessionInfo _session;
         private readonly UploadQueue _queue;
-        private CancellationTokenSource? _cts;
+        private CancellationTokenSource _cts;
 
         // Thread-local jitter RNG — UnityEngine.Random is main-thread only.
         private static readonly System.Random _jitterRng = new System.Random();
@@ -501,7 +501,7 @@ namespace PlayScopeSdk.Internal
                     $"Recovered chunk '{Path.GetFileName(chunkPath)}' has no session.json manifest " +
                     $"in {chunkDir}. Refusing to upload — would risk attributing to wrong session.");
 
-            Dictionary<string, object>? dto;
+            Dictionary<string, object> dto;
             try
             {
                 var json = File.ReadAllText(manifestPath, new UTF8Encoding(false));
@@ -533,7 +533,7 @@ namespace PlayScopeSdk.Internal
         /// Fast extraction of the "record_type" field from a JSONL line.
         /// Looks for "record_type":"value" without full deserialization.
         /// </summary>
-        private static string? ExtractRecordType(string line)
+        private static string ExtractRecordType(string line)
         {
             const string key = "\"record_type\":\"";
             int idx = line.IndexOf(key, StringComparison.Ordinal);
@@ -577,7 +577,7 @@ namespace PlayScopeSdk.Internal
 
         // ── State file helpers ────────────────────────────────────────────────────
 
-        private static UploadState? LoadState(string stateFilePath)
+        private static UploadState LoadState(string stateFilePath)
         {
             if (!File.Exists(stateFilePath)) return null;
             try
@@ -915,7 +915,7 @@ namespace PlayScopeSdk.Internal
                        $"\"is_uploaded\":{(IsUploaded ? "true" : "false")}}}";
             }
 
-            internal static UploadState? FromJson(string json)
+            internal static UploadState FromJson(string json)
             {
                 var dict = SimpleJson.Deserialize(json);
                 if (dict == null) return null;
@@ -933,7 +933,7 @@ namespace PlayScopeSdk.Internal
                 return state;
             }
 
-            private static int ParseInt(object? v)
+            private static int ParseInt(object v)
             {
                 if (v is string s && int.TryParse(s, out var i)) return i;
                 if (v is int i2) return i2;

@@ -18,7 +18,7 @@ namespace PlayScopeSdk.Internal
         private readonly SessionInfo _session;
         private readonly List<EventRecord> _buffer = new(64);
         private readonly object _bufferLock = new object();
-        private CancellationTokenSource? _cts;
+        private CancellationTokenSource _cts;
         // Monotonic clock for the time-trigger flush: a DateTime.UtcNow rewind
         // (NTP) would go negative and silently disable the flush until the clock
         // caught up. Stopwatch is hardware-monotonic.
@@ -27,8 +27,8 @@ namespace PlayScopeSdk.Internal
         private long _currentChunkSize = 0;
 
         // Long-lived stream over chunk_current.jsonl (issue #15).
-        private FileStream? _currentStream;
-        private StreamWriter? _currentWriter;
+        private FileStream _currentStream;
+        private StreamWriter _currentWriter;
 
         private const int FlushRecordThreshold = 32;
         private const double FlushIntervalSeconds = 2.0;
@@ -40,7 +40,7 @@ namespace PlayScopeSdk.Internal
         /// <see cref="UploaderWorker.TriggerInstantUpload"/> so the uploader wakes
         /// instead of sleeping out its 30 s window. Idempotent uploader-side.
         /// </summary>
-        internal Action? OnChunkFinalized;
+        internal Action OnChunkFinalized;
 
         internal WriterWorker(EventQueue queue, UploadQueue uploadQueue, SessionInfo session)
         {

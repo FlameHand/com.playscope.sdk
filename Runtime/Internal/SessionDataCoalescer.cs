@@ -17,8 +17,8 @@ namespace PlayScopeSdk.Internal
         private const int WindowMs = 1000;
 
         private readonly object _gate = new();
-        private Dictionary<string, object>? _buffer;
-        private string? _bufferReason;
+        private Dictionary<string, object> _buffer;
+        private string _bufferReason;
         // Stopwatch-monotonic ms — Environment.TickCount (int) wraps after 49.7
         // days, which on a kiosk/TV install would go negative and disable the flush.
         private long _bufferStartTick;
@@ -29,7 +29,7 @@ namespace PlayScopeSdk.Internal
         // Drives the session_data_initial → session_data_patch choice.
         private bool _initialEmitted;
 
-        internal void Add(IReadOnlyDictionary<string, object>? patch, string? reason)
+        internal void Add(IReadOnlyDictionary<string, object> patch, string reason)
         {
             lock (_gate)
             {

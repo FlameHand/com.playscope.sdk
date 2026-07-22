@@ -544,7 +544,7 @@ namespace PlayScopeSdk.Internal
             try
             {
                 using var sr = new StreamReader(chunkPath, new UTF8Encoding(false));
-                string? line;
+                string line;
                 while ((line = sr.ReadLine()) != null)
                 {
                     if (string.IsNullOrWhiteSpace(line)) continue;
@@ -658,7 +658,7 @@ namespace PlayScopeSdk.Internal
         /// Fast field extractor: finds "key":"value" in a JSONL line without
         /// full deserialization. Matches the pattern used elsewhere in the SDK.
         /// </summary>
-        private static string? ExtractField(string line, string key)
+        private static string ExtractField(string line, string key)
         {
             var search = "\"" + key + "\":\"";
             int idx = line.IndexOf(search, StringComparison.Ordinal);
