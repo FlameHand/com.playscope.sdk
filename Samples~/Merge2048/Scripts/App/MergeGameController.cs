@@ -29,6 +29,7 @@ namespace Merge2048.App
         private int _undoSnapshotScore;
         private int _undoSnapshotMoveCount;
         private int _undoSnapshotHighestTile;
+        private int _bestScore;
 
         private void Awake()
         {
@@ -51,6 +52,7 @@ namespace Merge2048.App
             _inputReader.DirectionPerformed += OnDirectionPerformed;
 
             UpdateUndoHud();
+            RefreshBestHud();
         }
 
         private void OnDestroy()
@@ -144,6 +146,8 @@ namespace Merge2048.App
             SubscribeToModel();
 
             Model.Start();
+
+            RefreshBestHud();
         }
 
         private void SubscribeToModel()
@@ -156,7 +160,6 @@ namespace Merge2048.App
             Model.Started += OnModelStarted;
             Model.MoveApplied += OnModelMoveApplied;
             Model.ScoreChanged += OnModelScoreChanged;
-            Model.HighestTileChanged += OnModelHighestTileChanged;
             Model.GameOver += OnModelGameOver;
         }
 
@@ -170,7 +173,6 @@ namespace Merge2048.App
             Model.Started -= OnModelStarted;
             Model.MoveApplied -= OnModelMoveApplied;
             Model.ScoreChanged -= OnModelScoreChanged;
-            Model.HighestTileChanged -= OnModelHighestTileChanged;
             Model.GameOver -= OnModelGameOver;
         }
 
@@ -178,7 +180,6 @@ namespace Merge2048.App
         {
             RenderBoard();
             UpdateScoreHud(Model.Score);
-            UpdateHighestTileHud(Model.HighestTile);
         }
 
         private void OnModelMoveApplied(MoveResult result)
@@ -189,11 +190,6 @@ namespace Merge2048.App
         private void OnModelScoreChanged(int score)
         {
             UpdateScoreHud(score);
-        }
-
-        private void OnModelHighestTileChanged(int highestTile)
-        {
-            UpdateHighestTileHud(highestTile);
         }
 
         private void OnModelGameOver()
@@ -214,6 +210,13 @@ namespace Merge2048.App
             }
 
             ScreenFlow.Show(ScreenId.GameOver);
+
+            HighScoreStore.TrySave(Model.Score);
+            if (Model.Score > _bestScore)
+            {
+                _bestScore = Model.Score;
+                UpdateBestHud(_bestScore);
+            }
 
             SubmitScoreAsync(Model.Score);
         }
@@ -264,7 +267,6 @@ namespace Merge2048.App
 
             RenderBoard();
             UpdateScoreHud(Model.Score);
-            UpdateHighestTileHud(Model.HighestTile);
             UpdateUndoHud();
 
             UndoAttempted?.Invoke(true);
@@ -373,7 +375,6 @@ namespace Merge2048.App
 
             RenderBoard();
             UpdateScoreHud(Model.Score);
-            UpdateHighestTileHud(Model.HighestTile);
         }
 
         private static void ClearLowestNonZeroTile(int[,] cells)
@@ -429,11 +430,17 @@ namespace Merge2048.App
             }
         }
 
-        private void UpdateHighestTileHud(int highestTile)
+        private void RefreshBestHud()
         {
-            if (ScreenFlow != null && ScreenFlow.HighestTileValueText != null)
+            _bestScore = HighScoreStore.Load();
+            UpdateBestHud(_bestScore);
+        }
+
+        private void UpdateBestHud(int bestScore)
+        {
+            if (ScreenFlow != null && ScreenFlow.BestValueText != null)
             {
-                ScreenFlow.HighestTileValueText.text = highestTile.ToString();
+                ScreenFlow.BestValueText.text = bestScore.ToString();
             }
         }
 

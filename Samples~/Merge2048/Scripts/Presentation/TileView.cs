@@ -6,10 +6,7 @@ namespace Merge2048.Presentation
 {
     public sealed class TileView : MonoBehaviour
     {
-        private static readonly Color EMPTY_CELL_COLOR = new Color32(0xCD, 0xC1, 0xB4, 0x59);
         private static readonly Color MAX_TILE_COLOR = new Color32(0x3C, 0x3A, 0x32, 0xFF);
-        private static readonly Color DARK_LABEL_COLOR = new Color32(0x77, 0x6E, 0x65, 0xFF);
-        private static readonly Color LIGHT_LABEL_COLOR = new Color32(0xF9, 0xF6, 0xF2, 0xFF);
 
         private const float LABEL_FONT_SIZE = 48f;
         private const float LABEL_FONT_SIZE_MIN = 12f;
@@ -40,20 +37,22 @@ namespace Merge2048.Presentation
 
             if (value <= 0)
             {
-                _backgroundImage.color = EMPTY_CELL_COLOR;
+                _backgroundImage.color = Merge2048Theme.EMPTY_CELL_COLOR;
                 _valueLabel.text = string.Empty;
                 return;
             }
 
             _backgroundImage.color = ColorForValue(value);
             _valueLabel.text = value.ToString();
-            _valueLabel.color = value <= 4 ? DARK_LABEL_COLOR : LIGHT_LABEL_COLOR;
+            _valueLabel.color = value <= 4 ? Merge2048Theme.TEXT_ON_LIGHT_COLOR : Merge2048Theme.TEXT_ON_DARK_COLOR;
         }
 
         private void BuildView()
         {
             _backgroundImage = gameObject.AddComponent<Image>();
-            _backgroundImage.color = EMPTY_CELL_COLOR;
+            _backgroundImage.sprite = RoundedRectSprite.Get();
+            _backgroundImage.type = Image.Type.Sliced;
+            _backgroundImage.color = Merge2048Theme.EMPTY_CELL_COLOR;
 
             var labelGo = new GameObject("Label", typeof(RectTransform));
             labelGo.transform.SetParent(transform, false);
@@ -73,7 +72,7 @@ namespace Merge2048.Presentation
             _valueLabel.enableAutoSizing = true;
             _valueLabel.fontSizeMin = LABEL_FONT_SIZE_MIN;
             _valueLabel.fontSizeMax = LABEL_FONT_SIZE_MAX;
-            _valueLabel.color = DARK_LABEL_COLOR;
+            _valueLabel.color = Merge2048Theme.TEXT_ON_LIGHT_COLOR;
             _valueLabel.text = string.Empty;
         }
 

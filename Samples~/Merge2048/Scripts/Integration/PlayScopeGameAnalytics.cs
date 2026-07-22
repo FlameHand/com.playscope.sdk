@@ -10,8 +10,6 @@ namespace Merge2048.Integration
 {
     public sealed class PlayScopeGameAnalytics : MonoBehaviour
     {
-        private const string HIGH_SCORE_KEY = "Merge2048_HighScore";
-
         private MergeGameController _controller;
         private MergeGameModel _subscribedModel;
         private bool _highestTileFlaggedThisMove;
@@ -34,6 +32,8 @@ namespace Merge2048.Integration
             _controller.DirectionInput += OnDirectionInput;
             _controller.UndoAttempted += OnUndoAttempted;
             _controller.RestartRequested += OnRestartRequested;
+
+            HighScoreStore.LoadFailed += OnHighScoreLoadFailed;
         }
 
         private void OnDestroy()
@@ -58,6 +58,8 @@ namespace Merge2048.Integration
                 _controller.UndoAttempted -= OnUndoAttempted;
                 _controller.RestartRequested -= OnRestartRequested;
             }
+
+            HighScoreStore.LoadFailed -= OnHighScoreLoadFailed;
 
             RebindModel(null);
         }
@@ -167,7 +169,6 @@ namespace Merge2048.Integration
             {
                 _subscribedModel.MoveApplied -= OnModelMoveApplied;
                 _subscribedModel.HighestTileChanged -= OnModelHighestTileChanged;
-                _subscribedModel.GameOver -= OnModelGameOver;
             }
 
             _subscribedModel = newModel;
@@ -177,7 +178,6 @@ namespace Merge2048.Integration
             {
                 _subscribedModel.MoveApplied += OnModelMoveApplied;
                 _subscribedModel.HighestTileChanged += OnModelHighestTileChanged;
-                _subscribedModel.GameOver += OnModelGameOver;
             }
         }
 
@@ -205,11 +205,6 @@ namespace Merge2048.Integration
             _highestTileFlaggedThisMove = false;
         }
 
-        private void OnModelGameOver()
-        {
-            TryPersistHighScore(_subscribedModel.Score);
-        }
-
         private void SendStatePatch(string reason)
         {
             if (_subscribedModel == null)
@@ -226,38 +221,12 @@ namespace Merge2048.Integration
             }, reason);
         }
 
-        private void TryPersistHighScore(int latestScore)
+        private void OnHighScoreLoadFailed(Exception ex)
         {
-            int currentBest = TryLoadHighScore();
-
-            if (latestScore > currentBest)
+            PlayScope.TrackException(ex, new Dictionary<string, object>
             {
-                PlayerPrefs.SetString(HIGH_SCORE_KEY, latestScore.ToString());
-                PlayerPrefs.Save();
-            }
-        }
-
-        private int TryLoadHighScore()
-        {
-            if (!PlayerPrefs.HasKey(HIGH_SCORE_KEY))
-            {
-                return 0;
-            }
-
-            string raw = PlayerPrefs.GetString(HIGH_SCORE_KEY);
-
-            try
-            {
-                return int.Parse(raw);
-            }
-            catch (FormatException ex)
-            {
-                PlayScope.TrackException(ex, new Dictionary<string, object>
-                {
-                    ["context"] = "high_score_load",
-                });
-                return 0;
-            }
+                ["context"] = "high_score_load",
+            });
         }
     }
 }
