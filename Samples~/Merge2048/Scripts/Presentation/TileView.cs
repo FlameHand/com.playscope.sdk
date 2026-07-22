@@ -4,6 +4,9 @@ using TMPro;
 
 namespace Merge2048.Presentation
 {
+    // Free-floating movable numbered piece — NOT managed by a layout group. BoardView
+    // positions it manually via RectTransform.anchoredPosition and drives slide/pop/spawn
+    // animations directly against RectTransform. BoardCellView owns the static background.
     public sealed class TileView : MonoBehaviour
     {
         private static readonly Color MAX_TILE_COLOR = new Color32(0x3C, 0x3A, 0x32, 0xFF);
@@ -15,7 +18,10 @@ namespace Merge2048.Presentation
         private Image _backgroundImage;
         private TextMeshProUGUI _valueLabel;
 
-        public static TileView Create(Transform parent)
+        public RectTransform RectTransform { get; private set; }
+        public int Value { get; private set; }
+
+        public static TileView Create(Transform parent, float cellSize)
         {
             var go = new GameObject("Tile", typeof(RectTransform));
             if (parent != null)
@@ -24,35 +30,37 @@ namespace Merge2048.Presentation
             }
 
             var tileView = go.AddComponent<TileView>();
-            tileView.BuildView();
+            tileView.BuildView(cellSize);
             return tileView;
         }
 
         public void SetValue(int value)
         {
-            if (_backgroundImage == null || _valueLabel == null)
+            if (_backgroundImage == null || _valueLabel == null || value <= 0)
             {
                 return;
             }
 
-            if (value <= 0)
-            {
-                _backgroundImage.color = Merge2048Theme.EMPTY_CELL_COLOR;
-                _valueLabel.text = string.Empty;
-                return;
-            }
-
+            Value = value;
             _backgroundImage.color = ColorForValue(value);
             _valueLabel.text = value.ToString();
             _valueLabel.color = value <= 4 ? Merge2048Theme.TEXT_ON_LIGHT_COLOR : Merge2048Theme.TEXT_ON_DARK_COLOR;
         }
 
-        private void BuildView()
+        private void BuildView(float cellSize)
         {
+            RectTransform = GetComponent<RectTransform>();
+
+            // Anchored to the parent layer's top-left (0,1) with a centered pivot so
+            // BoardView.CellAnchoredPosition() (top-left-corner-origin formula) applies directly.
+            RectTransform.anchorMin = new Vector2(0f, 1f);
+            RectTransform.anchorMax = new Vector2(0f, 1f);
+            RectTransform.pivot = new Vector2(0.5f, 0.5f);
+            RectTransform.sizeDelta = new Vector2(cellSize, cellSize);
+
             _backgroundImage = gameObject.AddComponent<Image>();
             _backgroundImage.sprite = RoundedRectSprite.Get();
             _backgroundImage.type = Image.Type.Sliced;
-            _backgroundImage.color = Merge2048Theme.EMPTY_CELL_COLOR;
 
             var labelGo = new GameObject("Label", typeof(RectTransform));
             labelGo.transform.SetParent(transform, false);

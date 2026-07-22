@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace Merge2048.Core
 {
     public static class MoveResolver
@@ -6,13 +8,15 @@ namespace Merge2048.Core
         {
             if (direction == Direction.Unknown)
             {
-                return new MoveResult(false, 0, 0, 0);
+                return new MoveResult(false, 0, 0, 0, null, null, null);
             }
 
             int size = Board.SIZE;
             bool anyChanged = false;
             int totalScoreGained = 0;
             int totalMergeCount = 0;
+            var movements = new List<TileMovement>();
+            var merges = new List<MergeEvent>();
 
             switch (direction)
             {
@@ -31,6 +35,7 @@ namespace Merge2048.Core
                         anyChanged = anyChanged || lineResult.Changed;
                         totalScoreGained += lineResult.ScoreGained;
                         totalMergeCount += lineResult.MergeCount;
+                        AppendLineEvents(direction, row, lineResult, movements, merges);
                     }
 
                     break;
@@ -50,6 +55,7 @@ namespace Merge2048.Core
                         anyChanged = anyChanged || lineResult.Changed;
                         totalScoreGained += lineResult.ScoreGained;
                         totalMergeCount += lineResult.MergeCount;
+                        AppendLineEvents(direction, row, lineResult, movements, merges);
                     }
 
                     break;
@@ -69,6 +75,7 @@ namespace Merge2048.Core
                         anyChanged = anyChanged || lineResult.Changed;
                         totalScoreGained += lineResult.ScoreGained;
                         totalMergeCount += lineResult.MergeCount;
+                        AppendLineEvents(direction, col, lineResult, movements, merges);
                     }
 
                     break;
@@ -88,6 +95,7 @@ namespace Merge2048.Core
                         anyChanged = anyChanged || lineResult.Changed;
                         totalScoreGained += lineResult.ScoreGained;
                         totalMergeCount += lineResult.MergeCount;
+                        AppendLineEvents(direction, col, lineResult, movements, merges);
                     }
 
                     break;
@@ -107,13 +115,73 @@ namespace Merge2048.Core
                 }
             }
 
-            return new MoveResult(anyChanged, totalScoreGained, totalMergeCount, highestTile);
+            return new MoveResult(anyChanged, totalScoreGained, totalMergeCount, highestTile, movements, merges, null);
+        }
+
+        // Same fixedIndex/lineIndex -> board cell formula applies whether lineIndex was used
+        // to READ the pre-move source value or WRITE the post-move result value (verified by
+        // tracing the Reverse()+WriteRow/WriteColumn combination for Right/Down above).
+        private static (int Row, int Col) LineIndexToCell(Direction direction, int fixedIndex, int lineIndex)
+        {
+            switch (direction)
+            {
+                case Direction.Left:
+                {
+                    return (fixedIndex, lineIndex);
+                }
+                case Direction.Right:
+                {
+                    return (fixedIndex, Board.SIZE - 1 - lineIndex);
+                }
+                case Direction.Up:
+                {
+                    return (lineIndex, fixedIndex);
+                }
+                case Direction.Down:
+                {
+                    return (Board.SIZE - 1 - lineIndex, fixedIndex);
+                }
+                default:
+                {
+                    return (fixedIndex, lineIndex);
+                }
+            }
+        }
+
+        private static void AppendLineEvents(
+            Direction direction,
+            int fixedIndex,
+            LineResult lineResult,
+            List<TileMovement> movements,
+            List<MergeEvent> merges)
+        {
+            if (lineResult.Movements != null)
+            {
+                for (int i = 0; i < lineResult.Movements.Count; i++)
+                {
+                    var lineMovement = lineResult.Movements[i];
+                    var from = LineIndexToCell(direction, fixedIndex, lineMovement.SourceIndex);
+                    var to = LineIndexToCell(direction, fixedIndex, lineMovement.DestinationIndex);
+                    movements.Add(new TileMovement(from.Row, from.Col, to.Row, to.Col, lineMovement.ConsumedByMerge));
+                }
+            }
+
+            if (lineResult.Merges != null)
+            {
+                for (int i = 0; i < lineResult.Merges.Count; i++)
+                {
+                    var lineMerge = lineResult.Merges[i];
+                    var cell = LineIndexToCell(direction, fixedIndex, lineMerge.DestinationIndex);
+                    merges.Add(new MergeEvent(cell.Row, cell.Col, lineMerge.ResultValue));
+                }
+            }
         }
 
         private static LineResult ProcessLine(int[] line)
         {
             int size = Board.SIZE;
             var compacted = new int[size];
+            var sourceIndex = new int[size];
             int count = 0;
 
             for (int i = 0; i < size; i++)
@@ -121,8 +189,15 @@ namespace Merge2048.Core
                 if (line[i] != 0)
                 {
                     compacted[count] = line[i];
+                    sourceIndex[count] = i;
                     count++;
                 }
+            }
+
+            var mergedFromSourceIndex = new int[size];
+            for (int i = 0; i < size; i++)
+            {
+                mergedFromSourceIndex[i] = -1;
             }
 
             int scoreGained = 0;
@@ -135,19 +210,32 @@ namespace Merge2048.Core
                     compacted[i] *= 2;
                     scoreGained += compacted[i];
                     mergeCount++;
+                    mergedFromSourceIndex[i] = sourceIndex[i + 1];
                     compacted[i + 1] = 0;
                     i++;
                 }
             }
 
             var result = new int[size];
+            var movements = new List<LineMovement>();
+            var merges = new List<LineMerge>();
             int writeIndex = 0;
 
-            for (int i = 0; i < size; i++)
+            for (int i = 0; i < count; i++)
             {
                 if (compacted[i] != 0)
                 {
+                    int destinationIndex = writeIndex;
                     result[writeIndex] = compacted[i];
+
+                    movements.Add(new LineMovement(sourceIndex[i], destinationIndex, false));
+
+                    if (mergedFromSourceIndex[i] >= 0)
+                    {
+                        movements.Add(new LineMovement(mergedFromSourceIndex[i], destinationIndex, true));
+                        merges.Add(new LineMerge(destinationIndex, compacted[i]));
+                    }
+
                     writeIndex++;
                 }
             }
@@ -168,7 +256,7 @@ namespace Merge2048.Core
                 }
             }
 
-            return new LineResult(result, scoreGained, mergeCount, changed);
+            return new LineResult(result, scoreGained, mergeCount, changed, movements, merges);
         }
 
         private static int[] Reverse(int[] line)
@@ -200,19 +288,55 @@ namespace Merge2048.Core
             }
         }
 
+        private readonly struct LineMovement
+        {
+            public readonly int SourceIndex;
+            public readonly int DestinationIndex;
+            public readonly bool ConsumedByMerge;
+
+            public LineMovement(int sourceIndex, int destinationIndex, bool consumedByMerge)
+            {
+                SourceIndex = sourceIndex;
+                DestinationIndex = destinationIndex;
+                ConsumedByMerge = consumedByMerge;
+            }
+        }
+
+        private readonly struct LineMerge
+        {
+            public readonly int DestinationIndex;
+            public readonly int ResultValue;
+
+            public LineMerge(int destinationIndex, int resultValue)
+            {
+                DestinationIndex = destinationIndex;
+                ResultValue = resultValue;
+            }
+        }
+
         private readonly struct LineResult
         {
             public readonly int[] Line;
             public readonly int ScoreGained;
             public readonly int MergeCount;
             public readonly bool Changed;
+            public readonly List<LineMovement> Movements;
+            public readonly List<LineMerge> Merges;
 
-            public LineResult(int[] line, int scoreGained, int mergeCount, bool changed)
+            public LineResult(
+                int[] line,
+                int scoreGained,
+                int mergeCount,
+                bool changed,
+                List<LineMovement> movements,
+                List<LineMerge> merges)
             {
                 Line = line;
                 ScoreGained = scoreGained;
                 MergeCount = mergeCount;
                 Changed = changed;
+                Movements = movements;
+                Merges = merges;
             }
         }
     }

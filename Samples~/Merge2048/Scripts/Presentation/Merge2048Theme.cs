@@ -16,16 +16,26 @@ namespace Merge2048.Presentation
         public static readonly Color TEXT_ON_DARK_COLOR = new Color32(0xF9, 0xF6, 0xF2, 0xFF);
         public static readonly Color TEXT_ON_LIGHT_COLOR = new Color32(0x77, 0x6E, 0x65, 0xFF);
 
+        // Dark scrim over the still-visible, frozen Gameplay board (not an opaque page swap).
+        public static readonly Color GAME_OVER_SCRIM_COLOR = new Color32(0x1A, 0x16, 0x12, 0xB0);
+
         public const float TITLE_FONT_SIZE = 72f;
         public const float HUD_FONT_SIZE = 42f;
         public const float BUTTON_FONT_SIZE = 40f;
         public const float HUD_CAPTION_FONT_SIZE = 22f;
         public const float HUD_BADGE_FONT_SIZE = 28f;
+        public const float SCORE_POPUP_FONT_SIZE = 36f;
 
         // Single shared radius: RoundedRectSprite bakes ONE cached sprite reused by
         // buttons, cards and tiles alike, so a per-surface radius would be unused.
         public const float CORNER_RADIUS_PX = 12f;
 
         public const float FADE_DURATION = 0.15f;
+        public const float TILE_SLIDE_DURATION = 0.1f;
+        public const float MERGE_POP_DURATION = 0.12f;
+        public const float MERGE_POP_SCALE = 1.15f;
+        public const float SPAWN_SCALE_DURATION = 0.12f;
+        public const float SCORE_POPUP_DURATION = 0.5f;
+        public const float SCORE_POPUP_RISE_DISTANCE = 60f;
     }
 }

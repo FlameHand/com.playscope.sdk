@@ -185,8 +185,15 @@ namespace Merge2048.Presentation
         // layout is measurable this frame. Both panels fade concurrently (true crossfade) —
         // a sequential fade-out-then-fade-in left a visible blank-background flash between
         // screens.
+        //
+        // Game Over is a special case (scoped to this one transition, not a general overlay
+        // system): the frozen Gameplay board must stay visible underneath GameOverPanel's dark
+        // scrim, so the outgoing panel is left active at full alpha instead of faded out and
+        // deactivated like every other transition.
         private IEnumerator FadeToPanel(GameObject fromPanel, GameObject toPanel)
         {
+            bool enteringGameOver = Current == ScreenId.GameOver;
+
             var toGroup = toPanel != null ? toPanel.GetComponent<CanvasGroup>() : null;
             var fromGroup = fromPanel != null ? fromPanel.GetComponent<CanvasGroup>() : null;
 
@@ -211,7 +218,7 @@ namespace Merge2048.Presentation
                 elapsed += Time.unscaledDeltaTime;
                 float t = Mathf.Clamp01(elapsed / Merge2048Theme.FADE_DURATION);
 
-                if (fromGroup != null)
+                if (fromGroup != null && !enteringGameOver)
                 {
                     fromGroup.alpha = Mathf.Lerp(fromStart, 0f, t);
                 }
@@ -224,12 +231,12 @@ namespace Merge2048.Presentation
                 yield return null;
             }
 
-            if (fromGroup != null)
+            if (fromGroup != null && !enteringGameOver)
             {
                 fromGroup.alpha = 0f;
             }
 
-            if (fromPanel != null)
+            if (fromPanel != null && !enteringGameOver)
             {
                 fromPanel.SetActive(false);
             }
@@ -611,6 +618,14 @@ namespace Merge2048.Presentation
         private void BuildGameOverPanel()
         {
             _gameOverPanel = CreatePanel("GameOverPanel");
+
+            // Semi-transparent dark scrim, not an opaque page background — GameplayPanel stays
+            // active underneath (see FadeToPanel's enteringGameOver branch) and must read through.
+            // Built after BuildGameplayPanel() in Awake(), so it's already the later sibling of
+            // Gameplay and renders on top of it.
+            var scrimImage = _gameOverPanel.AddComponent<Image>();
+            scrimImage.color = Merge2048Theme.GAME_OVER_SCRIM_COLOR;
+
             var stack = CreateButtonStack(_gameOverPanel.transform);
 
             CreateLabel(stack, "Game Over", Merge2048Theme.TITLE_FONT_SIZE);

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Merge2048.Core
 {
@@ -60,7 +61,23 @@ namespace Merge2048.Core
             }
 
             int spawnCount = DifficultyConfig.SpawnCountFor(Difficulty);
-            _tileSpawner.SpawnRandom(Board, spawnCount);
+            var spawnedCells = new List<(int Row, int Col)>();
+            _tileSpawner.SpawnRandom(Board, spawnCount, DifficultyConfig.START_TILE_VALUE, spawnedCells);
+
+            var spawns = new SpawnEvent[spawnedCells.Count];
+            for (int i = 0; i < spawnedCells.Count; i++)
+            {
+                spawns[i] = new SpawnEvent(spawnedCells[i].Row, spawnedCells[i].Col, DifficultyConfig.START_TILE_VALUE);
+            }
+
+            result = new MoveResult(
+                result.Changed,
+                result.ScoreGained,
+                result.MergeCount,
+                result.HighestTile,
+                result.Movements,
+                result.Merges,
+                spawns);
 
             int newHighestTile = ComputeHighestTile();
             if (newHighestTile > HighestTile)

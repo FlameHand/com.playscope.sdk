@@ -24,6 +24,8 @@ namespace Merge2048.App
         private readonly CancellationTokenSource _lifetimeCts = new CancellationTokenSource();
         private CancellationToken _lifetimeToken;
 
+        private bool _isAnimating;
+        private bool _pendingGameOver;
         private bool _hasUndoSnapshot;
         private int[,] _undoSnapshotCells;
         private int _undoSnapshotScore;
@@ -184,7 +186,24 @@ namespace Merge2048.App
 
         private void OnModelMoveApplied(MoveResult result)
         {
-            RenderBoard();
+            if (_boardView == null || Model == null)
+            {
+                return;
+            }
+
+            _isAnimating = true;
+            _boardView.PlayMove(result, Model.Board, HandleMoveAnimationComplete);
+        }
+
+        private void HandleMoveAnimationComplete()
+        {
+            _isAnimating = false;
+
+            if (_pendingGameOver)
+            {
+                _pendingGameOver = false;
+                ShowGameOver();
+            }
         }
 
         private void OnModelScoreChanged(int score)
@@ -192,7 +211,23 @@ namespace Merge2048.App
             UpdateScoreHud(score);
         }
 
+        // MoveApplied (which starts the board animation and sets _isAnimating) always fires
+        // before GameOver in MergeGameModel.ApplyMove — defer the scrim/screen transition to
+        // HandleMoveAnimationComplete so it doesn't fade in over the triggering move's still-
+        // playing slide/merge/spawn animation. Falls through to showing immediately if there's
+        // no animation in flight (e.g. _boardView was null and OnModelMoveApplied no-opped).
         private void OnModelGameOver()
+        {
+            if (_isAnimating)
+            {
+                _pendingGameOver = true;
+                return;
+            }
+
+            ShowGameOver();
+        }
+
+        private void ShowGameOver()
         {
             if (Model == null || ScreenFlow == null)
             {
@@ -228,7 +263,7 @@ namespace Merge2048.App
                 return;
             }
 
-            if (ScreenFlow.Current != ScreenId.Gameplay || Model.IsGameOver)
+            if (ScreenFlow.Current != ScreenId.Gameplay || Model.IsGameOver || _isAnimating)
             {
                 return;
             }
@@ -253,7 +288,9 @@ namespace Merge2048.App
 
         private void OnUndoClicked()
         {
-            if (UndoCharges <= 0 || !_hasUndoSnapshot || Model == null)
+            // _isAnimating gate avoids an abrupt mid-slide teleport if the player taps Undo
+            // while the previous move's board animation is still playing.
+            if (_isAnimating || UndoCharges <= 0 || !_hasUndoSnapshot || Model == null)
             {
                 UndoAttempted?.Invoke(false);
                 return;
@@ -414,8 +451,14 @@ namespace Merge2048.App
             await MonetizationFlows.SubmitScoreToLeaderboardAsync(score, _lifetimeToken);
         }
 
+        // Instant path (initial start, Undo, ad-continue). BoardView.Render() stops any in-flight
+        // move-animation coroutine before snapping to the new state, so any PlayMove() started
+        // for the interrupted move will never call its onComplete — reset the flag here instead
+        // of leaving input permanently locked.
         private void RenderBoard()
         {
+            _isAnimating = false;
+
             if (_boardView != null && Model != null)
             {
                 _boardView.Render(Model.Board);
