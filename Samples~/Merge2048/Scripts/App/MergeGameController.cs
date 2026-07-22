@@ -130,7 +130,7 @@ namespace Merge2048.App
         {
             UnsubscribeFromModel();
 
-            Model = new MergeGameModel(difficulty, new Random());
+            Model = new MergeGameModel(difficulty, new System.Random());
 
             if (_boardView == null && ScreenFlow != null && ScreenFlow.BoardContainer != null)
             {
