@@ -87,9 +87,12 @@ namespace PlayScopeSdk.Internal
 
                 // ALWAYS drain once per wake, even on cancellation — Shutdown
                 // (enqueue session_end → TriggerInstantUpload → Stop) could
-                // otherwise race the cancel and skip the final upload. None token
-                // so the in-flight request finishes (OS kills us past the budget anyway).
-                try { await ProcessQueueAsync(CancellationToken.None); }
+                // otherwise race the cancel and skip the final upload. Once cancel
+                // has been requested we pass None so the in-flight request finishes
+                // instead of racing the cancellation; normal passes stay cancellable
+                // via the real token so a hung request doesn't block Stop() forever.
+                var passToken = ct.IsCancellationRequested ? CancellationToken.None : ct;
+                try { await ProcessQueueAsync(passToken); }
                 catch (Exception ex) { PlayScopeLog.Warning("Uploader drain error", ex); }
 
                 if (ct.IsCancellationRequested) break;
@@ -378,6 +381,7 @@ namespace PlayScopeSdk.Internal
             request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("Content-Encoding", "gzip");
             request.SetRequestHeader("Authorization", "Bearer " + _context.SdkKey);
+            request.timeout = 30;
 
             var op = request.SendWebRequest();
             while (!op.isDone)
