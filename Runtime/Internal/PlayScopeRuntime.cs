@@ -467,7 +467,7 @@ namespace PlayScopeSdk.Internal
                     EventType = "session_start",
                     EventId = UlidGenerator.NewEventId(),
                     SequenceNum = SequenceCounter.Next(),
-                    Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                    Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
                     MetadataJson = EventPipeline.DictToJson(sessionMeta),
                     IsCritical = true,
                 };
@@ -678,7 +678,7 @@ namespace PlayScopeSdk.Internal
                         EventType = "session_end",
                         EventId = UlidGenerator.NewEventId(),
                         SequenceNum = SequenceCounter.Next(),
-                        Timestamp = endTs.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                        Timestamp = endTs.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
                         MetadataJson = $"{{\"end_status\":\"{endStatus}\",\"reason\":\"{reason}\"}}",
                         IsCritical = true,
                     };

@@ -141,7 +141,7 @@ namespace PlayScopeSdk.Internal
             {
                 ["stuck_for_ms"] = Math.Max(0L, stuckForMs),
                 ["started_at"]   = new DateTime(startTicks, DateTimeKind.Utc)
-                                       .ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                                       .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
                 ["threshold_ms"] = _thresholdMs,
             };
             _pipeline.EnqueueEvent("anr", metadataJson: EventPipeline.DictToJson(meta));
@@ -153,9 +153,9 @@ namespace PlayScopeSdk.Internal
             {
                 ["total_stuck_ms"] = Math.Max(0L, totalStuckMs),
                 ["started_at"]     = new DateTime(startTicks, DateTimeKind.Utc)
-                                         .ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                                         .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
                 ["recovered_at"]   = new DateTime(recoveredTicks, DateTimeKind.Utc)
-                                         .ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                                         .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
             };
             _pipeline.EnqueueEvent("anr_recovered", metadataJson: EventPipeline.DictToJson(meta));
         }

@@ -84,7 +84,7 @@ namespace PlayScopeSdk.Internal
                 EventType = eventType,
                 EventId = UlidGenerator.NewEventId(),
                 SequenceNum = SequenceCounter.Next(),
-                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
                 ScreenName = _currentScreen,
                 ActionName = _currentAction,
                 OperationId = operationId,
@@ -192,7 +192,7 @@ namespace PlayScopeSdk.Internal
                 RecordType = RecordType.Log,
                 EventId = UlidGenerator.NewEventId(),
                 SequenceNum = SequenceCounter.Next(),
-                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
                 Level = level,
                 Message = message,
                 StackTrace = stackTrace,
@@ -230,7 +230,7 @@ namespace PlayScopeSdk.Internal
             {
                 RecordType = RecordType.Metric,
                 EventId = UlidGenerator.NewEventId(),
-                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture),
                 MetricType = metricType,
                 MetricValue = value
             };

@@ -89,7 +89,7 @@ namespace PlayScopeSdk.Internal
 
                 var deadLetterDir = PlayScopeDirectory.DeadLetter;
                 Directory.CreateDirectory(deadLetterDir);
-                var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+                var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", System.Globalization.CultureInfo.InvariantCulture);
                 var destName = $"orphaned_chunk_current_{stamp}.jsonl";
                 var dest = Path.Combine(deadLetterDir, destName);
                 File.Move(currentPath, dest);

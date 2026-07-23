@@ -339,7 +339,7 @@ namespace PlayScopeSdk.Internal
                         if (dict.TryGetValue("is_uploaded", out var iu) && iu is true) continue;
 
                         if (dict.TryGetValue("next_retry_at", out var nra) && nra is string nraStr &&
-                            DateTime.TryParse(nraStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var nraDt) &&
+                            DateTime.TryParse(nraStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var nraDt) &&
                             nraDt > now)
                         {
                             continue;
@@ -517,7 +517,7 @@ namespace PlayScopeSdk.Internal
 
                 var now = DateTime.UtcNow;
                 var timestampMs = (long)(now - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
-                var iso = now.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                var iso = now.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
 
                 var json = "{\"record_type\":\"event\",\"event_type\":\"session_data_partial\",\"timestamp\":\"" + iso + "\",\"metadata\":{\"data_loss_reason\":\"local_quota_exceeded\",\"dropped_chunks\":" + droppedChunks + "}}";
 

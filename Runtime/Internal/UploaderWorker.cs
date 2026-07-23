@@ -444,7 +444,7 @@ namespace PlayScopeSdk.Internal
             sb.Append("\"sdk_version\":\"").Append(EscapeJsonString(envelopeSdkVersion)).Append("\",");
             sb.Append("\"schema_version\":").Append(envelopeSchemaVersion).Append(",");
             sb.Append("\"batch_id\":\"").Append(EscapeJsonString(batchId)).Append("\",");
-            sb.Append("\"sent_at\":\"").Append(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")).Append("\",");
+            sb.Append("\"sent_at\":\"").Append(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture)).Append("\",");
             sb.Append("\"events\":[").Append(string.Join(",", events)).Append("],");
             sb.Append("\"logs\":[").Append(string.Join(",", logs)).Append("],");
             sb.Append("\"metrics\":[").Append(string.Join(",", metrics)).Append("]");
@@ -901,13 +901,13 @@ namespace PlayScopeSdk.Internal
             internal string ToJson()
             {
                 var created = CreatedAt.HasValue
-                    ? "\"" + CreatedAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + "\""
+                    ? "\"" + CreatedAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture) + "\""
                     : "null";
                 var last = LastAttemptAt.HasValue
-                    ? "\"" + LastAttemptAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + "\""
+                    ? "\"" + LastAttemptAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture) + "\""
                     : "null";
                 var next = NextRetryAt.HasValue
-                    ? "\"" + NextRetryAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + "\""
+                    ? "\"" + NextRetryAt.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture) + "\""
                     : "null";
                 return $"{{\"chunk_id\":\"{EscapeJsonString(ChunkId)}\"," +
                        $"\"chunk_dir\":\"{EscapeJsonString(ChunkDirRel)}\",\"attempts\":{Attempts}," +
@@ -924,11 +924,11 @@ namespace PlayScopeSdk.Internal
                 if (dict.TryGetValue("chunk_dir", out var cd) && cd is string cdStr) state.ChunkDirRel = cdStr;
                 if (dict.TryGetValue("attempts", out var att)) state.Attempts = ParseInt(att);
                 if (dict.TryGetValue("created_at", out var ca) && ca is string caStr && caStr != "null" && !string.IsNullOrEmpty(caStr))
-                    state.CreatedAt = DateTime.TryParse(caStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var caVal) ? caVal : (DateTime?)null;
+                    state.CreatedAt = DateTime.TryParse(caStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var caVal) ? caVal : (DateTime?)null;
                 if (dict.TryGetValue("last_attempt_at", out var la) && la is string laStr && laStr != "null" && !string.IsNullOrEmpty(laStr))
-                    state.LastAttemptAt = DateTime.TryParse(laStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var laVal) ? laVal : (DateTime?)null;
+                    state.LastAttemptAt = DateTime.TryParse(laStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var laVal) ? laVal : (DateTime?)null;
                 if (dict.TryGetValue("next_retry_at", out var nr) && nr is string nrStr && nrStr != "null" && !string.IsNullOrEmpty(nrStr))
-                    state.NextRetryAt = DateTime.TryParse(nrStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var nrVal) ? nrVal : (DateTime?)null;
+                    state.NextRetryAt = DateTime.TryParse(nrStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var nrVal) ? nrVal : (DateTime?)null;
                 if (dict.TryGetValue("is_uploaded", out var iu)) state.IsUploaded = iu is bool b ? b : false;
                 return state;
             }

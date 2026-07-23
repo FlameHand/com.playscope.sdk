@@ -76,7 +76,7 @@ namespace PlayScopeSdk.Core.Session
             // run accidentally tries to. We do NOT delete or rewrite the original.
             try
             {
-                var ts = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                var ts = DateTime.UtcNow.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
                 var backupPath = path + ".corrupt-" + ts;
                 if (!File.Exists(backupPath))
                     File.Copy(path, backupPath);

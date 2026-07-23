@@ -136,7 +136,7 @@ namespace PlayScopeSdk.Core.Session
                 string state = dto.TryGetValue("state", out var s) && s is string sStr ? sStr : null;
                 DateTime? ts = null;
                 if (dto.TryGetValue("ts", out var t) && t is string tStr &&
-                    DateTime.TryParse(tStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var d))
+                    DateTime.TryParse(tStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var d))
                     ts = d;
                 bool intent = dto.TryGetValue("intent", out var i) && i is bool ib && ib;
                 return (state, ts, intent);
@@ -157,7 +157,7 @@ namespace PlayScopeSdk.Core.Session
             try
             {
                 var text = File.ReadAllText(path).Trim();
-                if (DateTime.TryParse(text, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                if (DateTime.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
                     return dt;
             }
             catch (Exception ex)

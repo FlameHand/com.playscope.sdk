@@ -751,7 +751,7 @@ namespace PlayScopeSdk.Internal
                     int valueEnd = line.IndexOf('"', valueStart);
                     if (valueEnd <= valueStart) continue;
                     var tsStr = line.Substring(valueStart, valueEnd - valueStart);
-                    if (DateTime.TryParse(tsStr, null,
+                    if (DateTime.TryParse(tsStr, System.Globalization.CultureInfo.InvariantCulture,
                             System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
                     {
                         if (!max.HasValue || ts > max.Value) max = ts;
@@ -790,7 +790,7 @@ namespace PlayScopeSdk.Internal
                 else
                 {
                     // Validate it looks like a timestamp
-                    if (DateTime.TryParse(text, null,
+                    if (DateTime.TryParse(text, System.Globalization.CultureInfo.InvariantCulture,
                             System.Globalization.DateTimeStyles.RoundtripKind, out _))
                         return text;
                 }
@@ -837,11 +837,11 @@ namespace PlayScopeSdk.Internal
             {
                 crashIsoTs = DateTimeOffset.FromUnixTimeMilliseconds(record.CapturedAtUnixMs)
                     .UtcDateTime
-                    .ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                    .ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
             }
             else
             {
-                crashIsoTs = fallbackTimestampIso ?? DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                crashIsoTs = fallbackTimestampIso ?? DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
             }
             sb.Append(",\"timestamp\":");
             EventPipeline.AppendEscapedString(sb, crashIsoTs);
