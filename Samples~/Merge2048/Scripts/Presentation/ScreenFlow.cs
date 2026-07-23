@@ -513,7 +513,18 @@ namespace Merge2048.Presentation
             image.color = Merge2048Theme.BUTTON_PRESSED_COLOR;
             image.raycastTarget = false;
 
-            var label = go.AddComponent<TextMeshProUGUI>();
+            // The text must live on a child GameObject: Image and TextMeshProUGUI both
+            // derive from Graphic, and a GameObject can only hold one Graphic component.
+            var labelGo = new GameObject("Label", typeof(RectTransform));
+            labelGo.transform.SetParent(go.transform, false);
+
+            var labelRect = labelGo.GetComponent<RectTransform>();
+            labelRect.anchorMin = Vector2.zero;
+            labelRect.anchorMax = Vector2.one;
+            labelRect.offsetMin = Vector2.zero;
+            labelRect.offsetMax = Vector2.zero;
+
+            var label = labelGo.AddComponent<TextMeshProUGUI>();
             label.text = "0";
             label.alignment = TextAlignmentOptions.Center;
             label.fontSize = Merge2048Theme.HUD_BADGE_FONT_SIZE;
