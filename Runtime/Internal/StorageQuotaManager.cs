@@ -137,8 +137,9 @@ namespace PlayScopeSdk.Internal
             // 2. info logs
             // 3. warning logs  (emit LogWarning)
             // 4. metric samples
-            // 5. error logs    (emit LogWarning)
-            // 6. exception/lifecycle/session records — NEVER drop
+            // 5. exception/lifecycle/session/error-log records — NEVER drop
+            //    (CriticalRecords.IsLogCritical("error") == true, so error logs are
+            //    already critical; there is no separate "drop error logs" step)
 
             int dropped = 0;
 
@@ -160,15 +161,8 @@ namespace PlayScopeSdk.Internal
             // Pass 4: metric samples
             dropped += DropFromBuffer(buffer, r => r.RecordType == RecordType.Metric);
 
-            // Pass 5: error logs — emit a UnityEngine warning when dropped
-            int errorDropped = DropFromBuffer(buffer, r =>
-                r.RecordType == RecordType.Log && string.Equals(r.Level, "error", StringComparison.OrdinalIgnoreCase));
-            if (errorDropped > 0)
-                Debug.LogWarning($"[PlayScope] Hard storage cap exceeded — dropped {errorDropped} error log(s) from in-memory buffer.");
-            dropped += errorDropped;
-
-            // Pass 6: exception/lifecycle/session records are NEVER dropped (r.IsCritical == true or
-            // record_type==event with critical event_type). Everything remaining stays.
+            // Pass 5: everything remaining is r.IsCritical == true (session/exception/error-log
+            // records) and is NEVER dropped.
 
             return (buffer, dropped);
         }
@@ -559,12 +553,12 @@ namespace PlayScopeSdk.Internal
         }
 
         /// <summary>
-        /// Classifies a single JSONL line as critical.
-        /// Critical if:
-        ///   record_type == "event" AND event_type in {session_start, session_end,
-        ///     session_abnormal_end, exception}
-        /// OR
-        ///   record_type == "log" AND level in {"exception", "error"}
+        /// Classifies a single JSONL line as critical, using CriticalRecords as the
+        /// single source of truth shared with the enqueue path (EventPipeline).
+        /// session_start is added on top for retention only — it is not in
+        /// CriticalRecords.IsCritical because on enqueue it takes the synchronous
+        /// direct-write path rather than immediate-finalize, but a chunk that is
+        /// a session's only record of session_start should still survive pruning.
         /// </summary>
         private static bool LineIsCritical(string line)
         {
@@ -574,16 +568,13 @@ namespace PlayScopeSdk.Internal
             if (string.Equals(recType, "event", StringComparison.Ordinal))
             {
                 var eventType = ExtractField(line, "event_type");
-                return eventType == "session_start"
-                    || eventType == "session_end"
-                    || eventType == "session_abnormal_end"
-                    || eventType == "exception";
+                return eventType == "session_start" || CriticalRecords.IsCritical(eventType);
             }
 
             if (string.Equals(recType, "log", StringComparison.Ordinal))
             {
                 var level = ExtractField(line, "level");
-                return level == "exception" || level == "error";
+                return CriticalRecords.IsLogCritical(level);
             }
 
             return false;
