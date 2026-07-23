@@ -26,9 +26,17 @@ namespace Merge2048.Monetization
         }
     }
 
+    public sealed class LeaderboardTimeoutException : Exception
+    {
+        public LeaderboardTimeoutException(string message) : base(message)
+        {
+        }
+    }
+
     public sealed class FakeLeaderboardService
     {
         private const float SUCCESS_WEIGHT = 0.85f;
+        private const float TIMEOUT_WEIGHT = 0.05f;
         private const int MIN_RESPONSE_BYTES = 80;
         private const int MAX_RESPONSE_BYTES = 400;
 
@@ -46,6 +54,11 @@ namespace Merge2048.Monetization
             if (roll < SUCCESS_WEIGHT)
             {
                 return new LeaderboardSubmitResult(200, UnityEngine.Random.Range(MIN_RESPONSE_BYTES, MAX_RESPONSE_BYTES));
+            }
+
+            if (roll < SUCCESS_WEIGHT + TIMEOUT_WEIGHT)
+            {
+                throw new LeaderboardTimeoutException("Simulated leaderboard submit timeout");
             }
 
             throw new LeaderboardSubmitException("Simulated leaderboard submit failure", 500);

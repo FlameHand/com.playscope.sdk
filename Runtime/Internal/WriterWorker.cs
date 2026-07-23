@@ -159,6 +159,7 @@ namespace PlayScopeSdk.Internal
         {
             try
             {
+                bool flushed;
                 lock (_bufferLock)
                 {
                     // Drain queued events so they ride the same final chunk
@@ -166,10 +167,18 @@ namespace PlayScopeSdk.Internal
                     while (_queue.TryDequeue(out var queued)) _buffer.Add(queued);
                     _buffer.Add(record);
                     FlushBufferLocked();
+                    // FlushBufferLocked only empties _buffer on a successful write —
+                    // a non-empty buffer here means the critical record (session_end /
+                    // exception) never reached disk and the caller must know.
+                    flushed = _buffer.Count == 0;
                     FinalizeChunkInternal();
                 }
                 StorageQuotaManager.EnforceQuota();
-                return true;
+                if (!flushed)
+                {
+                    PlayScopeLog.Warning("WriteCriticalAndFinalizeSync: critical record still buffered after flush failure");
+                }
+                return flushed;
             }
             catch (Exception ex)
             {
@@ -235,6 +244,20 @@ namespace PlayScopeSdk.Internal
 
             if (_buffer.Count == 0) return;
 
+            // Resolve the writer BEFORE touching _buffer — if EnsureCurrentChunk
+            // can't open the file (disk full, sharing violation) we must keep the
+            // records for the next drain instead of silently discarding them.
+            if (_currentWriter == null)
+            {
+                EnsureCurrentChunk();
+            }
+            if (_currentWriter == null)
+            {
+                PlayScopeLog.Warning("WriterWorker: no chunk writer available, keeping buffer for retry");
+                TrimBufferIfUnbounded();
+                return;
+            }
+
             var sb = new StringBuilder();
             long bytesWritten = 0;
             foreach (var r in _buffer)
@@ -243,20 +266,24 @@ namespace PlayScopeSdk.Internal
                 sb.Append(line).Append('\n');
                 bytesWritten += Encoding.UTF8.GetByteCount(line) + 1;
             }
-            _buffer.Clear();
-            _lastFlushStopwatchTicks = Stopwatch.GetTimestamp();
 
             try
             {
-                if (_currentWriter == null) EnsureCurrentChunk();
-                _currentWriter?.Write(sb.ToString());
-                _currentWriter?.Flush();
+                _currentWriter.Write(sb.ToString());
+                _currentWriter.Flush();
+                // Only mark the write as consumed once it actually landed on disk —
+                // clearing/counting before this point turned disk-full/sharing
+                // errors into silent data loss plus phantom quota bytes.
+                _buffer.Clear();
+                _lastFlushStopwatchTicks = Stopwatch.GetTimestamp();
                 _currentChunkSize += bytesWritten;
                 StorageQuotaManager.NotifyBytesAppended(bytesWritten);
             }
             catch (Exception ex)
             {
                 PlayScopeLog.Warning("Failed to write chunk", ex);
+                TrimBufferIfUnbounded();
+                return;
             }
 
             // Batch splitting: >1MB → finalize, then enforce storage quota
@@ -265,6 +292,17 @@ namespace PlayScopeSdk.Internal
                 FinalizeChunkInternal();
                 StorageQuotaManager.EnforceQuota();
             }
+        }
+
+        // Caller must hold _bufferLock. Guards against an indefinitely-failing
+        // disk (full volume, permanently locked file) growing the retained
+        // buffer without bound — TrimBuffer drops by priority and never
+        // touches critical (session_end / exception) records.
+        private void TrimBufferIfUnbounded()
+        {
+            if (_buffer.Count <= 10000) return;
+            StorageQuotaManager.TrimBuffer(_buffer);
+            PlayScopeLog.Warning("WriterWorker: write failing, trimmed non-critical buffer");
         }
 
         private void FinalizeChunk()

@@ -151,6 +151,62 @@ namespace Merge2048.Integration
             SendInitialStateSnapshot();
         }
 
+        private void OnContinueClicked()
+        {
+            PlayScope.TrackAction("TapContinue");
+        }
+
+        private void OnSaveLoadAttempted(SaveDataStore.SaveLoadResult result)
+        {
+            var opId = PlayScope.StartOperation(OperationType.Custom, "LoadSaveData");
+
+            switch (result.Outcome)
+            {
+                case SaveDataStore.SaveLoadOutcome.Success:
+                {
+                    PlayScope.CompleteOperation(opId, OperationCompletionStatus.Success);
+                    break;
+                }
+                case SaveDataStore.SaveLoadOutcome.OldFormat:
+                {
+                    PlayScope.CompleteOperation(opId, OperationCompletionStatus.Success);
+                    PlayScope.TrackLog(LogLevel.Warning, "Save data is an older format; starting a fresh game.", new Dictionary<string, object>
+                    {
+                        ["outcome"] = "old_format",
+                    });
+                    break;
+                }
+                case SaveDataStore.SaveLoadOutcome.Corrupted:
+                {
+                    PlayScope.CompleteOperation(opId, OperationCompletionStatus.Failure);
+                    if (result.Error != null)
+                    {
+                        PlayScope.TrackException(result.Error, new Dictionary<string, object>
+                        {
+                            ["context"] = "save_load",
+                        });
+                    }
+                    break;
+                }
+                case SaveDataStore.SaveLoadOutcome.NotFound:
+                {
+                    PlayScope.CompleteOperation(opId, OperationCompletionStatus.Abandoned);
+                    break;
+                }
+                case SaveDataStore.SaveLoadOutcome.Unknown:
+                default:
+                {
+                    PlayScope.CompleteOperation(opId, OperationCompletionStatus.Abandoned);
+                    break;
+                }
+            }
+        }
+
+        private void OnResumedFromSave()
+        {
+            SendInitialStateSnapshot();
+        }
+
         private void SendInitialStateSnapshot()
         {
             var model = _controller.Model;
