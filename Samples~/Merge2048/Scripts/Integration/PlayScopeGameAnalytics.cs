@@ -31,6 +31,7 @@ namespace Merge2048.Integration
             screenFlow.BuyUndoPackClicked += OnBuyUndoPackClicked;
             screenFlow.RemoveAdsClicked += OnRemoveAdsClicked;
             screenFlow.RestorePurchasesClicked += OnRestorePurchasesClicked;
+            screenFlow.ExitToMenuClicked += OnExitToMenuClicked;
 
             _controller.DirectionInput += OnDirectionInput;
             _controller.UndoAttempted += OnUndoAttempted;
@@ -61,6 +62,7 @@ namespace Merge2048.Integration
                 screenFlow.BuyUndoPackClicked -= OnBuyUndoPackClicked;
                 screenFlow.RemoveAdsClicked -= OnRemoveAdsClicked;
                 screenFlow.RestorePurchasesClicked -= OnRestorePurchasesClicked;
+                screenFlow.ExitToMenuClicked -= OnExitToMenuClicked;
             }
 
             if (_controller != null)
@@ -163,6 +165,12 @@ namespace Merge2048.Integration
         {
             PlayScope.TrackAction("TapCloseShop");
             AnalyticsFeed.Publish("TrackAction: TapCloseShop");
+        }
+
+        private void OnExitToMenuClicked()
+        {
+            PlayScope.TrackAction("TapExitToMenu");
+            AnalyticsFeed.Publish("TrackAction: TapExitToMenu");
         }
 
         private void OnBuyUndoPackClicked()

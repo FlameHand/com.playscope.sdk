@@ -13,6 +13,10 @@ namespace Merge2048.Presentation
         public static readonly Color BUTTON_PRESSED_COLOR = new Color32(0x74, 0x62, 0x51, 0xFF);
         public static readonly Color BUTTON_DISABLED_COLOR = new Color32(0x8F, 0x7A, 0x66, 0x80);
 
+        // Unity's ColorBlock defaults selectedColor to near-white, which clashes with the
+        // palette and lingers after a tap on touch. Keep it on-theme (matches highlighted).
+        public static readonly Color BUTTON_SELECTED_COLOR = new Color32(0xA3, 0x8E, 0x79, 0xFF);
+
         public static readonly Color TEXT_ON_DARK_COLOR = new Color32(0xF9, 0xF6, 0xF2, 0xFF);
         public static readonly Color TEXT_ON_LIGHT_COLOR = new Color32(0x77, 0x6E, 0x65, 0xFF);
 

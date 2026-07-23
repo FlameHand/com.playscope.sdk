@@ -29,11 +29,11 @@ namespace Merge2048.Presentation
         private const float BUTTON_WIDTH = 700f;
         private const float STACK_WIDTH = 800f;
         private const float CONTENT_SPACING = 24f;
-        private const float HUD_ROW_HEIGHT = 180f;
-        private const float HUD_CARD_WIDTH = 220f;
-        private const float HUD_SHOP_BUTTON_WIDTH = 160f;
-        private const float HUD_BADGE_SIZE = 48f;
-        private const float HUD_BADGE_MARGIN = 6f;
+        private const float TOP_BAR_HEIGHT = 210f;
+        private const float BOTTOM_BAR_HEIGHT = 170f;
+        private const float MENU_BUTTON_WIDTH = 160f;
+        private const float HUD_CARD_MIN_WIDTH = 170f;
+        private const float GAMEPLAY_PADDING = 24f;
 
         private GameObject _safeAreaRoot;
         private GameObject _mainMenuPanel;
@@ -59,6 +59,7 @@ namespace Merge2048.Presentation
         public event Action CloseShopClicked;
         public event Action BuyUndoPackClicked;
         public event Action RemoveAdsClicked;
+        public event Action ExitToMenuClicked;
         public event Action RestorePurchasesClicked;
 
         public RectTransform BoardContainer { get; private set; }
@@ -432,6 +433,7 @@ namespace Merge2048.Presentation
             colors.normalColor = Merge2048Theme.BUTTON_NORMAL_COLOR;
             colors.highlightedColor = Merge2048Theme.BUTTON_HIGHLIGHTED_COLOR;
             colors.pressedColor = Merge2048Theme.BUTTON_PRESSED_COLOR;
+            colors.selectedColor = Merge2048Theme.BUTTON_SELECTED_COLOR;
             colors.disabledColor = Merge2048Theme.BUTTON_DISABLED_COLOR;
             button.colors = colors;
 
@@ -462,7 +464,10 @@ namespace Merge2048.Presentation
             return button;
         }
 
-        private static TMP_Text CreateHudCard(Transform parent, string caption, float width)
+        // A non-interactive info tile (Score / Best / Undo count). Deliberately styled
+        // apart from CreateButton — lighter board-tan background, small bold caption over
+        // a big value — so the top-bar readouts don't read as tappable buttons.
+        private static TMP_Text CreateHudCard(Transform parent, string caption)
         {
             var go = new GameObject("Card_" + caption, typeof(RectTransform));
             go.transform.SetParent(parent, false);
@@ -471,9 +476,11 @@ namespace Merge2048.Presentation
             image.sprite = RoundedRectSprite.Get();
             image.type = Image.Type.Sliced;
             image.color = Merge2048Theme.BOARD_BACKGROUND_COLOR;
+            image.raycastTarget = false;
 
             var layoutElement = go.AddComponent<LayoutElement>();
-            layoutElement.preferredWidth = width;
+            layoutElement.minWidth = HUD_CARD_MIN_WIDTH;
+            layoutElement.flexibleWidth = 1f;
             layoutElement.flexibleHeight = 1f;
 
             var verticalLayoutGroup = go.AddComponent<VerticalLayoutGroup>();
@@ -493,45 +500,6 @@ namespace Merge2048.Presentation
             valueLabel.color = Merge2048Theme.TEXT_ON_DARK_COLOR;
 
             return valueLabel;
-        }
-
-        private static TMP_Text CreateUndoBadge(Transform parent)
-        {
-            var go = new GameObject("UndoBadge", typeof(RectTransform));
-            go.transform.SetParent(parent, false);
-
-            var rectTransform = go.GetComponent<RectTransform>();
-            rectTransform.anchorMin = new Vector2(1f, 1f);
-            rectTransform.anchorMax = new Vector2(1f, 1f);
-            rectTransform.pivot = new Vector2(1f, 1f);
-            rectTransform.anchoredPosition = new Vector2(-HUD_BADGE_MARGIN, -HUD_BADGE_MARGIN);
-            rectTransform.sizeDelta = new Vector2(HUD_BADGE_SIZE, HUD_BADGE_SIZE);
-
-            var image = go.AddComponent<Image>();
-            image.sprite = RoundedRectSprite.Get();
-            image.type = Image.Type.Sliced;
-            image.color = Merge2048Theme.BUTTON_PRESSED_COLOR;
-            image.raycastTarget = false;
-
-            // The text must live on a child GameObject: Image and TextMeshProUGUI both
-            // derive from Graphic, and a GameObject can only hold one Graphic component.
-            var labelGo = new GameObject("Label", typeof(RectTransform));
-            labelGo.transform.SetParent(go.transform, false);
-
-            var labelRect = labelGo.GetComponent<RectTransform>();
-            labelRect.anchorMin = Vector2.zero;
-            labelRect.anchorMax = Vector2.one;
-            labelRect.offsetMin = Vector2.zero;
-            labelRect.offsetMax = Vector2.zero;
-
-            var label = labelGo.AddComponent<TextMeshProUGUI>();
-            label.text = "0";
-            label.alignment = TextAlignmentOptions.Center;
-            label.fontSize = Merge2048Theme.HUD_BADGE_FONT_SIZE;
-            label.color = Merge2048Theme.TEXT_ON_DARK_COLOR;
-            label.raycastTarget = false;
-
-            return label;
         }
 
         private void BuildMainMenuPanel()
@@ -593,9 +561,11 @@ namespace Merge2048.Presentation
             rootLayout.childControlWidth = true;
             rootLayout.childForceExpandHeight = true;
             rootLayout.childForceExpandWidth = true;
-            rootLayout.spacing = 0f;
+            rootLayout.spacing = CONTENT_SPACING;
+            rootLayout.padding = new RectOffset(
+                (int)GAMEPLAY_PADDING, (int)GAMEPLAY_PADDING, (int)GAMEPLAY_PADDING, (int)GAMEPLAY_PADDING);
 
-            CreateHudRow(_gameplayPanel.transform);
+            BuildTopBar(_gameplayPanel.transform);
 
             var boardContainerGo = new GameObject("BoardContainer", typeof(RectTransform));
             boardContainerGo.transform.SetParent(_gameplayPanel.transform, false);
@@ -610,37 +580,63 @@ namespace Merge2048.Presentation
             boardLayoutElement.flexibleWidth = 1f;
 
             BoardContainer = boardContainerGo.GetComponent<RectTransform>();
+
+            BuildBottomBar(_gameplayPanel.transform);
         }
 
-        private void CreateHudRow(Transform parent)
+        // Top bar: a compact Menu (exit) button plus the classic Score / Best / Undo-count
+        // readout cards. Info cards live here; action buttons live in the bottom bar.
+        private void BuildTopBar(Transform parent)
         {
-            var go = new GameObject("HudRow", typeof(RectTransform));
+            var go = new GameObject("TopBar", typeof(RectTransform));
             go.transform.SetParent(parent, false);
 
             var layoutElement = go.AddComponent<LayoutElement>();
-            layoutElement.preferredHeight = HUD_ROW_HEIGHT;
-            layoutElement.minHeight = HUD_ROW_HEIGHT;
+            layoutElement.preferredHeight = TOP_BAR_HEIGHT;
+            layoutElement.minHeight = TOP_BAR_HEIGHT;
             layoutElement.flexibleHeight = 0f;
 
             var horizontalLayoutGroup = go.AddComponent<HorizontalLayoutGroup>();
-            horizontalLayoutGroup.childAlignment = TextAnchor.MiddleLeft;
+            horizontalLayoutGroup.childAlignment = TextAnchor.MiddleCenter;
             horizontalLayoutGroup.spacing = CONTENT_SPACING;
-            horizontalLayoutGroup.padding = new RectOffset(20, 20, 20, 20);
             horizontalLayoutGroup.childControlHeight = true;
             horizontalLayoutGroup.childControlWidth = true;
             horizontalLayoutGroup.childForceExpandHeight = true;
             horizontalLayoutGroup.childForceExpandWidth = false;
 
-            ScoreValueText = CreateHudCard(go.transform, "SCORE", HUD_CARD_WIDTH);
-            BestValueText = CreateHudCard(go.transform, "BEST", HUD_CARD_WIDTH);
+            var menuButton = CreateButton(go.transform, "Menu", MENU_BUTTON_WIDTH);
+            menuButton.onClick.AddListener(() => ExitToMenuClicked?.Invoke());
 
-            var undoButton = CreateButton(go.transform, "Undo", HUD_CARD_WIDTH);
+            ScoreValueText = CreateHudCard(go.transform, "SCORE");
+            BestValueText = CreateHudCard(go.transform, "BEST");
+            UndoChargeText = CreateHudCard(go.transform, "UNDO");
+        }
+
+        // Bottom bar: the two primary in-game actions, equal width. Undo is disabled by the
+        // controller when there are no charges (its count shows in the top-bar UNDO card).
+        private void BuildBottomBar(Transform parent)
+        {
+            var go = new GameObject("BottomBar", typeof(RectTransform));
+            go.transform.SetParent(parent, false);
+
+            var layoutElement = go.AddComponent<LayoutElement>();
+            layoutElement.preferredHeight = BOTTOM_BAR_HEIGHT;
+            layoutElement.minHeight = BOTTOM_BAR_HEIGHT;
+            layoutElement.flexibleHeight = 0f;
+
+            var horizontalLayoutGroup = go.AddComponent<HorizontalLayoutGroup>();
+            horizontalLayoutGroup.childAlignment = TextAnchor.MiddleCenter;
+            horizontalLayoutGroup.spacing = CONTENT_SPACING;
+            horizontalLayoutGroup.childControlHeight = true;
+            horizontalLayoutGroup.childControlWidth = true;
+            horizontalLayoutGroup.childForceExpandHeight = true;
+            horizontalLayoutGroup.childForceExpandWidth = true;
+
+            var undoButton = CreateButton(go.transform, "Undo");
             UndoButton = undoButton;
             undoButton.onClick.AddListener(() => UndoClicked?.Invoke());
 
-            UndoChargeText = CreateUndoBadge(undoButton.transform);
-
-            var shopButton = CreateButton(go.transform, "Shop", HUD_SHOP_BUTTON_WIDTH);
+            var shopButton = CreateButton(go.transform, "Shop");
             shopButton.onClick.AddListener(() => OpenShopClicked?.Invoke("gameplay_hud"));
         }
 

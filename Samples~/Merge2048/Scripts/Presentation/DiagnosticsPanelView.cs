@@ -77,6 +77,17 @@ namespace Merge2048.Presentation
 
         private void BuildCanvas()
         {
+            // This view is parented under ScreenFlow's canvas, so its Canvas is a NESTED
+            // sub-canvas — its RectTransform is NOT auto-sized to the screen. Stretch it to
+            // fill the parent, otherwise corner-anchored children (the gear) collapse to a
+            // zero-size rect at screen centre and overlap the game UI.
+            var selfRect = (RectTransform)transform;
+            selfRect.anchorMin = Vector2.zero;
+            selfRect.anchorMax = Vector2.one;
+            selfRect.pivot = new Vector2(0.5f, 0.5f);
+            selfRect.offsetMin = Vector2.zero;
+            selfRect.offsetMax = Vector2.zero;
+
             var canvas = gameObject.GetComponent<Canvas>();
             if (canvas == null)
             {
@@ -125,6 +136,7 @@ namespace Merge2048.Presentation
             colors.normalColor = Merge2048Theme.BUTTON_NORMAL_COLOR;
             colors.highlightedColor = Merge2048Theme.BUTTON_HIGHLIGHTED_COLOR;
             colors.pressedColor = Merge2048Theme.BUTTON_PRESSED_COLOR;
+            colors.selectedColor = Merge2048Theme.BUTTON_SELECTED_COLOR;
             colors.disabledColor = Merge2048Theme.BUTTON_DISABLED_COLOR;
             button.colors = colors;
             button.onClick.AddListener(ToggleOverlay);
@@ -182,6 +194,11 @@ namespace Merge2048.Presentation
 
             _statusLabel = CreateLabel(card, string.Empty, STATUS_FONT_SIZE);
             _statusLabel.alignment = TextAlignmentOptions.Left;
+
+            // Status is multi-line (3 lines + an optional wrapping hint). Drop the fixed
+            // single-line height CreateLabel applies so the vertical layout + ContentSizeFitter
+            // size the card to the real text height instead of clipping it under the buttons.
+            _statusLabel.GetComponent<LayoutElement>().preferredHeight = -1f;
 
             CreateButton(card, "Simulate ANR").onClick.AddListener(() => SimulateAnrClicked?.Invoke());
             CreateButton(card, "Spam log ×20").onClick.AddListener(() => SpamLogClicked?.Invoke());
@@ -259,6 +276,7 @@ namespace Merge2048.Presentation
             colors.normalColor = Merge2048Theme.BUTTON_NORMAL_COLOR;
             colors.highlightedColor = Merge2048Theme.BUTTON_HIGHLIGHTED_COLOR;
             colors.pressedColor = Merge2048Theme.BUTTON_PRESSED_COLOR;
+            colors.selectedColor = Merge2048Theme.BUTTON_SELECTED_COLOR;
             colors.disabledColor = Merge2048Theme.BUTTON_DISABLED_COLOR;
             button.colors = colors;
 

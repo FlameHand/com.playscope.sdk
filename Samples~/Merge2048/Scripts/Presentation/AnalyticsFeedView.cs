@@ -123,6 +123,7 @@ namespace Merge2048.Presentation
 
             var layoutGroup = go.AddComponent<HorizontalLayoutGroup>();
             layoutGroup.padding = new RectOffset((int)ENTRY_PADDING_H, (int)ENTRY_PADDING_H, (int)ENTRY_PADDING_V, (int)ENTRY_PADDING_V);
+            layoutGroup.childAlignment = TextAnchor.MiddleRight;
             layoutGroup.childControlWidth = true;
             layoutGroup.childControlHeight = true;
             layoutGroup.childForceExpandWidth = false;
@@ -141,7 +142,7 @@ namespace Merge2048.Presentation
             var label = labelGo.AddComponent<TextMeshProUGUI>();
             label.text = message;
             label.fontSize = ENTRY_FONT_SIZE;
-            label.alignment = TextAlignmentOptions.MidlineLeft;
+            label.alignment = TextAlignmentOptions.MidlineRight;
             label.color = Merge2048Theme.TEXT_ON_DARK_COLOR;
             label.raycastTarget = false;
             label.enableWordWrapping = true;
@@ -160,14 +161,14 @@ namespace Merge2048.Presentation
             stackGo.transform.SetParent(transform, false);
 
             var rectTransform = stackGo.GetComponent<RectTransform>();
-            rectTransform.anchorMin = new Vector2(0f, 1f);
-            rectTransform.anchorMax = new Vector2(0f, 1f);
-            rectTransform.pivot = new Vector2(0f, 1f);
-            rectTransform.anchoredPosition = new Vector2(24f, -24f);
+            rectTransform.anchorMin = new Vector2(1f, 1f);
+            rectTransform.anchorMax = new Vector2(1f, 1f);
+            rectTransform.pivot = new Vector2(1f, 1f);
+            rectTransform.anchoredPosition = new Vector2(-24f, -24f);
             rectTransform.sizeDelta = new Vector2(STACK_WIDTH, 0f);
 
             var verticalLayoutGroup = stackGo.AddComponent<VerticalLayoutGroup>();
-            verticalLayoutGroup.childAlignment = TextAnchor.UpperLeft;
+            verticalLayoutGroup.childAlignment = TextAnchor.UpperRight;
             verticalLayoutGroup.spacing = STACK_SPACING;
             verticalLayoutGroup.childControlWidth = true;
             verticalLayoutGroup.childControlHeight = true;
@@ -188,6 +189,16 @@ namespace Merge2048.Presentation
             {
                 canvas = gameObject.AddComponent<Canvas>();
             }
+
+            // Parented under ScreenFlow's canvas, this is a NESTED sub-canvas whose
+            // RectTransform is not auto-sized to the screen. Stretch it to fill the parent
+            // so the corner-anchored feed stack lands in the actual corner, not screen centre.
+            var selfRect = (RectTransform)transform;
+            selfRect.anchorMin = Vector2.zero;
+            selfRect.anchorMax = Vector2.one;
+            selfRect.pivot = new Vector2(0.5f, 0.5f);
+            selfRect.offsetMin = Vector2.zero;
+            selfRect.offsetMax = Vector2.zero;
 
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             canvas.sortingOrder = SORTING_ORDER;

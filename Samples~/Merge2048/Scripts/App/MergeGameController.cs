@@ -73,6 +73,7 @@ namespace Merge2048.App
             ScreenFlow.BuyUndoPackClicked += OnBuyUndoPackClicked;
             ScreenFlow.RemoveAdsClicked += OnRemoveAdsClicked;
             ScreenFlow.RestorePurchasesClicked += OnRestorePurchasesClicked;
+            ScreenFlow.ExitToMenuClicked += OnExitToMenuClicked;
 
             _inputReader.DirectionPerformed += OnDirectionPerformed;
 
@@ -97,6 +98,7 @@ namespace Merge2048.App
                 ScreenFlow.BuyUndoPackClicked -= OnBuyUndoPackClicked;
                 ScreenFlow.RemoveAdsClicked -= OnRemoveAdsClicked;
                 ScreenFlow.RestorePurchasesClicked -= OnRestorePurchasesClicked;
+                ScreenFlow.ExitToMenuClicked -= OnExitToMenuClicked;
             }
 
             if (_inputReader != null)
@@ -137,6 +139,18 @@ namespace Merge2048.App
             }
 
             ScreenFlow.Show(target);
+        }
+
+        private void OnExitToMenuClicked()
+        {
+            if (ScreenFlow == null)
+            {
+                return;
+            }
+
+            // Each move autosaves, so the in-progress game is recoverable — surface Continue.
+            ScreenFlow.SetContinueAvailable(SaveDataStore.HasSave);
+            ScreenFlow.Show(ScreenId.MainMenu);
         }
 
         private void OnDifficultySelected(Difficulty difficulty)

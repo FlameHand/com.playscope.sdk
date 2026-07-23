@@ -162,6 +162,7 @@ namespace Merge2048.Presentation
             colors.normalColor = Merge2048Theme.BUTTON_NORMAL_COLOR;
             colors.highlightedColor = Merge2048Theme.BUTTON_HIGHLIGHTED_COLOR;
             colors.pressedColor = Merge2048Theme.BUTTON_PRESSED_COLOR;
+            colors.selectedColor = Merge2048Theme.BUTTON_SELECTED_COLOR;
             colors.disabledColor = Merge2048Theme.BUTTON_DISABLED_COLOR;
             button.colors = colors;
 
