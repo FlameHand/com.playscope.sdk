@@ -18,7 +18,7 @@ namespace PlayScopeSdk
     /// <item><c>placement</c>: integrator-defined placement ID (echoes the operation name).</item>
     /// <item><c>ad_type</c>: <c>interstitial</c> / <c>rewarded</c> / <c>banner</c> / <c>app_open</c> / <c>native</c> / <c>unknown</c>.</item>
     /// <item><c>result</c>: end-of-impression outcome — see <see cref="AdResult"/>.</item>
-    /// <item><c>revenue</c>: estimated revenue for the impression (USD or specified currency, as double). Negative values clamped to 0.</item>
+    /// <item><c>revenue</c>: estimated revenue for the impression (USD or specified currency, as double). Negative finite values clamped to 0; NaN/Infinity dropped (key omitted).</item>
     /// <item><c>currency</c>: ISO 4217 code for <c>revenue</c> (default USD when omitted).</item>
     /// </list>
     /// </summary>
@@ -107,10 +107,13 @@ namespace PlayScopeSdk
 
         /// <summary>
         /// Builds the metadata dict for <see cref="PlayScope.EndAd"/>.
-        /// Negative <paramref name="revenue"/> is clamped to 0 and logged.
+        /// Negative finite <paramref name="revenue"/> is clamped to 0 and logged.
+        /// NaN/Infinity <paramref name="revenue"/> is dropped (key omitted) and logged —
+        /// never clamped, since <c>-Infinity &lt; 0</c> would otherwise misreport as
+        /// "negative revenue" and NaN would serialize on the wire as <c>null</c>.
         /// </summary>
         /// <param name="result">One of <see cref="AdResult"/> (or free-form). Pass null/empty to omit.</param>
-        /// <param name="revenue">Estimated revenue for the impression. Negatives clamped to 0. Pass null to omit.</param>
+        /// <param name="revenue">Estimated revenue for the impression. Negative finite values clamped to 0; NaN/Infinity dropped. Pass null to omit.</param>
         /// <param name="currency">ISO 4217 code (default USD when omitted by backend). Pass null/empty to omit.</param>
         /// <param name="extra">Optional extra keys merged on top. Caller-supplied keys win on collision.</param>
         public static IReadOnlyDictionary<string, object> BuildEndMetadata(
@@ -126,7 +129,11 @@ namespace PlayScopeSdk
             }
             if (revenue.HasValue)
             {
-                if (revenue.Value < 0)
+                if (!double.IsFinite(revenue.Value))
+                {
+                    PlayScopeLog.Warning("AdMetadata: dropping non-finite revenue (NaN/Infinity)");
+                }
+                else if (revenue.Value < 0)
                 {
                     PlayScopeLog.Warning("AdMetadata: negative revenue clamped to 0");
                     dict["revenue"] = 0.0;
