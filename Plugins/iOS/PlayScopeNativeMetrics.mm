@@ -11,12 +11,12 @@ extern "C"
         // Simulator shares the host Mac's kernel; host_statistics64 would
         // return the developer's macOS free RAM, not the simulated app's.
         // Skip entirely.
-        return 0;
+        return -1;
 #else
         @try
         {
             mach_port_t host = mach_host_self();
-            long result = 0;
+            long result = -1;
             vm_size_t pageSize = 0;
             if (host_page_size(host, &pageSize) == KERN_SUCCESS && pageSize != 0)
             {
@@ -35,7 +35,7 @@ extern "C"
         }
         @catch (NSException *e)
         {
-            return 0;
+            return -1;
         }
 #endif
     }

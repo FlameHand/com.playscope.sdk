@@ -13,8 +13,8 @@ namespace PlayScopeSdk.Internal
     /// Native bridge for OS-level device telemetry: free RAM and available
     /// disk space, in megabytes. iOS uses Mach + NSFileManager; Android uses
     /// ActivityManager + StatFs. All calls are fail-safe — any failure
-    /// returns 0 (memory) or -1 (disk, "unavailable") so the pipeline can
-    /// skip the sample rather than emit fake zeros.
+    /// returns -1 ("unavailable") so the pipeline can skip the sample rather
+    /// than emit fake zeros.
     /// </summary>
     internal static class NativeMetricsBridge
     {
@@ -28,6 +28,8 @@ namespace PlayScopeSdk.Internal
         private static extern long PlayScopeGetAvailableDiskMb();
 #endif
 
+        // -1 means "unavailable on this platform / failed" — caller must skip
+        // the emit rather than record a fake 0 MB.
         internal static long GetFreeMemoryMb()
         {
             try
@@ -41,18 +43,18 @@ namespace PlayScopeSdk.Internal
                 {
                     if (activity == null)
                     {
-                        return 0L;
+                        return -1L;
                     }
                     return cls.CallStatic<long>("getFreeMemoryMb", activity);
                 }
 #else
-                return 0L;
+                return -1L;
 #endif
             }
             catch (Exception ex)
             {
                 PlayScopeLog.Warning(LOG_TAG + " GetFreeMemoryMb failed: " + ex.Message);
-                return 0L;
+                return -1L;
             }
         }
 

@@ -173,11 +173,14 @@ namespace PlayScopeSdk.Internal
             try
             {
                 var status = SystemInfo.batteryStatus;
-                double charging = status == BatteryStatus.Charging ? 1.0 : 0.0;
-                if (charging != _prevCharging) // emit on transition only
+                if (status != BatteryStatus.Unknown)
                 {
-                    _pipeline.EnqueueMetric("is_charging", charging);
-                    _prevCharging = charging;
+                    double charging = status == BatteryStatus.Charging ? 1.0 : 0.0;
+                    if (charging != _prevCharging) // emit on transition only
+                    {
+                        _pipeline.EnqueueMetric("is_charging", charging);
+                        _prevCharging = charging;
+                    }
                 }
             }
             catch (Exception ex)
@@ -205,7 +208,12 @@ namespace PlayScopeSdk.Internal
                 }
             }
 
-            _pipeline.EnqueueMetric("system_free_ram_mb", NativeMetricsBridge.GetFreeMemoryMb());
+            // -1 = unavailable — skip emit rather than poison the metric with a fake 0.
+            long ramMb = NativeMetricsBridge.GetFreeMemoryMb();
+            if (ramMb > 0)
+            {
+                _pipeline.EnqueueMetric("system_free_ram_mb", ramMb);
+            }
 
             try
             {

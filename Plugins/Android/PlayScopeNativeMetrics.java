@@ -15,14 +15,14 @@ public final class PlayScopeNativeMetrics
         try
         {
             ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
-            if (am == null) { return 0L; }
+            if (am == null) { return -1L; }
             ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
             am.getMemoryInfo(mi);
             return mi.availMem / (1024L * 1024L);
         }
         catch (Throwable t)
         {
-            return 0L;
+            return -1L;
         }
     }
 
