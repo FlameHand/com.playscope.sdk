@@ -33,9 +33,9 @@ namespace Merge2048.Presentation
         private const float HUD_CARD_MIN_WIDTH = 170f;
         private const float GAMEPLAY_PADDING = 24f;
 
-        // Vertical space split inside GameplayPanel: the board gets 3 shares, the top bar
-        // and bottom bar 1 each — so the board fills ~3/5 of the height.
-        private const float BOARD_FLEX_WEIGHT = 3f;
+        // Vertical space split inside GameplayPanel: the board gets 3.9 shares, the top bar
+        // and bottom bar 1 each — so the board fills ~2/3 of the height.
+        private const float BOARD_FLEX_WEIGHT = 3.9f;
         private const float BAR_FLEX_WEIGHT = 1f;
 
         private GameObject _safeAreaRoot;
