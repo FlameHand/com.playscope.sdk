@@ -29,11 +29,14 @@ namespace Merge2048.Presentation
         private const float BUTTON_WIDTH = 700f;
         private const float STACK_WIDTH = 800f;
         private const float CONTENT_SPACING = 24f;
-        private const float TOP_BAR_HEIGHT = 210f;
-        private const float BOTTOM_BAR_HEIGHT = 170f;
         private const float MENU_BUTTON_WIDTH = 160f;
         private const float HUD_CARD_MIN_WIDTH = 170f;
         private const float GAMEPLAY_PADDING = 24f;
+
+        // Vertical space split inside GameplayPanel: the board gets 3 shares, the top bar
+        // and bottom bar 1 each — so the board fills ~3/5 of the height.
+        private const float BOARD_FLEX_WEIGHT = 3f;
+        private const float BAR_FLEX_WEIGHT = 1f;
 
         private GameObject _safeAreaRoot;
         private GameObject _mainMenuPanel;
@@ -559,7 +562,10 @@ namespace Merge2048.Presentation
             rootLayout.childAlignment = TextAnchor.UpperCenter;
             rootLayout.childControlHeight = true;
             rootLayout.childControlWidth = true;
-            rootLayout.childForceExpandHeight = true;
+            // Force-expand OFF on the height axis so the per-child flexibleHeight WEIGHTS
+            // decide the split (board 3 : bars 1 each); with it on, every child would get
+            // an equal share regardless of weight.
+            rootLayout.childForceExpandHeight = false;
             rootLayout.childForceExpandWidth = true;
             rootLayout.spacing = CONTENT_SPACING;
             rootLayout.padding = new RectOffset(
@@ -576,7 +582,7 @@ namespace Merge2048.Presentation
             boardBackgroundImage.color = Merge2048Theme.BOARD_BACKGROUND_COLOR;
 
             var boardLayoutElement = boardContainerGo.AddComponent<LayoutElement>();
-            boardLayoutElement.flexibleHeight = 1f;
+            boardLayoutElement.flexibleHeight = BOARD_FLEX_WEIGHT;
             boardLayoutElement.flexibleWidth = 1f;
 
             BoardContainer = boardContainerGo.GetComponent<RectTransform>();
@@ -592,9 +598,7 @@ namespace Merge2048.Presentation
             go.transform.SetParent(parent, false);
 
             var layoutElement = go.AddComponent<LayoutElement>();
-            layoutElement.preferredHeight = TOP_BAR_HEIGHT;
-            layoutElement.minHeight = TOP_BAR_HEIGHT;
-            layoutElement.flexibleHeight = 0f;
+            layoutElement.flexibleHeight = BAR_FLEX_WEIGHT;
 
             var horizontalLayoutGroup = go.AddComponent<HorizontalLayoutGroup>();
             horizontalLayoutGroup.childAlignment = TextAnchor.MiddleCenter;
@@ -620,9 +624,7 @@ namespace Merge2048.Presentation
             go.transform.SetParent(parent, false);
 
             var layoutElement = go.AddComponent<LayoutElement>();
-            layoutElement.preferredHeight = BOTTOM_BAR_HEIGHT;
-            layoutElement.minHeight = BOTTOM_BAR_HEIGHT;
-            layoutElement.flexibleHeight = 0f;
+            layoutElement.flexibleHeight = BAR_FLEX_WEIGHT;
 
             var horizontalLayoutGroup = go.AddComponent<HorizontalLayoutGroup>();
             horizontalLayoutGroup.childAlignment = TextAnchor.MiddleCenter;
