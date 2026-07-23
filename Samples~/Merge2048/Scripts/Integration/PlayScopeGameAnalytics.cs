@@ -21,6 +21,7 @@ namespace Merge2048.Integration
             var screenFlow = _controller.ScreenFlow;
             screenFlow.ScreenChanged += OnScreenChanged;
             screenFlow.PlayClicked += OnPlayClicked;
+            screenFlow.ContinueClicked += OnContinueClicked;
             screenFlow.DifficultySelected += OnDifficultySelected;
             screenFlow.ContinueWithAdClicked += OnContinueWithAdClicked;
             screenFlow.RestartClicked += OnRestartButtonClicked;
@@ -32,6 +33,8 @@ namespace Merge2048.Integration
             _controller.DirectionInput += OnDirectionInput;
             _controller.UndoAttempted += OnUndoAttempted;
             _controller.RestartRequested += OnRestartRequested;
+            _controller.SaveLoadAttempted += OnSaveLoadAttempted;
+            _controller.ResumedFromSave += OnResumedFromSave;
 
             HighScoreStore.LoadFailed += OnHighScoreLoadFailed;
         }
@@ -43,6 +46,7 @@ namespace Merge2048.Integration
                 var screenFlow = _controller.ScreenFlow;
                 screenFlow.ScreenChanged -= OnScreenChanged;
                 screenFlow.PlayClicked -= OnPlayClicked;
+                screenFlow.ContinueClicked -= OnContinueClicked;
                 screenFlow.DifficultySelected -= OnDifficultySelected;
                 screenFlow.ContinueWithAdClicked -= OnContinueWithAdClicked;
                 screenFlow.RestartClicked -= OnRestartButtonClicked;
@@ -57,6 +61,8 @@ namespace Merge2048.Integration
                 _controller.DirectionInput -= OnDirectionInput;
                 _controller.UndoAttempted -= OnUndoAttempted;
                 _controller.RestartRequested -= OnRestartRequested;
+                _controller.SaveLoadAttempted -= OnSaveLoadAttempted;
+                _controller.ResumedFromSave -= OnResumedFromSave;
             }
 
             HighScoreStore.LoadFailed -= OnHighScoreLoadFailed;

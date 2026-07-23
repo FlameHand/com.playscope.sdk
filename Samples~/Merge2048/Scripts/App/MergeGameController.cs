@@ -18,6 +18,8 @@ namespace Merge2048.App
         public event Action<bool> UndoAttempted;
         public event Action<string> RestartRequested;
         public event Action<Direction> DirectionInput;
+        public event Action<SaveDataStore.SaveLoadResult> SaveLoadAttempted;
+        public event Action ResumedFromSave;
 
         private InputReader _inputReader;
         private BoardView _boardView;
@@ -42,6 +44,7 @@ namespace Merge2048.App
             MonetizationFlows = gameObject.AddComponent<MonetizationFlows>();
 
             ScreenFlow.PlayClicked += OnPlayClicked;
+            ScreenFlow.ContinueClicked += OnContinueClicked;
             ScreenFlow.DifficultySelected += OnDifficultySelected;
             ScreenFlow.UndoClicked += OnUndoClicked;
             ScreenFlow.ContinueWithAdClicked += OnContinueWithAdClicked;
@@ -53,6 +56,8 @@ namespace Merge2048.App
 
             _inputReader.DirectionPerformed += OnDirectionPerformed;
 
+            ScreenFlow.SetContinueAvailable(SaveDataStore.HasSave);
+
             UpdateUndoHud();
             RefreshBestHud();
         }
@@ -62,6 +67,7 @@ namespace Merge2048.App
             if (ScreenFlow != null)
             {
                 ScreenFlow.PlayClicked -= OnPlayClicked;
+                ScreenFlow.ContinueClicked -= OnContinueClicked;
                 ScreenFlow.DifficultySelected -= OnDifficultySelected;
                 ScreenFlow.UndoClicked -= OnUndoClicked;
                 ScreenFlow.ContinueWithAdClicked -= OnContinueWithAdClicked;
@@ -136,11 +142,7 @@ namespace Merge2048.App
 
             Model = new MergeGameModel(difficulty, new System.Random());
 
-            if (_boardView == null && ScreenFlow != null && ScreenFlow.BoardContainer != null)
-            {
-                _boardView = ScreenFlow.BoardContainer.gameObject.AddComponent<BoardView>();
-                _boardView.Initialize();
-            }
+            EnsureBoardView();
 
             _hasUndoSnapshot = false;
             _undoSnapshotCells = null;
@@ -150,6 +152,66 @@ namespace Merge2048.App
             Model.Start();
 
             RefreshBestHud();
+        }
+
+        private void EnsureBoardView()
+        {
+            if (_boardView == null && ScreenFlow != null && ScreenFlow.BoardContainer != null)
+            {
+                _boardView = ScreenFlow.BoardContainer.gameObject.AddComponent<BoardView>();
+                _boardView.Initialize();
+            }
+        }
+
+        private void OnContinueClicked()
+        {
+            var result = SaveDataStore.TryLoad();
+            SaveLoadAttempted?.Invoke(result);
+
+            if (result.Outcome != SaveDataStore.SaveLoadOutcome.Success)
+            {
+                return;
+            }
+
+            SelectedDifficulty = result.Data.Difficulty;
+
+            if (ScreenFlow != null)
+            {
+                ScreenFlow.Show(ScreenId.Gameplay);
+            }
+
+            UnsubscribeFromModel();
+
+            Model = new MergeGameModel(result.Data.Difficulty, new System.Random());
+
+            EnsureBoardView();
+
+            Model.RestoreSnapshot(result.Data.Cells, result.Data.Score, result.Data.MoveCount, result.Data.HighestTile);
+
+            SubscribeToModel();
+
+            _hasUndoSnapshot = false;
+            _undoSnapshotCells = null;
+
+            RenderBoard();
+            UpdateScoreHud(Model.Score);
+
+            ResumedFromSave?.Invoke();
+        }
+
+        private void AutosaveCurrentState()
+        {
+            if (Model == null)
+            {
+                return;
+            }
+
+            SaveDataStore.Save(new SaveData(
+                Model.Difficulty,
+                Model.Score,
+                Model.MoveCount,
+                Model.HighestTile,
+                Model.Board.Snapshot()));
         }
 
         private void SubscribeToModel()
@@ -193,6 +255,8 @@ namespace Merge2048.App
 
             _isAnimating = true;
             _boardView.PlayMove(result, Model.Board, HandleMoveAnimationComplete);
+
+            AutosaveCurrentState();
         }
 
         private void HandleMoveAnimationComplete()
@@ -252,6 +316,11 @@ namespace Merge2048.App
                 _bestScore = Model.Score;
                 UpdateBestHud(_bestScore);
             }
+
+            // A finished game's autosave would let a resumed "Continue" walk straight
+            // into an already-game-over board — clear it instead of leaving it stale.
+            SaveDataStore.Clear();
+            ScreenFlow.SetContinueAvailable(false);
 
             SubmitScoreAsync(Model.Score);
         }

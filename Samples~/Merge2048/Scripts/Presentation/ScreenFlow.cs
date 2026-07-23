@@ -50,6 +50,7 @@ namespace Merge2048.Presentation
 
         public event Action<ScreenId> ScreenChanged;
         public event Action PlayClicked;
+        public event Action ContinueClicked;
         public event Action<Difficulty> DifficultySelected;
         public event Action UndoClicked;
         public event Action ContinueWithAdClicked;
@@ -67,6 +68,7 @@ namespace Merge2048.Presentation
         public TMP_Text GameOverFinalScoreText { get; private set; }
         public TMP_Text GameOverHighestTileText { get; private set; }
         public Button RemoveAdsButton { get; private set; }
+        public Button ContinueButton { get; private set; }
 
         private void Awake()
         {
@@ -529,6 +531,21 @@ namespace Merge2048.Presentation
 
             var playButton = CreateButton(stack, "Play");
             playButton.onClick.AddListener(OnPlayButtonClicked);
+
+            var continueButton = CreateButton(stack, "Continue");
+            continueButton.onClick.AddListener(() => ContinueClicked?.Invoke());
+            ContinueButton = continueButton;
+            ContinueButton.gameObject.SetActive(false);
+        }
+
+        // Hidden by default — shown only once a caller (MergeGameController) confirms
+        // a save exists, matching how a real game would gate this button.
+        public void SetContinueAvailable(bool available)
+        {
+            if (ContinueButton != null)
+            {
+                ContinueButton.gameObject.SetActive(available);
+            }
         }
 
         private void OnPlayButtonClicked()
