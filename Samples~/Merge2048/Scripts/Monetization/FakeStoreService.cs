@@ -53,5 +53,18 @@ namespace Merge2048.Monetization
 
             return new PurchaseAttemptResult(PurchaseOutcome.Failed, string.Empty);
         }
+
+        public async Task<PurchaseAttemptResult> RestorePurchasesAsync(CancellationToken cancellationToken)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1.0), cancellationToken);
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return new PurchaseAttemptResult(PurchaseOutcome.Unknown, string.Empty);
+            }
+
+            var transactionId = $"restore_{Guid.NewGuid():N}";
+            return new PurchaseAttemptResult(PurchaseOutcome.Success, transactionId);
+        }
     }
 }

@@ -2,11 +2,9 @@ using UnityEngine;
 
 namespace Merge2048.Integration
 {
-    // Minimal STUB consent policy. Building an interactive consent-UI was
-    // explicitly descoped for this sample — the point is teaching the SDK
-    // integration pattern, not UI construction. The auto-grant default below
-    // is NOT a real compliance posture; a shipping game must replace
-    // ResolveForSession with its own CMP/consent-UI decision.
+    // Decision storage only — no UI, no PlayScope calls. ConsentDialogView (Presentation)
+    // renders the first-run prompt and PlayScopeBootstrapper (Integration) decides what to
+    // do with the answer, per the "only Integration/ calls PlayScope.*" rule.
     public static class ConsentGate
     {
         private const string CONSENT_KEY = "Merge2048_TelemetryConsent";
@@ -27,18 +25,11 @@ namespace Merge2048.Integration
             PlayerPrefs.Save();
         }
 
-        // Demo default: auto-grants on first run if no decision is stored yet. A real
-        // game must replace this with its own CMP/consent-UI decision BEFORE calling
-        // Initialize() — call Decline() yourself (e.g. from a debug menu) to exercise
-        // the opt-out path, where PlayScope stays a global no-op for the session.
-        public static bool ResolveForSession()
+        // Diagnostics-only: clears the decision so the first-run dialog shows again next launch.
+        public static void Reset()
         {
-            if (!HasDecision)
-            {
-                Grant();
-            }
-
-            return IsGranted;
+            PlayerPrefs.DeleteKey(CONSENT_KEY);
+            PlayerPrefs.Save();
         }
     }
 }

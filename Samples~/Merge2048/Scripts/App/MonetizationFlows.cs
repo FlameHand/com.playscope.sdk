@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using Merge2048.Integration;
 using Merge2048.Monetization;
 using PlayScopeSdk;
 
@@ -30,6 +31,7 @@ namespace Merge2048.App
                 network: AdMetadata.Network.Other,
                 placement: "Rewarded_GameOver",
                 adType: AdMetadata.AdType.Rewarded));
+            AnalyticsFeed.Publish("StartAd: Rewarded_GameOver");
 
             AdShowResult result;
 
@@ -40,12 +42,14 @@ namespace Merge2048.App
             catch (OperationCanceledException)
             {
                 PlayScope.EndAd(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndAd: Cancelled");
                 return false;
             }
 
             if (cancellationToken.IsCancellationRequested)
             {
                 PlayScope.EndAd(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndAd: Cancelled");
                 return false;
             }
 
@@ -85,8 +89,81 @@ namespace Merge2048.App
                 result: adResult,
                 revenue: result.RevenueUsd,
                 currency: "USD"));
+            AnalyticsFeed.Publish($"EndAd: {adResult}");
 
             return result.Outcome == AdOutcome.Rewarded;
+        }
+
+        public async Task ShowInterstitialBetweenGamesAsync(CancellationToken cancellationToken)
+        {
+            var opId = PlayScope.StartAd("Interstitial_BetweenGames", AdMetadata.BuildStartMetadata(
+                network: AdMetadata.Network.Other,
+                placement: "Interstitial_BetweenGames",
+                adType: AdMetadata.AdType.Interstitial));
+            AnalyticsFeed.Publish("StartAd: Interstitial");
+
+            InterstitialShowResult result;
+
+            try
+            {
+                result = await _fakeAdService.ShowInterstitialAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                PlayScope.EndAd(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndAd: Cancelled");
+                return;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                PlayScope.EndAd(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndAd: Cancelled");
+                return;
+            }
+
+            string adResult;
+            OperationCompletionStatus status;
+            double? revenue;
+
+            switch (result.Outcome)
+            {
+                case InterstitialOutcome.Closed:
+                {
+                    adResult = AdMetadata.AdResult.Closed;
+                    status = OperationCompletionStatus.Success;
+                    revenue = result.RevenueUsd;
+                    break;
+                }
+                case InterstitialOutcome.NoFill:
+                {
+                    adResult = AdMetadata.AdResult.NoFill;
+                    status = OperationCompletionStatus.Abandoned;
+                    revenue = null;
+                    break;
+                }
+                case InterstitialOutcome.Failed:
+                {
+                    adResult = AdMetadata.AdResult.Failed;
+                    status = OperationCompletionStatus.Failure;
+                    revenue = null;
+                    break;
+                }
+                case InterstitialOutcome.Unknown:
+                default:
+                {
+                    adResult = AdMetadata.AdResult.Unknown;
+                    status = OperationCompletionStatus.Abandoned;
+                    revenue = null;
+                    break;
+                }
+            }
+
+            PlayScope.EndAd(opId, status, AdMetadata.BuildEndMetadata(
+                result: adResult,
+                revenue: revenue,
+                currency: revenue.HasValue ? "USD" : null));
+            AnalyticsFeed.Publish($"EndAd: {adResult}");
         }
 
         public async Task<bool> PurchaseUndoPackAsync(CancellationToken cancellationToken)
@@ -99,11 +176,53 @@ namespace Merge2048.App
             return await PurchaseAsync("remove_ads", 4.99m, cancellationToken);
         }
 
+        public async Task<bool> RestoreRemoveAdsAsync(CancellationToken cancellationToken)
+        {
+            var opId = PlayScope.StartPurchase("remove_ads", PurchaseMetadata.BuildStartMetadata(
+                currency: "USD",
+                isRestore: true));
+            AnalyticsFeed.Publish("StartPurchase: remove_ads");
+
+            PurchaseAttemptResult result;
+
+            try
+            {
+                result = await _fakeStoreService.RestorePurchasesAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                PlayScope.EndPurchase(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndPurchase: Cancelled");
+                return false;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                PlayScope.EndPurchase(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndPurchase: Cancelled");
+                return false;
+            }
+
+            if (result.Outcome == PurchaseOutcome.Success)
+            {
+                PlayScope.EndPurchase(opId, OperationCompletionStatus.Success, PurchaseMetadata.BuildEndMetadata(
+                    transactionId: result.TransactionId,
+                    validationStatus: PurchaseMetadata.ValidationStatus.Valid));
+                AnalyticsFeed.Publish("EndPurchase: Success");
+                return true;
+            }
+
+            PlayScope.EndPurchase(opId, OperationCompletionStatus.Abandoned);
+            AnalyticsFeed.Publish("EndPurchase: Abandoned");
+            return false;
+        }
+
         private async Task<bool> PurchaseAsync(string productId, decimal priceAmount, CancellationToken cancellationToken)
         {
             var opId = PlayScope.StartPurchase(productId, PurchaseMetadata.BuildStartMetadata(
                 currency: "USD",
                 priceAmount: priceAmount));
+            AnalyticsFeed.Publish($"StartPurchase: {productId}");
 
             PurchaseAttemptResult result;
 
@@ -114,12 +233,14 @@ namespace Merge2048.App
             catch (OperationCanceledException)
             {
                 PlayScope.EndPurchase(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndPurchase: Cancelled");
                 return false;
             }
 
             if (cancellationToken.IsCancellationRequested)
             {
                 PlayScope.EndPurchase(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndPurchase: Cancelled");
                 return false;
             }
 
@@ -159,6 +280,7 @@ namespace Merge2048.App
                 transactionId: result.TransactionId,
                 validationStatus: validationStatus,
                 failureReason: failureReason));
+            AnalyticsFeed.Publish($"EndPurchase: {status}");
 
             return result.Outcome == PurchaseOutcome.Success;
         }
@@ -166,6 +288,7 @@ namespace Merge2048.App
         public async Task SubmitScoreToLeaderboardAsync(int score, CancellationToken cancellationToken)
         {
             var opId = PlayScope.StartHTTP("POST /leaderboard/submit");
+            AnalyticsFeed.Publish("StartHTTP: leaderboard");
 
             LeaderboardSubmitResult result;
 
@@ -176,6 +299,7 @@ namespace Merge2048.App
             catch (OperationCanceledException)
             {
                 PlayScope.EndHTTP(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndHTTP: Cancelled");
                 return;
             }
             catch (LeaderboardTimeoutException)
@@ -184,6 +308,7 @@ namespace Merge2048.App
                 {
                     ["timeout_ms"] = 5000,
                 });
+                AnalyticsFeed.Publish("EndHTTP: Timeout");
                 return;
             }
             catch (LeaderboardSubmitException ex)
@@ -196,12 +321,14 @@ namespace Merge2048.App
                 {
                     ["context"] = "leaderboard_submit",
                 });
+                AnalyticsFeed.Publish("EndHTTP: Failure");
                 return;
             }
 
             if (cancellationToken.IsCancellationRequested)
             {
                 PlayScope.EndHTTP(opId, OperationCompletionStatus.Cancelled);
+                AnalyticsFeed.Publish("EndHTTP: Cancelled");
                 return;
             }
 
@@ -210,6 +337,7 @@ namespace Merge2048.App
                 ["status_code"] = result.StatusCode,
                 ["bytes"] = result.ResponseBytes,
             });
+            AnalyticsFeed.Publish("EndHTTP: Success");
         }
     }
 }

@@ -13,6 +13,7 @@ namespace Merge2048.Integration
         private MergeGameController _controller;
         private MergeGameModel _subscribedModel;
         private bool _highestTileFlaggedThisMove;
+        private string _pendingShopSource;
 
         private void Awake()
         {
@@ -29,14 +30,19 @@ namespace Merge2048.Integration
             screenFlow.CloseShopClicked += OnCloseShopClicked;
             screenFlow.BuyUndoPackClicked += OnBuyUndoPackClicked;
             screenFlow.RemoveAdsClicked += OnRemoveAdsClicked;
+            screenFlow.RestorePurchasesClicked += OnRestorePurchasesClicked;
 
             _controller.DirectionInput += OnDirectionInput;
             _controller.UndoAttempted += OnUndoAttempted;
             _controller.RestartRequested += OnRestartRequested;
             _controller.SaveLoadAttempted += OnSaveLoadAttempted;
             _controller.ResumedFromSave += OnResumedFromSave;
+            _controller.RemoveAdsEntitlementGranted += OnRemoveAdsEntitlementGranted;
 
             HighScoreStore.LoadFailed += OnHighScoreLoadFailed;
+
+            var diagnostics = gameObject.AddComponent<DiagnosticsController>();
+            diagnostics.Initialize(screenFlow);
         }
 
         private void OnDestroy()
@@ -54,6 +60,7 @@ namespace Merge2048.Integration
                 screenFlow.CloseShopClicked -= OnCloseShopClicked;
                 screenFlow.BuyUndoPackClicked -= OnBuyUndoPackClicked;
                 screenFlow.RemoveAdsClicked -= OnRemoveAdsClicked;
+                screenFlow.RestorePurchasesClicked -= OnRestorePurchasesClicked;
             }
 
             if (_controller != null)
@@ -63,6 +70,7 @@ namespace Merge2048.Integration
                 _controller.RestartRequested -= OnRestartRequested;
                 _controller.SaveLoadAttempted -= OnSaveLoadAttempted;
                 _controller.ResumedFromSave -= OnResumedFromSave;
+                _controller.RemoveAdsEntitlementGranted -= OnRemoveAdsEntitlementGranted;
             }
 
             HighScoreStore.LoadFailed -= OnHighScoreLoadFailed;
@@ -72,12 +80,25 @@ namespace Merge2048.Integration
 
         private void OnScreenChanged(ScreenId screen)
         {
+            if (screen == ScreenId.Shop && _pendingShopSource != null)
+            {
+                PlayScope.SetScreen("Shop", new Dictionary<string, object>
+                {
+                    ["source"] = _pendingShopSource,
+                });
+                AnalyticsFeed.Publish($"SetScreen: {ScreenFlow.ScreenName(screen)}");
+                _pendingShopSource = null;
+                return;
+            }
+
             PlayScope.SetScreen(ScreenFlow.ScreenName(screen));
+            AnalyticsFeed.Publish($"SetScreen: {ScreenFlow.ScreenName(screen)}");
         }
 
         private void OnPlayClicked()
         {
             PlayScope.TrackAction("TapPlay");
+            AnalyticsFeed.Publish("TrackAction: TapPlay");
         }
 
         private void OnDifficultySelected(Difficulty difficulty)
@@ -86,6 +107,7 @@ namespace Merge2048.Integration
             {
                 ["level"] = difficulty.ToString(),
             });
+            AnalyticsFeed.Publish("TrackAction: SelectDifficulty");
 
             RebindModel(_controller.Model);
             SendInitialStateSnapshot();
@@ -103,6 +125,7 @@ namespace Merge2048.Integration
             {
                 ["direction"] = direction.ToString(),
             });
+            AnalyticsFeed.Publish($"TrackAction: Swipe({direction})");
         }
 
         private void OnUndoAttempted(bool success)
@@ -111,41 +134,74 @@ namespace Merge2048.Integration
             {
                 ["success"] = success,
             });
+            AnalyticsFeed.Publish("TrackAction: TapUndo");
         }
 
         private void OnContinueWithAdClicked()
         {
             PlayScope.TrackAction("TapContinueWithAd");
+            AnalyticsFeed.Publish("TrackAction: TapContinueWithAd");
         }
 
         private void OnRestartButtonClicked()
         {
             PlayScope.TrackAction("TapRestart");
+            AnalyticsFeed.Publish("TrackAction: TapRestart");
         }
 
-        private void OnOpenShopClicked()
+        private void OnOpenShopClicked(string source)
         {
-            PlayScope.TrackAction("OpenShop");
+            _pendingShopSource = source;
+            PlayScope.TrackAction("OpenShop", new Dictionary<string, object>
+            {
+                ["source"] = source,
+            });
+            AnalyticsFeed.Publish("TrackAction: OpenShop");
         }
 
         private void OnCloseShopClicked()
         {
             PlayScope.TrackAction("TapCloseShop");
+            AnalyticsFeed.Publish("TrackAction: TapCloseShop");
         }
 
         private void OnBuyUndoPackClicked()
         {
             PlayScope.TrackAction("TapBuyUndoPack");
+            AnalyticsFeed.Publish("TrackAction: TapBuyUndoPack");
         }
 
         private void OnRemoveAdsClicked()
         {
             PlayScope.TrackAction("TapRemoveAds");
+            AnalyticsFeed.Publish("TrackAction: TapRemoveAds");
         }
 
-        private void OnRestartRequested(string reason)
+        private void OnRestorePurchasesClicked()
         {
-            PlayScope.TrackRestart(reason);
+            PlayScope.TrackAction("TapRestorePurchases");
+            AnalyticsFeed.Publish("TrackAction: TapRestorePurchases");
+        }
+
+        private void OnRemoveAdsEntitlementGranted()
+        {
+            PlayScope.SetUserData(AnonymousPlayerId.GetOrCreate(), new Dictionary<string, object>
+            {
+                ["is_guest"] = true,
+                ["has_remove_ads"] = true,
+            });
+            AnalyticsFeed.Publish("SetUserData: has_remove_ads");
+        }
+
+        private void OnRestartRequested(RestartContext ctx)
+        {
+            PlayScope.TrackRestart(ctx.Reason, new Dictionary<string, object>
+            {
+                ["from_score"] = ctx.FromScore,
+                ["from_moves"] = ctx.FromMoves,
+                ["from_highest_tile"] = ctx.FromHighestTile,
+            });
+            AnalyticsFeed.Publish("TrackRestart");
 
             RebindModel(_controller.Model);
             SendInitialStateSnapshot();
@@ -154,6 +210,7 @@ namespace Merge2048.Integration
         private void OnContinueClicked()
         {
             PlayScope.TrackAction("TapContinue");
+            AnalyticsFeed.Publish("TrackAction: TapContinue");
         }
 
         private void OnSaveLoadAttempted(SaveDataStore.SaveLoadResult result)
@@ -281,6 +338,7 @@ namespace Merge2048.Integration
                 ["highest_tile"] = _subscribedModel.HighestTile,
                 ["empty_cells"] = _subscribedModel.Board.GetEmptyCells().Count,
             }, reason);
+            AnalyticsFeed.Publish($"UpdateState: {reason}");
         }
 
         private void OnHighScoreLoadFailed(Exception ex)

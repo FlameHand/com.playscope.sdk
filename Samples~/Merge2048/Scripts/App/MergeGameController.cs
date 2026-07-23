@@ -6,6 +6,22 @@ using Merge2048.Presentation;
 
 namespace Merge2048.App
 {
+    public readonly struct RestartContext
+    {
+        public readonly string Reason;
+        public readonly int FromScore;
+        public readonly int FromMoves;
+        public readonly int FromHighestTile;
+
+        public RestartContext(string reason, int fromScore, int fromMoves, int fromHighestTile)
+        {
+            Reason = reason;
+            FromScore = fromScore;
+            FromMoves = fromMoves;
+            FromHighestTile = fromHighestTile;
+        }
+    }
+
     public sealed class MergeGameController : MonoBehaviour
     {
         public MergeGameModel Model { get; private set; }
@@ -16,10 +32,11 @@ namespace Merge2048.App
         public bool AdsRemoved { get; private set; }
 
         public event Action<bool> UndoAttempted;
-        public event Action<string> RestartRequested;
+        public event Action<RestartContext> RestartRequested;
         public event Action<Direction> DirectionInput;
         public event Action<SaveDataStore.SaveLoadResult> SaveLoadAttempted;
         public event Action ResumedFromSave;
+        public event Action RemoveAdsEntitlementGranted;
 
         private InputReader _inputReader;
         private BoardView _boardView;
@@ -34,6 +51,8 @@ namespace Merge2048.App
         private int _undoSnapshotMoveCount;
         private int _undoSnapshotHighestTile;
         private int _bestScore;
+        private int _restartsSinceLaunch;
+        private ScreenId _screenBeforeShop = ScreenId.Gameplay;
 
         private void Awake()
         {
@@ -53,6 +72,7 @@ namespace Merge2048.App
             ScreenFlow.CloseShopClicked += OnCloseShopClicked;
             ScreenFlow.BuyUndoPackClicked += OnBuyUndoPackClicked;
             ScreenFlow.RemoveAdsClicked += OnRemoveAdsClicked;
+            ScreenFlow.RestorePurchasesClicked += OnRestorePurchasesClicked;
 
             _inputReader.DirectionPerformed += OnDirectionPerformed;
 
@@ -76,6 +96,7 @@ namespace Merge2048.App
                 ScreenFlow.CloseShopClicked -= OnCloseShopClicked;
                 ScreenFlow.BuyUndoPackClicked -= OnBuyUndoPackClicked;
                 ScreenFlow.RemoveAdsClicked -= OnRemoveAdsClicked;
+                ScreenFlow.RestorePurchasesClicked -= OnRestorePurchasesClicked;
             }
 
             if (_inputReader != null)
@@ -93,20 +114,29 @@ namespace Merge2048.App
         {
         }
 
-        private void OnOpenShopClicked()
+        private void OnOpenShopClicked(string source)
         {
             if (ScreenFlow != null)
             {
+                _screenBeforeShop = ScreenFlow.Current;
                 ScreenFlow.Show(ScreenId.Shop);
             }
         }
 
         private void OnCloseShopClicked()
         {
-            if (ScreenFlow != null)
+            if (ScreenFlow == null)
             {
-                ScreenFlow.Show(ScreenId.Gameplay);
+                return;
             }
+
+            var target = _screenBeforeShop;
+            if (target == ScreenId.Shop || target == ScreenId.Unknown)
+            {
+                target = ScreenId.Gameplay;
+            }
+
+            ScreenFlow.Show(target);
         }
 
         private void OnDifficultySelected(Difficulty difficulty)
@@ -126,6 +156,27 @@ namespace Merge2048.App
 
         private void OnRestartClicked()
         {
+            RestartAsync();
+        }
+
+        private async void RestartAsync()
+        {
+            _restartsSinceLaunch++;
+
+            if (_restartsSinceLaunch % 2 == 0 && !AdsRemoved && MonetizationFlows != null)
+            {
+                await MonetizationFlows.ShowInterstitialBetweenGamesAsync(_lifetimeToken);
+
+                if (_lifetimeToken.IsCancellationRequested)
+                {
+                    return;
+                }
+            }
+
+            int fromScore = Model?.Score ?? 0;
+            int fromMoves = Model?.MoveCount ?? 0;
+            int fromHighestTile = Model?.HighestTile ?? 0;
+
             if (ScreenFlow != null)
             {
                 ScreenFlow.Show(ScreenId.Gameplay);
@@ -133,7 +184,7 @@ namespace Merge2048.App
 
             StartNewGame(SelectedDifficulty);
 
-            RestartRequested?.Invoke("defeat_restart");
+            RestartRequested?.Invoke(new RestartContext("defeat_restart", fromScore, fromMoves, fromHighestTile));
         }
 
         private void StartNewGame(Difficulty difficulty)
@@ -431,6 +482,40 @@ namespace Merge2048.App
                 {
                     ScreenFlow.RemoveAdsButton.interactable = false;
                 }
+
+                RemoveAdsEntitlementGranted?.Invoke();
+            }
+        }
+
+        private void OnRestorePurchasesClicked()
+        {
+            RestoreRemoveAdsAsync();
+        }
+
+        private async void RestoreRemoveAdsAsync()
+        {
+            if (MonetizationFlows == null)
+            {
+                return;
+            }
+
+            bool success = await MonetizationFlows.RestoreRemoveAdsAsync(_lifetimeToken);
+
+            if (_lifetimeToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (success)
+            {
+                AdsRemoved = true;
+
+                if (ScreenFlow != null && ScreenFlow.RemoveAdsButton != null)
+                {
+                    ScreenFlow.RemoveAdsButton.interactable = false;
+                }
+
+                RemoveAdsEntitlementGranted?.Invoke();
             }
         }
 

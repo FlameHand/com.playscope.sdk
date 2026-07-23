@@ -25,7 +25,7 @@
   "samples": [
     {
       "displayName": "2048 Merge Demo (6×6)",
-      "description": "Playable merge game showing end-to-end PlayScope SDK integration best practices.",
+      "description": "Playable 6x6 merge game covering the full PlayScope SDK surface — sessions, scenes, screens, custom operations, ads, IAP, leaderboard HTTP, consent, and diagnostics — through best-practice call sites.",
       "path": "Samples~/Merge2048"
     }
   ]

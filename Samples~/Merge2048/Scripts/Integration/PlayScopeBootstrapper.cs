@@ -21,31 +21,72 @@ namespace Merge2048.Integration
         // rescale so the bar still reaches 1.0 when the load actually completes.
         private const float SCENE_LOAD_UNITY_PROGRESS_CAP = 0.9f;
 
+        // Demonstrates the runtime-config path from the integration guide
+        // (PlayScopeContext) as an alternative to the default Resources-asset path.
+        [SerializeField] private bool _useExplicitContext = false;
+
         private readonly CancellationTokenSource _destroyCts = new CancellationTokenSource();
         private BootScreenView _bootScreenView;
+        private ConsentDialogView _consentDialogView;
 
         private void Awake()
         {
             DontDestroyOnLoad(gameObject);
 
-            bool consentGranted = ConsentGate.ResolveForSession();
-
-            if (consentGranted)
+            if (ConsentGate.HasDecision)
             {
-                PlayScope.Initialize();
-                PlayScope.SetUserData(AnonymousPlayerId.GetOrCreate(), new Dictionary<string, object>
-                {
-                    ["is_guest"] = true,
-                });
-                PlayScope.UpdateSessionData(new Dictionary<string, object>
-                {
-                    ["board_size"] = Merge2048.Core.Board.SIZE * Merge2048.Core.Board.SIZE,
-                }, "boot_complete");
+                ProceedAfterConsent(ConsentGate.IsGranted);
+                return;
+            }
+
+            _consentDialogView = BuildConsentDialogView();
+            _consentDialogView.DecisionMade += OnConsentDecisionMade;
+        }
+
+        private void OnDestroy()
+        {
+            _destroyCts.Cancel();
+            _destroyCts.Dispose();
+        }
+
+        private ConsentDialogView BuildConsentDialogView()
+        {
+            var go = new GameObject("ConsentDialogView", typeof(RectTransform));
+            go.transform.SetParent(transform, false);
+            return go.AddComponent<ConsentDialogView>();
+        }
+
+        private void OnConsentDecisionMade(bool granted)
+        {
+            _consentDialogView.DecisionMade -= OnConsentDecisionMade;
+
+            if (granted)
+            {
+                ConsentGate.Grant();
+            }
+            else
+            {
+                ConsentGate.Decline();
+            }
+
+            Destroy(_consentDialogView.gameObject);
+            _consentDialogView = null;
+
+            ProceedAfterConsent(granted);
+        }
+
+        private void ProceedAfterConsent(bool granted)
+        {
+            if (granted)
+            {
+                InitializeSdk();
             }
             else
             {
                 Debug.LogWarning("[Merge2048] Telemetry consent declined — PlayScope stays disabled (no-op) for this session.");
             }
+
+            Debug.Log($"[Merge2048] PlayScope state — IsInitialized={PlayScope.IsInitialized}, IsDisabled={PlayScope.IsDisabled}");
 
             _bootScreenView = BuildBootScreenView();
             _bootScreenView.SetProgress(0f);
@@ -53,10 +94,39 @@ namespace Merge2048.Integration
             StartCoroutine(RunWarmupThenLoadScene());
         }
 
-        private void OnDestroy()
+        private void InitializeSdk()
         {
-            _destroyCts.Cancel();
-            _destroyCts.Dispose();
+            if (_useExplicitContext)
+            {
+                var settings = PlayScopeSettings.Load();
+                var context = new PlayScopeContext
+                {
+                    SdkKey = settings != null ? settings.SdkKey : string.Empty,
+                    AutoCaptureUnityLogs = settings != null && settings.AutoCaptureUnityLogs,
+                    AutoCaptureMinLevel = settings != null ? settings.MinLogLevel : LogLevel.Warning,
+                    Metadata = new Dictionary<string, object>
+                    {
+                        ["environment"] = "development",
+                        ["build_number"] = Application.version,
+                    },
+                };
+                PlayScope.Initialize(context);
+            }
+            else
+            {
+                PlayScope.Initialize();
+            }
+
+            AnalyticsFeed.Publish("Initialize");
+
+            PlayScope.SetUserData(AnonymousPlayerId.GetOrCreate(), new Dictionary<string, object>
+            {
+                ["is_guest"] = true,
+            });
+            PlayScope.UpdateSessionData(new Dictionary<string, object>
+            {
+                ["board_size"] = Merge2048.Core.Board.SIZE * Merge2048.Core.Board.SIZE,
+            }, "boot_complete");
         }
 
         private BootScreenView BuildBootScreenView()
@@ -90,6 +160,7 @@ namespace Merge2048.Integration
         {
             var operation = SceneManager.LoadSceneAsync(GAME_SCENE_NAME);
             string operationId = PlayScope.StartSceneLoad(GAME_SCENE_NAME, operation);
+            AnalyticsFeed.Publish("StartSceneLoad");
             var cancellationToken = _destroyCts.Token;
 
             while (operation != null && !operation.isDone)
@@ -114,6 +185,7 @@ namespace Merge2048.Integration
             }
 
             PlayScope.EndSceneLoad(operationId, OperationCompletionStatus.Success);
+            AnalyticsFeed.Publish("EndSceneLoad");
 
             // BootScreenView is owned by this DontDestroyOnLoad object, so it would
             // otherwise persist over the Game scene's own ScreenFlow UI forever.

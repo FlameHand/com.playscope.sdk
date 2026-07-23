@@ -55,10 +55,11 @@ namespace Merge2048.Presentation
         public event Action UndoClicked;
         public event Action ContinueWithAdClicked;
         public event Action RestartClicked;
-        public event Action OpenShopClicked;
+        public event Action<string> OpenShopClicked;
         public event Action CloseShopClicked;
         public event Action BuyUndoPackClicked;
         public event Action RemoveAdsClicked;
+        public event Action RestorePurchasesClicked;
 
         public RectTransform BoardContainer { get; private set; }
         public TMP_Text ScoreValueText { get; private set; }
@@ -629,7 +630,7 @@ namespace Merge2048.Presentation
             UndoChargeText = CreateUndoBadge(undoButton.transform);
 
             var shopButton = CreateButton(go.transform, "Shop", HUD_SHOP_BUTTON_WIDTH);
-            shopButton.onClick.AddListener(() => OpenShopClicked?.Invoke());
+            shopButton.onClick.AddListener(() => OpenShopClicked?.Invoke("gameplay_hud"));
         }
 
         private void BuildGameOverPanel()
@@ -653,6 +654,9 @@ namespace Merge2048.Presentation
             var continueButton = CreateButton(stack, "Watch Ad to Continue");
             continueButton.onClick.AddListener(() => ContinueWithAdClicked?.Invoke());
 
+            var shopButton = CreateButton(stack, "Shop");
+            shopButton.onClick.AddListener(() => OpenShopClicked?.Invoke("game_over"));
+
             var restartButton = CreateButton(stack, "Restart");
             restartButton.onClick.AddListener(() => RestartClicked?.Invoke());
         }
@@ -670,6 +674,9 @@ namespace Merge2048.Presentation
             var removeAdsButton = CreateButton(stack, "Remove Ads");
             RemoveAdsButton = removeAdsButton;
             removeAdsButton.onClick.AddListener(() => RemoveAdsClicked?.Invoke());
+
+            var restoreButton = CreateButton(stack, "Restore Purchases");
+            restoreButton.onClick.AddListener(() => RestorePurchasesClicked?.Invoke());
 
             var closeButton = CreateButton(stack, "Close");
             closeButton.onClick.AddListener(() => CloseShopClicked?.Invoke());
