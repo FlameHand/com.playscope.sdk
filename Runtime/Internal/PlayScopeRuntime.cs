@@ -9,7 +9,7 @@ namespace PlayScopeSdk.Internal
 {
     internal static class PlayScopeRuntime
     {
-        internal const string SdkVersion = "0.6.34";
+        internal const string SdkVersion = "0.6.35";
 
         // PlayerPrefs key for the last-seen Application.version, so Initialize can
         // emit app_update_detected the first time a different build starts up.
