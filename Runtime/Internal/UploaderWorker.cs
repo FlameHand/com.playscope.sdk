@@ -341,10 +341,12 @@ namespace PlayScopeSdk.Internal
                 return;
             }
 
-            // Non-retryable errors → dead letter (spec: 400/401/402/403/422).
+            // Non-retryable errors → dead letter (spec: 400/401/402/403/413/422).
             // 409 was removed — it indicates an idempotency/conflict that should retry.
+            // 413 is deterministic — the payload won't shrink on retry, so retrying
+            // just hammers the server until the 7-day TTL gives up anyway.
             if (!networkError && (httpStatus == 400 || httpStatus == 401 || httpStatus == 402 ||
-                                   httpStatus == 403 || httpStatus == 422))
+                                   httpStatus == 403 || httpStatus == 413 || httpStatus == 422))
             {
                 var bodySnippet = string.IsNullOrEmpty(responseBody)
                     ? ""

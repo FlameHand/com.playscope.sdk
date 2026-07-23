@@ -7,7 +7,7 @@ namespace PlayScopeSdk.Tests.Editor
 {
     /// <summary>
     /// Validates UploaderWorker dead-letter / retry classification logic.
-    /// Spec: non-retryable status codes are 400/401/402/403/422; everything else retries.
+    /// Spec: non-retryable status codes are 400/401/402/403/413/422; everything else retries.
     /// Retry TTL is anchored to CreatedAt, not LastAttemptAt.
     /// </summary>
     public class UploadStateTests
@@ -18,6 +18,7 @@ namespace PlayScopeSdk.Tests.Editor
         [TestCase(401, true,  "unauthorized")]
         [TestCase(402, true,  "payment required (spec)")]
         [TestCase(403, true,  "forbidden")]
+        [TestCase(413, true,  "payload too large — won't shrink on retry")]
         [TestCase(422, true,  "unprocessable entity (spec)")]
         [TestCase(409, false, "conflict — must retry, not dead-letter")]
         [TestCase(429, false, "rate-limited — retry")]
@@ -28,7 +29,8 @@ namespace PlayScopeSdk.Tests.Editor
             // We exercise the small static classification implicitly via the constant set;
             // the actual call site in UploaderWorker is the if-statement at line ~210.
             // Mirror it here to lock the spec in a unit test.
-            bool isDeadLetter = code == 400 || code == 401 || code == 402 || code == 403 || code == 422;
+            bool isDeadLetter = code == 400 || code == 401 || code == 402 || code == 403 ||
+                                 code == 413 || code == 422;
             Assert.AreEqual(expectedDeadLetter, isDeadLetter);
         }
 
