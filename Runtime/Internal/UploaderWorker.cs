@@ -414,10 +414,23 @@ namespace PlayScopeSdk.Internal
             var logs = new List<string>();
             var metrics = new List<string>();
 
+            int droppedCount = 0;
             foreach (var line in lines)
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 var recType = ExtractRecordType(line);
+                if (recType == null) continue;
+
+                // A line truncated mid-record (killed between Write and Flush, or
+                // disk full) keeps a valid "record_type" prefix but breaks the
+                // whole envelope's JSON — reject it here instead of the backend
+                // 400-ing (and dead-lettering) the entire chunk over one bad line.
+                if (!LooksStructurallyComplete(line))
+                {
+                    droppedCount++;
+                    continue;
+                }
+
                 switch (recType)
                 {
                     case "event":   events.Add(line);  break;
@@ -425,6 +438,12 @@ namespace PlayScopeSdk.Internal
                     case "metric":  metrics.Add(line); break;
                     // Unknown record types are dropped silently
                 }
+            }
+
+            if (droppedCount > 0)
+            {
+                PlayScopeLog.Warning(
+                    $"BuildGzipPayload: dropped {droppedCount} structurally corrupt line(s) from {Path.GetFileName(chunkPath)}");
             }
 
             // Recovered chunks attribute to the crashed session via their bundled
@@ -546,6 +565,52 @@ namespace PlayScopeSdk.Internal
             int end = line.IndexOf('"', start);
             if (end < 0) return null;
             return line.Substring(start, end - start);
+        }
+
+        /// <summary>
+        /// True when a JSONL line's braces/brackets balance to zero outside of
+        /// string context. Guards against a line truncated mid-record — the
+        /// last line of a chunk written by a process killed between Write and
+        /// Flush (or a full disk) keeps a valid prefix but an unterminated tail.
+        /// Scan mirrors EventPipeline.CountTopLevelJsonKeys (inString/escape handling).
+        /// </summary>
+        private static bool LooksStructurallyComplete(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return false;
+
+            int end = line.Length;
+            while (end > 0 && (line[end - 1] == '\r' || char.IsWhiteSpace(line[end - 1]))) end--;
+            int start = 0;
+            while (start < end && char.IsWhiteSpace(line[start])) start++;
+
+            if (start >= end) return false;
+            if (line[start] != '{') return false;
+            if (line[end - 1] != '}') return false;
+
+            int depth = 0;
+            bool inString = false;
+            for (int i = start; i < end; i++)
+            {
+                char c = line[i];
+                if (inString)
+                {
+                    if (c == '\\' && i + 1 < end) { i++; continue; }
+                    if (c == '"') inString = false;
+                    continue;
+                }
+                switch (c)
+                {
+                    case '"': inString = true; break;
+                    case '{':
+                    case '[': depth++; break;
+                    case '}':
+                    case ']':
+                        depth--;
+                        if (depth < 0) return false;
+                        break;
+                }
+            }
+            return depth == 0 && !inString;
         }
 
         /// <summary>

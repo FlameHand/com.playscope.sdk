@@ -178,6 +178,14 @@ namespace Merge2048.App
                 PlayScope.EndHTTP(opId, OperationCompletionStatus.Cancelled);
                 return;
             }
+            catch (LeaderboardTimeoutException)
+            {
+                PlayScope.EndHTTP(opId, OperationCompletionStatus.Timeout, new Dictionary<string, object>
+                {
+                    ["timeout_ms"] = 5000,
+                });
+                return;
+            }
             catch (LeaderboardSubmitException ex)
             {
                 PlayScope.EndHTTP(opId, OperationCompletionStatus.Failure, new Dictionary<string, object>
