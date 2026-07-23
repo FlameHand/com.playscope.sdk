@@ -189,7 +189,10 @@ namespace PlayScopeSdk.Editor
                 {
                     continue;
                 }
-                var abiDstDir = Path.Combine(dstRootDir, "libs", abi.AbiDir);
+                // AssetDatabase paths must be forward-slash relative to the project;
+                // Path.Combine emits '\' on Windows, which makes ImportAsset/GetAtPath
+                // silently no-op and leaves the PluginImporter unconfigured.
+                var abiDstDir = Path.Combine(dstRootDir, "libs", abi.AbiDir).Replace('\\', '/');
                 string[] files;
                 try
                 {
@@ -256,7 +259,10 @@ namespace PlayScopeSdk.Editor
             }
 
             Directory.CreateDirectory(dstDir);
-            var dst = Path.Combine(dstDir, fileName);
+            // AssetDatabase paths must be forward-slash relative to the project;
+            // Path.Combine emits '\' on Windows, which makes ImportAsset/GetAtPath
+            // silently no-op and leaves the PluginImporter unconfigured.
+            var dst = Path.Combine(dstDir, fileName).Replace('\\', '/');
 
             // Compare byte-for-byte unless forceOverwrite is on (menu path).
             // The files are a few KB each; cost is negligible vs. the cost
@@ -265,6 +271,7 @@ namespace PlayScopeSdk.Editor
             var changed = forceOverwrite || !File.Exists(dst) || !ByteArraysEqual(srcBytes, File.ReadAllBytes(dst));
             if (!changed)
             {
+                EnsurePlatformImporterHealthy(dst, platform);
                 return 0;
             }
 
@@ -282,13 +289,9 @@ namespace PlayScopeSdk.Editor
             var importer = AssetImporter.GetAtPath(dst) as PluginImporter;
             if (importer != null)
             {
-                importer.SetCompatibleWithAnyPlatform(false);
-                importer.SetCompatibleWithEditor(false);
-                importer.SetCompatibleWithPlatform(BuildTarget.Android, platform == BuildTarget.Android);
-                importer.SetCompatibleWithPlatform(BuildTarget.iOS, platform == BuildTarget.iOS);
-                importer.SaveAndReimport();
+                ConfigurePlatformImporter(importer, platform);
             }
-            else if (verbose)
+            else
             {
                 Debug.LogWarning(
                     $"[PlayScope] Imported {dst} but couldn't read PluginImporter — " +
@@ -296,6 +299,47 @@ namespace PlayScopeSdk.Editor
             }
 
             return 1;
+        }
+
+        private static void ConfigurePlatformImporter(PluginImporter importer, BuildTarget platform)
+        {
+            importer.SetCompatibleWithAnyPlatform(false);
+            importer.SetCompatibleWithEditor(false);
+            importer.SetCompatibleWithPlatform(BuildTarget.Android, platform == BuildTarget.Android);
+            importer.SetCompatibleWithPlatform(BuildTarget.iOS, platform == BuildTarget.iOS);
+            importer.SaveAndReimport();
+        }
+
+        private static bool IsPlatformImporterHealthy(PluginImporter importer, BuildTarget platform)
+        {
+            return !importer.GetCompatibleWithAnyPlatform()
+                && !importer.GetCompatibleWithEditor()
+                && importer.GetCompatibleWithPlatform(BuildTarget.Android) == (platform == BuildTarget.Android)
+                && importer.GetCompatibleWithPlatform(BuildTarget.iOS) == (platform == BuildTarget.iOS);
+        }
+
+        // Self-heal: a consumer who last synced on Windows before the dst
+        // normalization fix above may already have a byte-identical file on
+        // disk sitting behind a broken/default PluginImporter — the !changed
+        // short-circuit would otherwise never touch it again.
+        private static void EnsurePlatformImporterHealthy(string dst, BuildTarget platform)
+        {
+            var importer = AssetImporter.GetAtPath(dst) as PluginImporter;
+            if (importer != null && IsPlatformImporterHealthy(importer, platform))
+            {
+                return;
+            }
+
+            AssetDatabase.ImportAsset(dst, ImportAssetOptions.ForceUpdate);
+            importer = AssetImporter.GetAtPath(dst) as PluginImporter;
+            if (importer == null)
+            {
+                Debug.LogWarning(
+                    $"[PlayScope] {dst} exists on disk but has no PluginImporter — " +
+                    "open the Inspector and set Include Platforms manually.");
+                return;
+            }
+            ConfigurePlatformImporter(importer, platform);
         }
 
         /// <summary>
@@ -319,12 +363,16 @@ namespace PlayScopeSdk.Editor
             }
 
             Directory.CreateDirectory(dstDir);
-            var dst = Path.Combine(dstDir, fileName);
+            // AssetDatabase paths must be forward-slash relative to the project;
+            // Path.Combine emits '\' on Windows, which makes ImportAsset/GetAtPath
+            // silently no-op and leaves the PluginImporter unconfigured.
+            var dst = Path.Combine(dstDir, fileName).Replace('\\', '/');
 
             var srcBytes = File.ReadAllBytes(src);
             var changed = forceOverwrite || !File.Exists(dst) || !ByteArraysEqual(srcBytes, File.ReadAllBytes(dst));
             if (!changed)
             {
+                EnsureAndroidNativeImporterHealthy(dst, cpu);
                 return 0;
             }
 
@@ -338,14 +386,9 @@ namespace PlayScopeSdk.Editor
             var importer = AssetImporter.GetAtPath(dst) as PluginImporter;
             if (importer != null)
             {
-                importer.SetCompatibleWithAnyPlatform(false);
-                importer.SetCompatibleWithEditor(false);
-                importer.SetCompatibleWithPlatform(BuildTarget.Android, true);
-                importer.SetCompatibleWithPlatform(BuildTarget.iOS, false);
-                importer.SetPlatformData(BuildTarget.Android, "CPU", cpu);
-                importer.SaveAndReimport();
+                ConfigureAndroidNativeImporter(importer, cpu);
             }
-            else if (verbose)
+            else
             {
                 Debug.LogWarning(
                     $"[PlayScope] Imported {dst} but couldn't read PluginImporter — " +
@@ -353,6 +396,49 @@ namespace PlayScopeSdk.Editor
             }
 
             return 1;
+        }
+
+        private static void ConfigureAndroidNativeImporter(PluginImporter importer, string cpu)
+        {
+            importer.SetCompatibleWithAnyPlatform(false);
+            importer.SetCompatibleWithEditor(false);
+            importer.SetCompatibleWithPlatform(BuildTarget.Android, true);
+            importer.SetCompatibleWithPlatform(BuildTarget.iOS, false);
+            importer.SetPlatformData(BuildTarget.Android, "CPU", cpu);
+            importer.SaveAndReimport();
+        }
+
+        private static bool IsAndroidNativeImporterHealthy(PluginImporter importer, string cpu)
+        {
+            return !importer.GetCompatibleWithAnyPlatform()
+                && !importer.GetCompatibleWithEditor()
+                && importer.GetCompatibleWithPlatform(BuildTarget.Android)
+                && !importer.GetCompatibleWithPlatform(BuildTarget.iOS)
+                && importer.GetPlatformData(BuildTarget.Android, "CPU") == cpu;
+        }
+
+        // Self-heal: a consumer who last synced on Windows before the dst
+        // normalization fix above may already have a byte-identical .so on
+        // disk sitting behind a broken/default PluginImporter — the !changed
+        // short-circuit would otherwise never touch it again.
+        private static void EnsureAndroidNativeImporterHealthy(string dst, string cpu)
+        {
+            var importer = AssetImporter.GetAtPath(dst) as PluginImporter;
+            if (importer != null && IsAndroidNativeImporterHealthy(importer, cpu))
+            {
+                return;
+            }
+
+            AssetDatabase.ImportAsset(dst, ImportAssetOptions.ForceUpdate);
+            importer = AssetImporter.GetAtPath(dst) as PluginImporter;
+            if (importer == null)
+            {
+                Debug.LogWarning(
+                    $"[PlayScope] {dst} exists on disk but has no PluginImporter — " +
+                    $"open the Inspector and set Include Platforms manually (Android, CPU={cpu}).");
+                return;
+            }
+            ConfigureAndroidNativeImporter(importer, cpu);
         }
 
         private static bool ByteArraysEqual(byte[] a, byte[] b)
